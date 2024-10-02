@@ -1,4 +1,4 @@
-package ai.graphcore.llamavisiondemo
+package ai.graphcore.squashedllama
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -17,10 +17,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            LlamaVisionDemoTheme {
+            CustomTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     Greeting(
-                        name = "Android",
+                        text = "Lib.meaning() = ${Lib.meaning()}",
                         modifier = Modifier.padding(innerPadding)
                     )
                 }
@@ -30,9 +30,9 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun Greeting(name: String, modifier: Modifier = Modifier) {
+fun Greeting(text: String, modifier: Modifier = Modifier) {
     Text(
-        text = "Hello $name!",
+        text = text,
         modifier = modifier
     )
 }
@@ -40,7 +40,7 @@ fun Greeting(name: String, modifier: Modifier = Modifier) {
 @Preview(showBackground = true)
 @Composable
 fun GreetingPreview() {
-    LlamaVisionDemoTheme {
-        Greeting("Android")
+    CustomTheme {
+        Greeting("Hello Preview")
     }
 }

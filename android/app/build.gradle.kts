@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "ai.graphcore.llamavisiondemo"
+    namespace = "ai.graphcore.squashedllama"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "ai.graphcore.llamavisiondemo"
+        applicationId = "ai.graphcore.squashedllama"
         minSdk = 34
         targetSdk = 34
         versionCode = 1

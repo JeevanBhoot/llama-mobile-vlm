@@ -19,5 +19,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "LlamaVisionDemo"
+rootProject.name = "SquashedLlama"
 include(":app")

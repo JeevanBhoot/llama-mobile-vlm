@@ -1,4 +1,4 @@
-package ai.graphcore.llamavisiondemo
+package ai.graphcore.squashedllama
 
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
@@ -43,7 +43,7 @@ private val LightColorScheme = lightColorScheme(
 )
 
 @Composable
-fun LlamaVisionDemoTheme(
+fun CustomTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     dynamicColor: Boolean = true,
     content: @Composable () -> Unit

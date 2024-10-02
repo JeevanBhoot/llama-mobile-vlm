@@ -8,11 +8,11 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.LlamaVisionDemo">
+        android:theme="@style/Theme.SquashedLlama">
         <activity
-            android:name=".MainActivity"
+            android:name="ai.graphcore.squashedllama.MainActivity"
             android:exported="true"
-            android:theme="@style/Theme.LlamaVisionDemo">
+            android:theme="@style/Theme.SquashedLlama">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

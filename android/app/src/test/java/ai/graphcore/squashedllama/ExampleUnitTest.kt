@@ -1,4 +1,4 @@
-package ai.graphcore.llamavisiondemo
+package ai.graphcore.squashedllama
 
 import org.junit.Test
 
