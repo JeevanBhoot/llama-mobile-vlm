@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any, Callable, Iterable, List, TypeVar
+
+sys.path.append("third-party")
+import ninja_syntax
+
+T = TypeVar("T")
+
+
+def run(command: Iterable[Any]) -> None:
+    """Run a command, terminating on failure."""
+    cmd = [str(arg) for arg in command if arg is not None]
+    print("$ " + " ".join(cmd), file=sys.stderr)
+    environ = os.environ.copy()
+    environ["PYTHONPATH"] = f"{os.getcwd()}:{environ.get('PYTHONPATH', '')}"
+    exit_code = subprocess.call(cmd, env=environ)
+    if exit_code:
+        sys.exit(exit_code)
+
+
+def run_on_device(command: Iterable[Any]) -> None:
+    """Run on an attached Android device"""
+    program, *args = command
+    device_program = f"/data/local/tmp/{Path(program).name}"
+    run(["adb", "push", program, device_program])
+    run(["adb", "shell", device_program, *args])
+
+
+def cli(*args: Any, **kwargs: Any) -> Callable[[T], T]:
+    """Declare a CLI command / arguments for that command."""
+
+    def wrap(func: T) -> T:
+        if not hasattr(func, "cli_args"):
+            setattr(func, "cli_args", [])
+        if args or kwargs:
+            getattr(func, "cli_args").append((args, kwargs))
+        return func
+
+    return wrap
+
+
+BUILD = Path("build")
+SRC = Path("src")
+ANDROID_NDK = Path("/opt/android-sdk/ndk/latest")
+PLATFORMS = ["release", "debug"] + (["android"] if ANDROID_NDK.exists() else [])
+
+
+@cli()
+def clean(platforms: List[str]) -> None:
+    """clean up generated files"""
+    for platform in platforms:
+        build = BUILD / platform
+        if build.exists():
+            shutil.rmtree(build)
+    if not list(BUILD.iterdir()):
+        BUILD.rmdir()
+
+
+def _generate_build_ninja(w: ninja_syntax.Writer, platform: str) -> None:
+    cxx = (
+        ANDROID_NDK / "toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
+        if platform == "android"
+        else os.getenv("CXX", "clang++")
+    )
+    flags, cxxflags, linkflags, libs = [], [], [], []
+    cxxflags += ["$flags"]
+    cxxflags += ["-Wall", "-Wextra", "-Wconversion", "-Wdouble-promotion", "-Werror"]
+    cxxflags += [f"-I$src", f"-isystem $third-party"]
+    cxxflags += ["-g", "-fPIC", "-std=c++17"]
+    cxxflags += ["-O0"] if "debug" in platform else ["-O3", "-DNDEBUG"]
+    cxxflags += ["-fdata-sections", "-ffunction-sections"]
+    linkflags += ["$flags"]
+    linkflags += ["-Wl,--gc-sections", "-Wl,--fatal-warnings", "-Wl,--no-undefined"]
+    if platform == "android":
+        flags += ["--target=aarch64-linux-android35"]
+        cxxflags += ["-DANDROID"]
+        linkflags += ["-static-libstdc++"]
+    if platform == "android":
+        libs += ["-llog"]
+
+    root_to_files = {}  # [root] -> (src, obj, {variable: value})
+    for root in ["", "tests", "programs"]:
+        root_to_files[root] = []
+        for cpp in (s.relative_to(SRC) for s in (SRC / root).glob("*.cpp")):
+            root_to_files[root] += [
+                (f"$src/{cpp}", f"$obj/{cpp.with_suffix('.o')}", {})
+            ]
+    catch_cxxflags = [
+        f for f in cxxflags if f not in ["-Wconversion", "-Wdouble-promotion"]
+    ]
+    root_to_files["catch"] = [
+        (
+            "$third-party/catch_amalgamated.cpp",
+            "$obj/catch/catch_amalgamated.o",
+            dict(cxxflags=catch_cxxflags),
+        )
+    ]
+
+    # Variables
+    w.variable("src", f"../../{SRC}")
+    w.variable("third-party", "../../third-party")
+    w.variable("obj", "obj")
+    w.variable("cxx", cxx)
+    w.variable("libs", libs)
+    w.variable("flags", flags)
+    w.variable("cxxflags", cxxflags)
+    w.variable("linkflags", linkflags)
+    w.newline()
+
+    # Rules
+    w.rule(
+        "compile",
+        command="$cxx -MMD -MT $out -MF $out.d $cxxflags -c $in -o $out",
+        description="CXX $out",
+        depfile="$out.d",
+        deps="gcc",
+    )
+    w.rule(
+        "linkexe",
+        command="$cxx $in $linkflags -o $out $libs",
+        description="LINKEXE $out",
+    )
+    w.rule(
+        "linkso",
+        command="$cxx $in $linkflags -shared -o $out $libs",
+        description="LINKSO $out",
+    )
+    w.newline()
+
+    # Objects
+    for cpp, obj, vars in (v for vs in root_to_files.values() for v in vs):
+        w.build(obj, "compile", cpp, variables=vars)
+    w.newline()
+
+    # Programs & shared libraries
+    for _, obj, _ in root_to_files["programs"]:
+        w.build(
+            f"{Path(obj).stem}",
+            "linkexe",
+            [obj] + [obj for _, obj, _ in root_to_files[""]],
+        )
+    w.build(
+        "tests",
+        "linkexe",
+        [obj for root in ["", "tests", "catch"] for _, obj, _ in root_to_files[root]],
+    )
+    w.build(
+        "libsquashed-llama.so",
+        "linkso",
+        [obj for _, obj, _ in root_to_files[""]],
+    )
+
+
+@cli("targets", nargs="*", help="build targets")
+def build(platforms: List[str], targets: List[str]) -> None:
+    """build C++ code"""
+    for platform in platforms:
+        root = BUILD / platform
+        root.mkdir(parents=True, exist_ok=True)
+        with (root / "build.ninja").open("w") as file:
+            _generate_build_ninja(ninja_syntax.Writer(file), platform)
+        run(["ninja", "-C", root, *targets])
+
+
+@cli(
+    "args",
+    nargs="*",
+    help="arguments for Catch2"
+    "(https://github.com/catchorg/Catch2/blob/devel/docs/command-line.md)",
+)
+def tests(platforms: List[str], args: List[str]) -> None:
+    """run unit tests"""
+    build(platforms=platforms, targets=["tests"])
+    for platform in platforms:
+        runner = run_on_device if platform == "android" else run
+        runner([BUILD / platform / "tests", *args])
+
+
+def _main() -> None:
+    # Build an argparse command line by finding globals in the current module
+    # that are marked via the @cli() decorator. Each one becomes a subcommand
+    # running that function, usage "$ ./dev fn_name ...args".
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "-p",
+        "--platform",
+        choices=PLATFORMS + ["all"],
+        action="append",
+        dest="platforms",
+        help=f"platforms to build (default: [{PLATFORMS[0]}])",
+    )
+    parser.set_defaults(_action=lambda platforms: tests(platforms=platforms, args=[]))
+
+    subs = parser.add_subparsers()
+    for key, value in globals().items():
+        if hasattr(value, "cli_args"):
+            sub = subs.add_parser(key.replace("_", "-"), help=value.__doc__)
+            for args, kwargs in value.cli_args:
+                sub.add_argument(*args, **kwargs)
+            sub.set_defaults(_action=value)
+
+    cli_args = vars(parser.parse_args())
+    if not cli_args["platforms"]:
+        cli_args["platforms"] = [PLATFORMS[0]]
+    elif "all" in cli_args["platforms"]:
+        cli_args["platforms"] = PLATFORMS
+    _action = cli_args.pop("_action")
+    _action(**cli_args)
+
+
+if __name__ == "__main__":
+    _main()
