@@ -5,7 +5,7 @@ This is a monorepo for squashed llama work.
  - [`/android`](android) - client demo app for Android phones (Kotlin)
  - [`/inference`](inference) - on-device inference library (C++)
  - [`/notebooks`](https://github.com/graphcore-research/squashed-llama/tree/notebooks) (branch) - notes and reports (IPython)
- - `/training` - on-server quantisation & training (PyTorch)
+ - [`/training`](training) - on-server quantisation & training (PyTorch)
 
 For notebooks, we recommend:
 
