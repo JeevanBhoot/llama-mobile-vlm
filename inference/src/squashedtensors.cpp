@@ -17,8 +17,8 @@ constexpr auto BufferChunkSize = 4096u;
 
 using json = nlohmann::json;
 
-ulong align(ulong index, uint alignment) {
-    return alignment * (index + alignment - 1) / alignment;
+ulong align(ulong index, ulong alignment) {
+    return alignment * ((index + alignment - 1) / alignment);
 }
 
 void checkRAM(ulong bufferSize) {
@@ -65,7 +65,7 @@ Model sqt_load(std::istream& in) {
     auto header = json::parse(headerStr);
     auto metadata = header["__metadata__"];
     header.erase("__metadata__");
-    auto alignment = metadata["alignment"].template get<uint>();
+    auto alignment = metadata["alignment"].template get<ulong>();
 
     // Buffer
     auto bufferLength = ulong(0);

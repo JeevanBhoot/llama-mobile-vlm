@@ -83,7 +83,7 @@ struct Model {
     // Metadata
     std::string source;
     std::string created;
-    uint alignment;
+    ulong alignment;
 
     // Config
     uint dLayers;
@@ -129,7 +129,11 @@ struct Generator {
 /// Implementations ///
 
 inline Buffer::Buffer(ulong size, ulong alignment)
-    : _data(reinterpret_cast<char*>(std::aligned_alloc(alignment, size))) {}
+    : _data(reinterpret_cast<char*>(std::aligned_alloc(alignment, size))) {
+    if (!_data) {
+        throw std::runtime_error("Allocation failed");
+    }
+}
 inline Buffer::Buffer(Buffer&& other) : _data(other._data) {
     other._data = nullptr;
 }

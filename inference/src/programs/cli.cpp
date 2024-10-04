@@ -11,7 +11,11 @@ int main(int argc, char** argv) {
     std::ifstream modelFile(argv[1]);
     squash::Timer timer;
     auto model = squash::sqt_load(modelFile);
-    std::cerr << "Loaded " << model.source << " in " << timer.elapsed() << " s" << std::endl;
-    SQDUMP(model.layers[5].mlp.up);
+    auto generator = squash::Generator(model);
+    std::cerr << "Loaded " << model.source << " in " << timer.elapsed() << " s\n";
+    timer = squash::Timer();
+    auto next = generator.prefill({128000, 791, 7438, 374}, 1u);
+    std::cerr << "Prefill in " << timer.elapsed() << " s\n";
+    std::cerr << " -> " << next << "\n";
     return 0;
 }
