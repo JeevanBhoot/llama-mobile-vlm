@@ -47,6 +47,7 @@ def save(
             created=datetime.datetime.now().isoformat(timespec="seconds"),
             alignment=alignment,
             config=dict(
+                d_layers=model.config.num_hidden_layers,
                 d_vocab=model.config.vocab_size,
                 d_model=model.config.hidden_size,
                 d_ffn=model.config.intermediate_size,
