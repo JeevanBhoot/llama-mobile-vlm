@@ -1,4 +1,4 @@
-#include "lib.hpp"
+#include "squash.hpp"
 
 namespace squash {
 int meaning() {

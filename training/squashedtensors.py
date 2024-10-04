@@ -50,7 +50,7 @@ def save(
                 d_layers=model.config.num_hidden_layers,
                 d_vocab=model.config.vocab_size,
                 d_model=model.config.hidden_size,
-                d_ffn=model.config.intermediate_size,
+                d_mlp=model.config.intermediate_size,
                 d_attention_head=model.config.head_dim,
                 d_attention_q=model.config.num_attention_heads
                 // model.config.num_key_value_heads,

@@ -14,7 +14,7 @@ import ninja_syntax
 T = TypeVar("T")
 
 
-def run(command: Iterable[Any]) -> None:
+def _run(command: Iterable[Any]) -> None:
     """Run a command, terminating on failure."""
     cmd = [str(arg) for arg in command if arg is not None]
     print("$ " + " ".join(cmd), file=sys.stderr)
@@ -25,12 +25,12 @@ def run(command: Iterable[Any]) -> None:
         sys.exit(exit_code)
 
 
-def run_on_device(command: Iterable[Any]) -> None:
+def _run_on_device(command: Iterable[Any]) -> None:
     """Run on an attached Android device"""
     program, *args = command
-    device_program = f"/data/local/tmp/{Path(program).name}"
-    run(["adb", "push", program, device_program])
-    run(["adb", "shell", device_program, *args])
+    _run(["adb", "push", program, f"/data/local/tmp/{Path(program).name}"])
+    args_str = " ".join(str(arg) for arg in args if arg is not None)
+    _run(["adb", "shell", f"cd /data/local/tmp && ./{Path(program).name} {args_str}"])
 
 
 def cli(*args: Any, **kwargs: Any) -> Callable[[T], T]:
@@ -40,7 +40,7 @@ def cli(*args: Any, **kwargs: Any) -> Callable[[T], T]:
         if not hasattr(func, "cli_args"):
             setattr(func, "cli_args", [])
         if args or kwargs:
-            getattr(func, "cli_args").append((args, kwargs))
+            getattr(func, "cli_args").insert(0, (args, kwargs))
         return func
 
     return wrap
@@ -70,10 +70,10 @@ def _generate_build_ninja(w: ninja_syntax.Writer, platform: str) -> None:
         else os.getenv("CXX", "clang++")
     )
     flags, cxxflags, linkflags, libs = [], [], [], []
-    cxxflags += ["$flags"]
+    cxxflags += ["$flags", "-fcolor-diagnostics"]
     cxxflags += ["-Wall", "-Wextra", "-Wconversion", "-Wdouble-promotion", "-Werror"]
     cxxflags += [f"-I$src", f"-isystem $third-party"]
-    cxxflags += ["-g", "-fPIC", "-std=c++17"]
+    cxxflags += ["-g", "-fPIC", "-std=c++20"]
     cxxflags += ["-O0"] if "debug" in platform else ["-O3", "-DNDEBUG"]
     cxxflags += ["-fdata-sections", "-ffunction-sections"]
     linkflags += ["$flags"]
@@ -166,7 +166,7 @@ def build(platforms: List[str], targets: List[str]) -> None:
         root.mkdir(parents=True, exist_ok=True)
         with (root / "build.ninja").open("w") as file:
             _generate_build_ninja(ninja_syntax.Writer(file), platform)
-        run(["ninja", "-C", root, *targets])
+        _run(["ninja", "-C", root, *targets])
 
 
 @cli(
@@ -177,10 +177,17 @@ def build(platforms: List[str], targets: List[str]) -> None:
 )
 def tests(platforms: List[str], args: List[str]) -> None:
     """run unit tests"""
-    build(platforms=platforms, targets=["tests"])
+    run(platforms=platforms, program="tests", args=args)
+
+
+@cli("program", help="program to run (see src/programs)")
+@cli("args", nargs="*", help="arguments")
+def run(platforms: List[str], program: str, args: List[str]) -> None:
+    """build and run the given program"""
+    build(platforms=platforms, targets=[program])
     for platform in platforms:
-        runner = run_on_device if platform == "android" else run
-        runner([BUILD / platform / "tests", *args])
+        runner = _run_on_device if platform == "android" else _run
+        runner([BUILD / platform / program, *args])
 
 
 def _main() -> None:
