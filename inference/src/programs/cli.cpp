@@ -12,7 +12,6 @@ int main(int argc, char** argv) {
     squash::Timer timer;
     auto model = squash::sqt_load(modelFile);
     std::cerr << "Loaded " << model.source << " in " << timer.elapsed() << " s" << std::endl;
-    SQDUMP(squash::bf16ToFloat(
-        std::get<squash::tensor_data::BF16>(model.layers[5].mlp.up.data).data[0]));
+    SQDUMP(model.layers[5].mlp.up);
     return 0;
 }

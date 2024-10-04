@@ -74,9 +74,9 @@ Model sqt_load(std::istream& in) {
             std::max(bufferLength, align(x["data_offsets"][1].template get<ulong>(), alignment));
     }
     checkRAM(bufferLength);
-    std::unique_ptr<char[]> parameterData(new char[bufferLength]);
+    Buffer _data(bufferLength, alignment);
     for (auto i = ulong(0); i < bufferLength; i += BufferChunkSize) {
-        in.read(parameterData.get() + i,
+        in.read(_data.get() + i,
                 static_cast<std::streamsize>(std::min(i + BufferChunkSize, bufferLength) - i));
     }
 
@@ -97,7 +97,7 @@ Model sqt_load(std::istream& in) {
             throw std::runtime_error(err.str());
         }
         return TensorV{
-            tensor_data::BF16(reinterpret_cast<bf16*>(parameterData.get() + offset)),
+            tensor_data::Flat(reinterpret_cast<bf16*>(_data.get() + offset)),
             entry["shape"].template get<std::vector<uint>>(),
         };
     };
@@ -147,7 +147,7 @@ Model sqt_load(std::istream& in) {
         .finalNorm = loadTensorV("norm"),
 
         // Data
-        ._parameterData = std::move(parameterData),
+        ._data = std::move(_data),
     };
 };
 

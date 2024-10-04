@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <numeric>
 #include <variant>
 #include <vector>
 
@@ -11,28 +12,44 @@
 
 namespace squash {
 
-// Common
+/// Common ///
 
 using uint = uint32_t;
 using ulong = uint64_t;
 using bf16 = int16_t;
 
+struct Buffer {
+    Buffer(ulong size, ulong alignment);
+    Buffer(Buffer&&);
+    Buffer& operator=(Buffer&&);
+    ~Buffer();
+    char* get() const;
+    void reset();
+
+   private:
+    char* _data;
+};
+
 float bf16ToFloat(bf16 value);
+uint prod(const std::vector<uint>&);
 
 namespace tensor_data {
-
-struct BF16 {
-    bf16* data;
-    BF16(bf16* data = nullptr) : data(data) {}
+template <class T>
+struct Flat {
+    T* data;
+    Flat(T* data = nullptr) : data(data) {}
 };
-
 }  // namespace tensor_data
 
-// TensorV is a non-owning "tensor view"
+// TensorV is a non-owning Tensor view
 struct TensorV {
-    std::variant<tensor_data::BF16> data;
+    std::variant<tensor_data::Flat<bf16>, tensor_data::Flat<float>> data;
     std::vector<uint> shape;
 };
+struct Tensor : TensorV {
+    Buffer _data;
+};
+std::ostream& operator<<(std::ostream&, const TensorV&);
 
 struct Timer {
     typedef std::chrono::high_resolution_clock clock;
@@ -41,8 +58,9 @@ struct Timer {
     double elapsed() const;
 };
 
-// Model
+/// Model ///
 
+// The model holds all shape and parameter data (views onto an underlying buffer)
 struct Model {
     struct AttentionLayer {
         TensorV norm;
@@ -85,17 +103,54 @@ struct Model {
     TensorV finalNorm;
 
     // Data
-    std::unique_ptr<char[]> _parameterData;
+    Buffer _data;
 };
 
 Model sqt_load(std::istream&);
 
-// Temporary
+/// Generator ///
 
-int meaning();
+// The generator holds a KV cache and executes batch=1 inference
+// Note that it references Model, which must outlive it
+struct Generator {
+    struct Cache {
+        Tensor key;
+        Tensor value;
+    };
+    Model& model;
+    std::vector<Cache> cache;
+
+    explicit Generator(Model&);
+    uint prefill(const std::vector<uint>& prefix, uint maxGeneratedTokens);
+    uint generate();
+};
 
 ///////////////////////////////////////////////////////////////////////////////
-// Implementations
+/// Implementations ///
+
+inline Buffer::Buffer(ulong size, ulong alignment)
+    : _data(reinterpret_cast<char*>(std::aligned_alloc(alignment, size))) {}
+inline Buffer::Buffer(Buffer&& other) : _data(other._data) {
+    other._data = nullptr;
+}
+inline Buffer& Buffer::operator=(Buffer&& other) {
+    reset();
+    this->_data = other._data;
+    other._data = nullptr;
+    return *this;
+}
+inline Buffer::~Buffer() {
+    reset();
+}
+inline void Buffer::reset() {
+    if (_data) {
+        std::free(_data);
+        _data = nullptr;
+    }
+}
+inline char* Buffer::get() const {
+    return _data;
+}
 
 inline float bf16ToFloat(bf16 value) {
     union {
@@ -105,6 +160,10 @@ inline float bf16ToFloat(bf16 value) {
     u.i[0] = 0;
     u.i[1] = value;
     return u.f;
+}
+
+inline uint prod(const std::vector<uint>& x) {
+    return std::accumulate(x.begin(), x.end(), 1u, std::multiplies<uint>());
 }
 
 inline Timer::Timer() : start(clock::now()) {}
