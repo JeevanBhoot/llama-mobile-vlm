@@ -102,13 +102,16 @@ TEST_CASE("squash::Generator", "[squash]") {
     }
 
     // Generate from the model
-    auto generationCount = 10u;
+    auto generationCount = 4u;
     Generator generator(m);
     std::vector<uint> tokens({10, 20, 30});
     tokens.push_back(generator.prefill(tokens, generationCount));
     for (auto i = 0u; i < generationCount; ++i) {
         tokens.push_back(generator.generate());
     }
-    std::copy(tokens.begin(), tokens.end(), std::ostream_iterator<uint>(std::cerr, ", "));
-    std::cerr << "\n";
+    // std::cerr << dump(tokens) << "\n";
+
+    // An empirical match; may not be portable
+    REQUIRE_THAT(tokens,
+                 Catch::Matchers::Equals(std::vector<uint>({10, 20, 30, 166, 90, 83, 90, 83})));
 }

@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <iostream>
 #include <memory>
 #include <numeric>
 #include <variant>
@@ -18,6 +19,24 @@ using bf16 = int16_t;
 float bf16ToFloat(bf16 value);
 uint prod(const std::vector<uint>&);
 
+struct Timer {
+    typedef std::chrono::high_resolution_clock clock;
+    clock::time_point start;
+    Timer();
+    double elapsed() const;
+};
+
+template <class T>
+struct Dump {
+    const T& sequence;
+};
+template <class T>
+Dump<T> dump(const T&);
+template <class T>
+std::ostream& operator<<(std::ostream&, const Dump<T>&);
+
+/// Tensor ///
+
 struct Buffer {
     Buffer(ulong size, ulong alignment);
     Buffer(Buffer&&);
@@ -29,15 +48,6 @@ struct Buffer {
    private:
     char* _data;
 };
-
-struct Timer {
-    typedef std::chrono::high_resolution_clock clock;
-    clock::time_point start;
-    Timer();
-    double elapsed() const;
-};
-
-/// Tensor ///
 
 namespace tensor_data {
 template <class T>
@@ -114,12 +124,18 @@ Model sqt_load(std::istream&);
 // The generator holds a KV cache and executes batch=1 inference
 // Note that it references Model, which must outlive it
 struct Generator {
-    struct Cache {
-        Tensor key;
-        Tensor value;
+    struct KVCache {
+        struct Entry {
+            Tensor key;
+            Tensor value;
+        };
+        std::vector<Entry> entries;
+        uint dSequence;
+        uint dSequenceMax;
     };
     Model& model;
-    std::vector<Cache> cache;
+    KVCache kvCache;
+    uint prevToken;
 
     explicit Generator(Model&);
     uint prefill(const std::vector<uint>& prefix, uint maxGeneratedTokens);

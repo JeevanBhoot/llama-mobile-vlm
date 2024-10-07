@@ -5,6 +5,10 @@
 
 namespace squash::ops {
 
+void copy(const float* src, uint n, float* dest) {
+    std::copy_n(src, n, dest);
+}
+
 void addInPlace(float* __restrict__ x, const float* __restrict__ y, const uint n) {
     for (auto i = 0u; i < n; ++i) {
         x[i] += y[i];
@@ -53,8 +57,8 @@ void selfAttentionInPlace(float* __restrict__ queryOut,
                           const float* __restrict__ value,
                           const uint dSq,
                           const uint dSkv,
-                          const uint dHkv,
                           const uint dHq,
+                          const uint dHkv,
                           const uint dim) {
     const auto offsetS = 1 + dSkv - dSq;
     std::unique_ptr<float[]> scores(new float[dSkv]);

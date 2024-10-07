@@ -1,7 +1,7 @@
 #include "squash.hpp"
 
 // Development only
-#define SQDUMP(obj) std::cerr << __FILE__ << ":" << __LINE__ << " " << obj << std::endl;
+#define DUMPSQ(obj) std::cerr << __FILE__ << ":" << __LINE__ << " " << obj << std::endl;
 
 namespace squash {
 
@@ -19,6 +19,26 @@ inline float bf16ToFloat(bf16 value) {
 
 inline uint prod(const std::vector<uint>& x) {
     return std::accumulate(x.begin(), x.end(), 1u, std::multiplies<uint>());
+}
+
+inline Timer::Timer() : start(clock::now()) {}
+
+inline double Timer::elapsed() const {
+    return std::chrono::duration_cast<std::chrono::duration<double>>(clock::now() - start).count();
+}
+
+template <class T>
+Dump<T> dump(const T& sequence) {
+    return {sequence};
+}
+
+template <class T>
+std::ostream& operator<<(std::ostream& out, const Dump<T>& x) {
+    for (auto i = 0u; i < x.sequence.size(); ++i) {
+        if (i) out << ", ";
+        out << x.sequence[i];
+    }
+    return out;
 }
 
 /// Buffer ///
@@ -54,14 +74,6 @@ inline void Buffer::reset() {
 
 inline char* Buffer::get() const {
     return _data;
-}
-
-/// Timer ///
-
-inline Timer::Timer() : start(clock::now()) {}
-
-inline double Timer::elapsed() const {
-    return std::chrono::duration_cast<std::chrono::duration<double>>(clock::now() - start).count();
 }
 
 }  // namespace squash
