@@ -7,9 +7,6 @@
 #include <variant>
 #include <vector>
 
-// Development only
-#define SQDUMP(obj) std::cerr << __FILE__ << ":" << __LINE__ << " " << obj << std::endl;
-
 namespace squash {
 
 /// Common ///
@@ -17,6 +14,9 @@ namespace squash {
 using uint = uint32_t;
 using ulong = uint64_t;
 using bf16 = int16_t;
+
+float bf16ToFloat(bf16 value);
+uint prod(const std::vector<uint>&);
 
 struct Buffer {
     Buffer(ulong size, ulong alignment);
@@ -30,8 +30,14 @@ struct Buffer {
     char* _data;
 };
 
-float bf16ToFloat(bf16 value);
-uint prod(const std::vector<uint>&);
+struct Timer {
+    typedef std::chrono::high_resolution_clock clock;
+    clock::time_point start;
+    Timer();
+    double elapsed() const;
+};
+
+/// Tensor ///
 
 namespace tensor_data {
 template <class T>
@@ -46,17 +52,12 @@ struct TensorV {
     std::variant<tensor_data::Flat<bf16>, tensor_data::Flat<float>> data;
     std::vector<uint> shape;
 };
+
 struct Tensor : TensorV {
     Buffer _data;
 };
-std::ostream& operator<<(std::ostream&, const TensorV&);
 
-struct Timer {
-    typedef std::chrono::high_resolution_clock clock;
-    clock::time_point start;
-    Timer();
-    double elapsed() const;
-};
+std::ostream& operator<<(std::ostream&, const TensorV&);
 
 /// Model ///
 
@@ -125,55 +126,6 @@ struct Generator {
     uint generate();
 };
 
-///////////////////////////////////////////////////////////////////////////////
-/// Implementations ///
-
-inline Buffer::Buffer(ulong size, ulong alignment)
-    : _data(reinterpret_cast<char*>(std::aligned_alloc(alignment, size))) {
-    if (!_data) {
-        throw std::runtime_error("Allocation failed");
-    }
-}
-inline Buffer::Buffer(Buffer&& other) : _data(other._data) {
-    other._data = nullptr;
-}
-inline Buffer& Buffer::operator=(Buffer&& other) {
-    reset();
-    this->_data = other._data;
-    other._data = nullptr;
-    return *this;
-}
-inline Buffer::~Buffer() {
-    reset();
-}
-inline void Buffer::reset() {
-    if (_data) {
-        std::free(_data);
-        _data = nullptr;
-    }
-}
-inline char* Buffer::get() const {
-    return _data;
-}
-
-inline float bf16ToFloat(bf16 value) {
-    union {
-        float f;
-        int16_t i[2];
-    } u;
-    u.i[0] = 0;
-    u.i[1] = value;
-    return u.f;
-}
-
-inline uint prod(const std::vector<uint>& x) {
-    return std::accumulate(x.begin(), x.end(), 1u, std::multiplies<uint>());
-}
-
-inline Timer::Timer() : start(clock::now()) {}
-
-inline double Timer::elapsed() const {
-    return std::chrono::duration_cast<std::chrono::duration<double>>(clock::now() - start).count();
-}
-
 }  // namespace squash
+
+#include "squash.impl.hpp"

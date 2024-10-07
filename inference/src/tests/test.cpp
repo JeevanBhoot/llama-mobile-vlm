@@ -104,8 +104,8 @@ TEST_CASE("squash::Generator", "[squash]") {
     // Generate from the model
     auto generationCount = 10u;
     Generator generator(m);
-    std::vector<uint> tokens;
-    tokens.push_back(generator.prefill({10, 20, 30}, generationCount));
+    std::vector<uint> tokens({10, 20, 30});
+    tokens.push_back(generator.prefill(tokens, generationCount));
     for (auto i = 0u; i < generationCount; ++i) {
         tokens.push_back(generator.generate());
     }
