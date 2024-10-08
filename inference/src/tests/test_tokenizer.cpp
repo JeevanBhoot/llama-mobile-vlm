@@ -40,13 +40,20 @@ TEST_CASE("squash::impl::encodeBytesForBPE", "[squash]") {
 }
 
 TEST_CASE("squash::Tokenizer", "[squash]") {
+    std::regex preTokenizer(" |[[:alpha:]]+");
     std::vector<std::string> vocab({"Ġ", "a", "c", "h", "t", "s",  //
-                                    "at", "ha", "cat", "cats"});
-    Tokenizer tokenizer(std::regex(" |[[:alpha:]]+"), {"at", "ha", "cats", "cat"},
-                        std::vector<std::string>(vocab));
+                                    "at", "ha", "cat", "cats", "tat"});
+    std::vector<std::string> mergeRules({"at", "ha", "cats", "cat"});
 
-    std::string original = "a hat haa catcats";
-    std::vector<std::string> expected({"a", "Ġ", "h", "at", "Ġ", "ha", "a", "Ġ", "cat", "cats"});
+    // - "hat" tests precedence "at" before "ha"
+    // - " " tests byte encoding mapping
+    // - "catcats" tests multiple merges
+    // - "tat" tests whole-token matching, without using merge rules
+    std::string original = "a hat haa catcats tat";
+    std::vector<std::string> expected(
+        {"a", "Ġ", "h", "at", "Ġ", "ha", "a", "Ġ", "cat", "cats", "Ġ", "tat"});
+
+    Tokenizer tokenizer(preTokenizer, mergeRules, std::vector<std::string>(vocab));
     auto tokens = tokenizer.encode(original);
     for (auto i = 0u; i < std::min(expected.size(), tokens.size()); ++i) {
         REQUIRE(vocab.at(tokens[i]) == expected[i]);

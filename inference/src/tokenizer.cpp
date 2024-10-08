@@ -199,15 +199,22 @@ struct Tokenizer::Impl {
         std::vector<uint> tokens;
         for (auto it = std::sregex_token_iterator(s.begin(), s.end(), preTokenizer);
              it != std::sregex_token_iterator(); ++it) {
-            tokenizeBPE(mergeToRank, impl::encodeBytesForBPE(*it), [&](const std::string& token) {
-                auto it = tokenToID.find(token);
-                if (it == tokenToID.end()) {
-                    std::ostringstream err;
-                    err << "Could not find token \"" << token << "\"";
-                    throw std::runtime_error(err.str());
-                }
-                tokens.push_back(it->second);
-            });
+            auto encoded = impl::encodeBytesForBPE(*it);
+            auto match = tokenToID.find(encoded);
+            if (match != tokenToID.end()) {
+                tokens.push_back(match->second);
+            } else {
+                tokenizeBPE(mergeToRank, impl::encodeBytesForBPE(*it),
+                            [&](const std::string& token) {
+                                auto match = tokenToID.find(token);
+                                if (match == tokenToID.end()) {
+                                    std::ostringstream err;
+                                    err << "Could not find token \"" << token << "\"";
+                                    throw std::runtime_error(err.str());
+                                }
+                                tokens.push_back(match->second);
+                            });
+            }
         }
         return tokens;
     }
