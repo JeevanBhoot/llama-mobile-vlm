@@ -117,7 +117,10 @@ struct Model {
     Buffer _data;
 };
 
-Model sqt_load(std::istream&);
+Model loadSquashedTensors(std::istream&);
+namespace impl {
+std::string regexUnicodeToModifiedECMA(const std::string&);
+}  // namespace impl
 
 /// Generator ///
 
@@ -144,4 +147,4 @@ struct Generator {
 
 }  // namespace squash
 
-#include "squash.impl.hpp"
+#include "squash_impl.hpp"

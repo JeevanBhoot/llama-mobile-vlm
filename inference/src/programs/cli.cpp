@@ -10,7 +10,7 @@ int main(int argc, char** argv) {
     }
     std::ifstream modelFile(argv[1]);
     squash::Timer timer;
-    auto model = squash::sqt_load(modelFile);
+    auto model = squash::loadSquashedTensors(modelFile);
     auto generator = squash::Generator(model);
     std::cerr << "Loaded " << model.source << " (" << timer.elapsed() << " s)\n";
 

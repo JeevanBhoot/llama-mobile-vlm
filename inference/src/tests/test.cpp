@@ -1,6 +1,6 @@
 #include <catch_amalgamated.hpp>
-#include <iostream>
 #include <random>
+#include <regex>
 
 #include "squash.hpp"
 
@@ -9,6 +9,26 @@ using namespace squash;
 TEST_CASE("squash::bf16ToFloat", "[squash]") {
     REQUIRE(bf16ToFloat(0x4147) == 12.4375f);
     REQUIRE(bf16ToFloat(-0x3f80) == -4.0f);
+}
+
+TEST_CASE("squash::impl::regexUnicodeToModifiedECMA", "[squash]") {
+    REQUIRE(impl::regexUnicodeToModifiedECMA(R"((?i:foo)|\p{L}+|[-\p{N}_#]+)") ==
+            R"((foo)|[[:alpha:]]+|[-[:digit:]_#]+)");
+    // Escaped \[ and \] shouldn't count as nesting
+    REQUIRE(impl::regexUnicodeToModifiedECMA(R"(\[\p{L}\])") == R"(\[[[:alpha:]]\])");
+
+    // This is the pattern we expect for Llama 3.2
+    std::regex pattern(impl::regexUnicodeToModifiedECMA(
+        R"((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3})"
+        R"(| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+)"));
+
+    std::string s = "This ISN'T my number:     1234567890.\n\nSuperfluously λ \x7f!!!!!";
+    std::vector<std::string> expected({"This", " ISN", "'T", " my", " number", ":", "    ", " ",
+                                       "123", "456", "789", "0", ".\n\n", "Superfluously", " λ",
+                                       " \x7f!!!!!"});
+    std::vector<std::string> parts(std::sregex_token_iterator(s.begin(), s.end(), pattern),
+                                   std::sregex_token_iterator());
+    REQUIRE_THAT(parts, Catch::Matchers::Equals(expected));
 }
 
 namespace {
@@ -109,9 +129,14 @@ TEST_CASE("squash::Generator", "[squash]") {
     for (auto i = 0u; i < generationCount; ++i) {
         tokens.push_back(generator.generate());
     }
-    // std::cerr << dump(tokens) << "\n";
 
-    // An empirical match; may not be portable
-    REQUIRE_THAT(tokens,
-                 Catch::Matchers::Equals(std::vector<uint>({10, 20, 30, 166, 90, 83, 90, 83})));
+    // An empirical match; non-portable
+    // std::cerr << dump(tokens) << "\n";
+    std::vector<uint> expected;
+#ifdef ANDROID
+    expected = {10, 20, 30, 147, 30, 147, 30, 147};
+#else
+    expected = {10, 20, 30, 166, 90, 83, 90, 83};
+#endif  //_ANDROID
+    REQUIRE_THAT(tokens, Catch::Matchers::Equals(expected));
 }

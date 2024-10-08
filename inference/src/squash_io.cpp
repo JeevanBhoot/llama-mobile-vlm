@@ -3,6 +3,7 @@
 #include <sys/sysinfo.h>
 #include <iostream>
 #include <json.hpp>
+#include <regex>
 #include <sstream>
 
 #include "squash.hpp"
@@ -39,7 +40,44 @@ void checkRAM(ulong bufferSize) {
 
 }  // namespace
 
-Model sqt_load(std::istream& in) {
+namespace impl {
+// Convert a subset of unicode/Python regexes to C++ (modified ECMAScript) compatible
+// regexes. In particular, remove "?i:", and convert \p{N} -> [:digit:],
+// \p{L} -> [:alpha:].
+std::string regexUnicodeToModifiedECMA(const std::string& original) {
+    std::string modified = std::regex_replace(original, std::regex(R"(\?i:)"), "");
+
+    // Add "fat" character classes "[[:NAME:]]", which we will slim down later
+    modified = std::regex_replace(modified, std::regex(R"(\\p\{N\})"), "[[:digit:]]");
+    modified = std::regex_replace(modified, std::regex(R"(\\p\{L\})"), "[[:alpha:]]");
+
+    // Scan through the pattern, converting [[:NAME:]] -> [:NAME:] whenever it's
+    // already contained in a character class
+    auto i = 0u;
+    auto nesting = 0u;
+    while (i < modified.size()) {
+        auto next2 = modified.substr(i, 2);
+        auto next3 = modified.substr(i, 3);
+        if (next2 == "\\[" || next2 == "\\]") {
+            i += 2;
+        } else if (next3 == "[[:" || next3 == ":]]") {
+            if (nesting) {
+                modified.erase(i + 1, 1);
+                i += 2;
+            } else {
+                i += 3;
+            }
+        } else {
+            nesting += (modified[i] == '[');
+            nesting -= (modified[i] == ']');
+            i++;
+        }
+    }
+    return modified;
+}
+}  // namespace impl
+
+Model loadSquashedTensors(std::istream& in) {
     // Preamble
     char preamble[16];
     in.read(preamble, 16);
