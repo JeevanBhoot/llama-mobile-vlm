@@ -49,8 +49,16 @@ inline bf16 floatToBf16_truncate(float value) {
 }
 }  // namespace
 
-TEST_CASE("squash::Generator", "[squash]") {
+TEST_CASE("squash::TextGenerator", "[squash]") {
     constexpr auto alignment = 32u;
+
+    // Create vocab
+    std::vector<std::string> vocab;
+    for (auto i = 0u; i < 256 - 2; ++i) {
+        std::ostringstream token;
+        token << "_" << i;
+        vocab.push_back(token.str());
+    }
     Model m{
         // Metadata
         .source = "test",
@@ -58,7 +66,7 @@ TEST_CASE("squash::Generator", "[squash]") {
         .alignment = alignment,
         // Config
         .dLayers = 3,
-        .dVocab = 256,
+        .dVocab = uint(vocab.size() + 2),
         .dModel = 128,
         .dMLP = 512,
         .dAttentionHead = 64,
@@ -71,6 +79,10 @@ TEST_CASE("squash::Generator", "[squash]") {
         .embedTokens = {},
         .layers = {},
         .finalNorm = {},
+        // Vocab
+        .tokenizer = Tokenizer(std::regex("_[0-9]+"), {}, std::vector<std::string>(vocab)),
+        .beginOfTextID = uint(vocab.size()),
+        .endOfTextID = uint(vocab.size() + 1),
         // Data
         ._data = Buffer(0, alignment),
     };
@@ -122,21 +134,18 @@ TEST_CASE("squash::Generator", "[squash]") {
     }
 
     // Generate from the model
-    auto generationCount = 4u;
+    auto generationCount = 5u;
     Generator generator(m);
-    std::vector<uint> tokens({10, 20, 30});
-    tokens.push_back(generator.prefill(tokens, generationCount));
+    std::string text = "_10_20_30";
+    text += generator.prefill(text, generationCount);
+    REQUIRE(generator.prefillLength == 4u);
     for (auto i = 0u; i < generationCount; ++i) {
-        tokens.push_back(generator.generate());
+        text += generator.generate();
     }
-
-    // An empirical match; non-portable
-    // std::cerr << dump(tokens) << "\n";
-    std::vector<uint> expected;
+    REQUIRE(generator.generate() == "");
 #ifdef ANDROID
-    expected = {10, 20, 30, 147, 30, 147, 30, 147};
+    REQUIRE(text == "_10_20_30_147_30_147_30_147_30");
 #else
-    expected = {10, 20, 30, 166, 90, 83, 90, 83};
-#endif  //_ANDROID
-    REQUIRE_THAT(tokens, Catch::Matchers::Equals(expected));
+    REQUIRE(text == "_10_20_30_166_90_83_90_83_90");
+#endif  // !ANDROID
 }

@@ -123,17 +123,23 @@ void forward(Generator& g, const std::vector<uint>& tokens) {
 
 }  // namespace
 
-Generator::Generator(Model& model) : model(model) {}
+Generator::Generator(Model& model) : model(model), prefillLength(0) {}
 
-uint Generator::prefill(const std::vector<uint>& prefix, uint maxGeneratedTokens) {
-    resetCache(*this, uint(prefix.size() + maxGeneratedTokens));
-    forward(*this, prefix);
-    return prevToken;
+std::string Generator::prefill(const std::string& prefix, uint maxGeneratedTokens) {
+    auto tokens = model.tokenizer.encode(prefix);
+    tokens.insert(tokens.begin(), model.beginOfTextID);
+    prefillLength = uint(tokens.size());
+    resetCache(*this, uint(tokens.size() + maxGeneratedTokens));
+    forward(*this, tokens);
+    return (prevToken == model.endOfTextID) ? "" : model.tokenizer.decode({prevToken});
 }
 
-uint Generator::generate() {
+std::string Generator::generate() {
+    if (kvCache.dSequence == kvCache.dSequenceMax) {
+        return "";
+    }
     forward(*this, {prevToken});
-    return prevToken;
+    return (prevToken == model.endOfTextID) ? "" : model.tokenizer.decode({prevToken});
 }
 
 }  // namespace squash

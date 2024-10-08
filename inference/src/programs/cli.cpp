@@ -12,20 +12,21 @@ int main(int argc, char** argv) {
     squash::Timer timer;
     auto model = squash::loadSquashedTensors(modelFile);
     auto generator = squash::Generator(model);
-    std::cerr << "Loaded " << model.source << " (" << timer.elapsed() << " s)\n";
+    std::cerr << "-- Loaded " << model.source << " (" << timer.elapsed() << " s)\n";
 
     auto nSteps = 4u;
     timer = squash::Timer();
-    std::vector<uint> tokens({128000, 791, 7438, 315, 2324, 374});
-    tokens.push_back(generator.prefill(tokens, nSteps));
-    std::cerr << "Prefill (" << double(tokens.size() - 1) / timer.elapsed() << " token/s)\n";
+    std::string prompt = "The meaning of life is";
+    auto completion = generator.prefill(prompt, nSteps);
+    std::cerr << "-- Prefill (" << double(generator.prefillLength) / timer.elapsed()
+              << " token/s)\n";
 
     timer = squash::Timer();
     for (auto i = 0u; i < nSteps; ++i) {
-        tokens.push_back(generator.generate());
+        completion += generator.generate();
     }
-    std::cerr << "Generation (" << nSteps / timer.elapsed() << " token/s)\n";
-    std::cerr << squash::dump(tokens) << std::endl;
+    std::cerr << "-- Generation (" << nSteps / timer.elapsed() << " token/s)\n";
+    std::cerr << prompt + "|" + completion << std::endl;
 
     return 0;
 }

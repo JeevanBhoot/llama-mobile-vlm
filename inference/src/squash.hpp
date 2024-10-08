@@ -8,6 +8,8 @@
 #include <variant>
 #include <vector>
 
+#include "tokenizer.hpp"
+
 namespace squash {
 
 /// Common ///
@@ -113,6 +115,11 @@ struct Model {
     std::vector<Layer> layers;
     TensorV finalNorm;
 
+    // Vocab
+    Tokenizer tokenizer;
+    uint beginOfTextID;
+    uint endOfTextID;
+
     // Data
     Buffer _data;
 };
@@ -124,8 +131,8 @@ std::string regexUnicodeToModifiedECMA(const std::string&);
 
 /// Generator ///
 
-// The generator holds a KV cache and executes batch=1 inference
-// Note that it references Model, which must outlive it
+// A Generator holds a KV cache and executes batch=1 inference
+// It references Model, which must outlive it
 struct Generator {
     struct KVCache {
         struct Entry {
@@ -139,10 +146,12 @@ struct Generator {
     Model& model;
     KVCache kvCache;
     uint prevToken;
+    uint prefillLength;
 
     explicit Generator(Model&);
-    uint prefill(const std::vector<uint>& prefix, uint maxGeneratedTokens);
-    uint generate();
+    std::string prefill(const std::string& prefix, uint maxGeneratedTokens);
+    // Returns an empty token for endOfText or reaching maxGeneratedTokens
+    std::string generate();
 };
 
 }  // namespace squash

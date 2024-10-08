@@ -38,6 +38,14 @@ void checkRAM(ulong bufferSize) {
     }
 }
 
+Tokenizer loadTokenizer(const json& j) {
+    std::regex preTokenizer(
+        impl::regexUnicodeToModifiedECMA(j.at("pre_tokenizer").template get<std::string>()));
+    auto merges = j.at("merges").template get<std::vector<std::string>>();
+    auto vocab = j.at("vocab").template get<std::vector<std::string>>();
+    return Tokenizer(preTokenizer, merges, std::move(vocab));
+}
+
 }  // namespace
 
 namespace impl {
@@ -140,6 +148,7 @@ Model loadSquashedTensors(std::istream& in) {
         };
     };
     auto& c = metadata["config"];
+    auto& v = metadata["vocab"];
     auto dLayers = c["d_layers"].template get<uint>();
     std::vector<Model::Layer> layers;
     for (auto n = 0u; n < dLayers; ++n) {
@@ -165,10 +174,10 @@ Model loadSquashedTensors(std::istream& in) {
         // Metadata
         .source = metadata["source"].template get<std::string>(),
         .created = metadata["created"].template get<std::string>(),
-        .alignment = alignment,
+        .alignment = metadata["alignment"].template get<ulong>(),
 
         // Config
-        .dLayers = dLayers,
+        .dLayers = c["d_layers"].template get<uint>(),
         .dVocab = c["d_vocab"].template get<uint>(),
         .dModel = c["d_model"].template get<uint>(),
         .dMLP = c["d_mlp"].template get<uint>(),
@@ -183,6 +192,11 @@ Model loadSquashedTensors(std::istream& in) {
         .embedTokens = loadTensorV("embed_tokens"),
         .layers = layers,
         .finalNorm = loadTensorV("norm"),
+
+        // Vocab
+        .tokenizer = loadTokenizer(v),
+        .beginOfTextID = v.at("begin_of_text_id").template get<uint>(),
+        .endOfTextID = v.at("end_of_text_id").template get<uint>(),
 
         // Data
         ._data = std::move(_data),

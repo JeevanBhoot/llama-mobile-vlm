@@ -5,10 +5,12 @@ import datetime
 import io
 import json
 import struct
+import tempfile
 from pathlib import Path
-from typing import IO, Tuple, Union
+from typing import IO, Any, Dict, Tuple, Union
 
 import torch
+import transformers
 from torch import Tensor
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
@@ -35,8 +37,53 @@ def rope_angular_frequency(config: LlamaConfig) -> Tensor:
     return freq
 
 
+def get_vocab_dict(tokenizer: transformers.PreTrainedTokenizerFast) -> Dict[str, Any]:
+    # Persist-to-file & load to get acccess to the tokenizer internals
+    with tempfile.TemporaryDirectory() as tmp:
+        tokenizer.backend_tokenizer.save(tmp + "/tokenizer.json")
+        with open(tmp + "/tokenizer.json") as f:
+            data = json.load(f)
+
+    # Checks, pre-tokenizer regex, special IDs
+    assert data["model"]["type"] == "BPE"
+    assert data["model"]["ignore_merges"]
+    pre_split, pre_byte = data["pre_tokenizer"]["pretokenizers"]
+    pre_regex = pre_split["pattern"]["Regex"]
+    assert pre_byte["type"] == "ByteLevel"
+    (begin_of_text_id,) = (
+        t["id"] for t in data["added_tokens"] if t["content"] == "<|begin_of_text|>"
+    )
+    (end_of_text_id,) = (
+        t["id"] for t in data["added_tokens"] if t["content"] == "<|end_of_text|>"
+    )
+
+    # Concatenate merges to single strings & de-duplicate
+    merge_set = set([])
+    merges = []
+    for a, b in data["model"]["merges"]:
+        merge = a + b
+        if merge not in merge_set:
+            merge_set.add(merge)
+            merges.append(merge)
+
+    # Convert vocab from a dict to a list
+    vocab = [None] * len(data["model"]["vocab"])
+    for token, id in data["model"]["vocab"].items():
+        vocab[id] = token
+    assert all(token is not None for token in vocab)
+
+    return dict(
+        begin_of_text_id=begin_of_text_id,
+        end_of_text_id=end_of_text_id,
+        pre_tokenizer=pre_regex,
+        merges=merges,
+        vocab=vocab,
+    )
+
+
 def save(
     model: LlamaForCausalLM,
+    tokenizer: transformers.PreTrainedTokenizerFast,
     file_or_path: Union[str, Path, IO[bytes]],
     alignment: int = 32,
 ) -> None:
@@ -59,6 +106,7 @@ def save(
                 norm_epsilon=model.config.rms_norm_eps,
                 rope_angular_frequency=rope_angular_frequency(model.config).tolist(),
             ),
+            vocab=get_vocab_dict(tokenizer),
         )
     )
     # Measure serialized tensors, but discard them (for sake of memory usage)
