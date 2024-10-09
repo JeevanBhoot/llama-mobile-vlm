@@ -13,6 +13,7 @@ struct Tokenizer {
     Tokenizer(const std::regex& preTokenizer,
               const std::vector<std::string>& merges,
               std::vector<std::string>&& vocab);
+    Tokenizer(Tokenizer&&);
     ~Tokenizer();
 
     std::vector<unsigned> encode(const std::string&) const;

@@ -137,13 +137,13 @@ TEST_CASE("squash::TextGenerator", "[squash]") {
     auto generationCount = 5u;
     Generator generator(m);
     std::string text = "_10_20_30";
-    text += generator.prefill(text, generationCount);
-    REQUIRE(generator.prefillLength == 4u);
+    auto prefillOut = generator.prefill(text, generationCount);
+    REQUIRE(prefillOut.size() == 4u);
+    text += prefillOut.back();
     for (auto i = 0u; i < generationCount; ++i) {
         text += generator.generate();
     }
     REQUIRE(generator.generate() == "");
-    REQUIRE(generator.generateLength == generationCount);
 #ifdef ANDROID
     REQUIRE(text == "_10_20_30_147_30_147_30_147_30");
 #else

@@ -123,16 +123,21 @@ void forward(Generator& g, const std::vector<uint>& tokens) {
 
 }  // namespace
 
-Generator::Generator(Model& model) : model(model), prefillLength(0) {}
+Generator::Generator(Model& model) : model(model) {}
 
-std::string Generator::prefill(const std::string& prefix, uint maxGeneratedTokens) {
+std::vector<std::string> Generator::prefill(const std::string& prefix, uint maxGeneratedTokens) {
     auto tokens = model.tokenizer.encode(prefix);
     tokens.insert(tokens.begin(), model.beginOfTextID);
-    prefillLength = uint(tokens.size());
-    generateLength = 0;
     resetCache(*this, uint(tokens.size() + maxGeneratedTokens));
     forward(*this, tokens);
-    return (prevToken == model.endOfTextID) ? "" : model.tokenizer.decode({prevToken});
+    if (prevToken != model.endOfTextID) {
+        tokens.push_back(prevToken);
+    }
+    std::vector<std::string> stringTokens;
+    stringTokens.reserve(tokens.size() - 1);
+    std::transform(tokens.begin() + 1, tokens.end(), std::back_inserter(stringTokens),
+                   [&](uint t) { return model.tokenizer.decode({t}); });
+    return stringTokens;
 }
 
 std::string Generator::generate() {
@@ -140,7 +145,6 @@ std::string Generator::generate() {
         return "";
     }
     forward(*this, {prevToken});
-    ++generateLength;
     return (prevToken == model.endOfTextID) ? "" : model.tokenizer.decode({prevToken});
 }
 

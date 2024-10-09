@@ -240,6 +240,8 @@ Tokenizer::Tokenizer(const std::regex& preTokenizer,
                      std::vector<std::string>&& vocab)
     : _impl(new Impl(preTokenizer, merges, std::move(vocab))) {}
 
+Tokenizer::Tokenizer(Tokenizer&& other) : _impl(std::move(other._impl)) {}
+
 Tokenizer::~Tokenizer() {}
 
 std::vector<unsigned> Tokenizer::encode(const std::string& text) const {

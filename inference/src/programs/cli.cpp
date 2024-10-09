@@ -19,18 +19,21 @@ int main(int argc, char** argv) {
     std::string prompt;
     while (std::getline(std::cin, prompt)) {
         timer = squash::Timer();
-        std::cout << generator.prefill(prompt, nSteps);
-        auto prefillRate = generator.prefillLength / timer.elapsed();
+        auto prefillOut = generator.prefill(prompt, nSteps);
+        std::cout << prefillOut.back();
+        auto prefillRate = double(prefillOut.size()) / timer.elapsed();
         timer = squash::Timer();
-        for (auto i = 0u; i < nSteps; ++i) {
+        auto step = 0u;
+        while (step < nSteps) {
             auto next = generator.generate();
             std::cout << next << std::flush;
+            ++step;
             if (next.empty()) {
                 break;
             }
         }
         std::cout << "\n";
-        auto generateRate = generator.generateLength / timer.elapsed();
+        auto generateRate = step / timer.elapsed();
         std::cerr << "-- Prefill " << prefillRate << " tok/s; Generate " << generateRate
                   << " tok/s\n\n";
     }

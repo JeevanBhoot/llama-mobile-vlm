@@ -146,11 +146,9 @@ struct Generator {
     Model& model;
     KVCache kvCache;
     uint prevToken;
-    uint prefillLength;
-    uint generateLength;
 
     explicit Generator(Model&);
-    std::string prefill(const std::string& prefix, uint maxGeneratedTokens);
+    std::vector<std::string> prefill(const std::string& prefix, uint maxGeneratedTokens);
     // Returns an empty token for endOfText or reaching maxGeneratedTokens
     std::string generate();
 };
