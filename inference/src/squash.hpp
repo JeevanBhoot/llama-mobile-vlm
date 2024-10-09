@@ -147,6 +147,7 @@ struct Generator {
     KVCache kvCache;
     uint prevToken;
     uint prefillLength;
+    uint generateLength;
 
     explicit Generator(Model&);
     std::string prefill(const std::string& prefix, uint maxGeneratedTokens);

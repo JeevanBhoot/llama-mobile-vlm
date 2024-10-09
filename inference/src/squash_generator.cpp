@@ -129,6 +129,7 @@ std::string Generator::prefill(const std::string& prefix, uint maxGeneratedToken
     auto tokens = model.tokenizer.encode(prefix);
     tokens.insert(tokens.begin(), model.beginOfTextID);
     prefillLength = uint(tokens.size());
+    generateLength = 0;
     resetCache(*this, uint(tokens.size() + maxGeneratedTokens));
     forward(*this, tokens);
     return (prevToken == model.endOfTextID) ? "" : model.tokenizer.decode({prevToken});
@@ -139,6 +140,7 @@ std::string Generator::generate() {
         return "";
     }
     forward(*this, {prevToken});
+    ++generateLength;
     return (prevToken == model.endOfTextID) ? "" : model.tokenizer.decode({prevToken});
 }
 

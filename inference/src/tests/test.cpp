@@ -143,6 +143,7 @@ TEST_CASE("squash::TextGenerator", "[squash]") {
         text += generator.generate();
     }
     REQUIRE(generator.generate() == "");
+    REQUIRE(generator.generateLength == generationCount);
 #ifdef ANDROID
     REQUIRE(text == "_10_20_30_147_30_147_30_147_30");
 #else
