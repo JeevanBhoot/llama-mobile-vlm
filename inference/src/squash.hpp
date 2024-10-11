@@ -5,6 +5,8 @@
 #include <iostream>
 #include <memory>
 #include <numeric>
+#include <optional>
+#include <random>
 #include <variant>
 #include <vector>
 
@@ -143,12 +145,25 @@ struct Generator {
         uint dSequence;
         uint dSequenceMax;
     };
+    struct Options {
+        uint maxGeneratedTokens;
+        std::optional<uint> seed;
+        // Sample according to logits, with temperature (0 = greedy), and
+        // additional shaping - only sample the top min(topK, n_topP) tokens
+        float temperature;
+        uint topK;
+        float topP;
+
+        static Options greedy(uint maxGeneratedTokens);
+    };
     Model& model;
+    std::default_random_engine rng;
     KVCache kvCache;
+    Options options;
     uint prevToken;
 
     explicit Generator(Model&);
-    std::vector<std::string> prefill(const std::string& prefix, uint maxGeneratedTokens);
+    std::vector<std::string> prefill(const std::string& prefix, const Options& options);
     // Returns an empty token for endOfText or reaching maxGeneratedTokens
     std::string generate();
 };

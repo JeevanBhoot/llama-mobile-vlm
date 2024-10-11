@@ -57,13 +57,21 @@ extern "C" JNIEXPORT jobjectArray JNICALL  //
 Java_ai_graphcore_squashedllama_Lib_prefill(JNIEnv* env,
                                             jobject /*this*/,
                                             jstring _prefix,
-                                            jint maxGeneratedTokens) {
+                                            jint maxGeneratedTokens,
+                                            jdouble temperature,
+                                            jint topK,
+                                            jdouble topP) {
     return errorGuard<jobjectArray>(env, [&] {
         StringHolder prefix(env, _prefix);
         if (!session) {
             throw std::runtime_error("No model loaded");
         }
-        auto tokens = session->generator.prefill(prefix.data, uint(maxGeneratedTokens));
+        auto tokens =
+            session->generator.prefill(prefix.data, {.maxGeneratedTokens = uint(maxGeneratedTokens),
+                                                     .seed = std::nullopt,
+                                                     .temperature = float(temperature),
+                                                     .topK = uint(topK),
+                                                     .topP = float(topP)});
         auto jarray =
             env->NewObjectArray(jsize(tokens.size()), env->FindClass("java/lang/String"), nullptr);
         for (auto i = 0u; i < tokens.size(); ++i) {

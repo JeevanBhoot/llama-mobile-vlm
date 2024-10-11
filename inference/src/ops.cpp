@@ -144,4 +144,41 @@ void matmulT(const float* __restrict__ lhs,
     }
 }
 
+uint sample(const float* logits,
+            uint n,
+            float temperature,
+            uint topK,
+            float topP,
+            std::default_random_engine& rng) {
+    // Compute the safe log-softmax normaliser
+    std::vector<std::tuple<float, uint>> logitsAndIndices;
+    logitsAndIndices.reserve(n);
+    auto maxLogit = *std::max_element(logits, logits + n);
+    auto sumExp = 0.f;
+    for (auto i = 0u; i < n; ++i) {
+        auto x = logits[i] - maxLogit;
+        logitsAndIndices.push_back({x, i});
+        sumExp += std::exp(x);
+    }
+
+    // Sort the logits & indices in descending order
+    std::sort(logitsAndIndices.begin(), logitsAndIndices.end(),
+              [](const auto& lhs, const auto& rhs) { return std::get<0>(lhs) > std::get<0>(rhs); });
+
+    // Calculate how many alternatives we're actually going to sample from
+    auto topKandTopP = 1u;
+    auto cumulativeP = std::exp(std::get<0>(logitsAndIndices[0]));
+    while (topKandTopP < std::min(topK, n) & cumulativeP < topP * sumExp) {
+        cumulativeP += std::exp(std::get<0>(logitsAndIndices[topKandTopP++]));
+    }
+
+    // Sample using Gumbel-max
+    for (auto i = 0u; i < topKandTopP; ++i) {
+        auto noise = std::log(-std::log(std::uniform_real_distribution<float>()(rng)));
+        std::get<0>(logitsAndIndices[i]) -= temperature * noise;
+    }
+    return std::get<1>(
+        *std::max_element(logitsAndIndices.begin(), logitsAndIndices.begin() + topKandTopP));
+}
+
 }  // namespace squash::ops

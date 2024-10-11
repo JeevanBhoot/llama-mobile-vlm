@@ -1,30 +1,49 @@
+#include <cxxopts.hpp>
 #include <fstream>
 #include <iostream>
 #include "squash.hpp"
 
 int main(int argc, char** argv) {
-    if (argc < 2) {
-        std::cerr << "Error - no model specified."
-                  << "\nUsage: ./demo path/to/model.sqt [max_gen_tokens]" << std::endl;
-        return 1;
+    cxxopts::Options options("cli", "Text generation CLI");
+    options.add_options()                                                      //
+        ("model_file", "Model to load (.sqt)", cxxopts::value<std::string>())  //
+        ("help", "Print help")                                                 //
+        ("g,max_generated_tokens", "Maximum number of generated tokens",
+         cxxopts::value<uint>()->default_value("16"))                                           //
+        ("t,temperature", "Sampling temperature", cxxopts::value<float>()->default_value("0"))  //
+        ("top_k", "Sampling top-k", cxxopts::value<uint>()->default_value("50"))                //
+        ("top_p", "Sampling top-p", cxxopts::value<float>()->default_value("1"))                //
+        ;
+    options.parse_positional({"model_file"});
+    options.positional_help("model_file");
+    auto args = options.parse(argc, argv);
+    if (args.count("help")) {
+        std::cerr << options.help() << std::endl;
+        return 0;
     }
-    std::ifstream modelFile(argv[1]);
-    auto nSteps = (argc < 3) ? 16u : uint(std::atoi(argv[2]));
 
     squash::Timer timer;
+    std::ifstream modelFile(args["model_file"].as<std::string>());
     auto model = squash::loadSquashedTensors(modelFile);
     auto generator = squash::Generator(model);
     std::cerr << "-- Loaded " << model.source << " (" << timer.elapsed() << " s)\n\n";
 
     std::string prompt;
+    squash::Generator::Options generatorOptions{
+        .maxGeneratedTokens = args["max_generated_tokens"].as<uint>(),
+        .seed = std::nullopt,
+        .temperature = args["temperature"].as<float>(),
+        .topK = args["top_k"].as<uint>(),
+        .topP = args["top_p"].as<float>(),
+    };
     while (std::getline(std::cin, prompt)) {
         timer = squash::Timer();
-        auto prefillOut = generator.prefill(prompt, nSteps);
+        auto prefillOut = generator.prefill(prompt, generatorOptions);
         std::cout << prefillOut.back();
         auto prefillRate = double(prefillOut.size()) / timer.elapsed();
         timer = squash::Timer();
         auto step = 0u;
-        while (step < nSteps) {
+        while (true) {
             auto next = generator.generate();
             std::cout << next << std::flush;
             ++step;

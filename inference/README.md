@@ -21,5 +21,7 @@ sudo apt install ninja-build clang clang-format
  - Ninja (build system), Apache 2.0
  - Ninja utility `third-party/ninja_syntax.py`, Apache 2.0
  - Android NDK, [License](https://android.googlesource.com/platform/prebuilts/ndk/+/master/NOTICE)
- - nlohmann/json, MIT License
- - Catch2, Boost Software License 1.0
+ - C++ Libraries
+   - nlohmann/json, MIT License
+   - jarro2783/cxxopts, MIT License
+   - catchorg/Catch2, Boost Software License 1.0

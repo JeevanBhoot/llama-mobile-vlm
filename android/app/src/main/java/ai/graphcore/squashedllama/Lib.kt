@@ -11,7 +11,14 @@ import kotlin.time.TimeSource
 object Lib {
     external fun load(path: String)
     external fun unload()
-    external fun prefill(prefix: String, maxGeneratedTokens: Int): Array<String>
+    external fun prefill(
+        prefix: String,
+        maxGeneratedTokens: Int,
+        temperature: Double,
+        topK: Int,
+        topP: Double
+    ): Array<String>
+
     external fun generate(): String
 
     init {
@@ -20,7 +27,10 @@ object Lib {
 }
 
 object Worker {
-    val maxGeneratedTokens = 8
+    private val maxGeneratedTokens = 8
+    private val temperature = 0.0  // Greedy for testing
+    private val topK = 50
+    private val topP = 1.0
 
     interface Command {
         data class Load(val path: String) : Command
@@ -55,8 +65,10 @@ object Worker {
     private val lock = ReentrantLock()
     private val hasCommand = lock.newCondition()
     private val mainLooper = Handler(Looper.getMainLooper())
+
     @Volatile
     private var nextCommand: Command? = null
+
     @Volatile
     private var commandListener: (Event) -> Unit = {}
 
@@ -82,7 +94,13 @@ object Worker {
                 // Prefill
                 val timer = TimeSource.Monotonic
                 val tStart = timer.markNow()
-                val parts = Lib.prefill(command.prompt, maxGeneratedTokens)
+                val parts = Lib.prefill(
+                    command.prompt,
+                    maxGeneratedTokens = maxGeneratedTokens,
+                    temperature = temperature,
+                    topK = topK,
+                    topP = topP
+                )
                 var response = parts.last()
                 val tPrefill = timer.markNow()
                 val prefillRate =

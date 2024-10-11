@@ -1,5 +1,6 @@
 #pragma once
 
+#include <random>
 #include "squash.hpp"
 
 namespace squash::ops {
@@ -22,5 +23,11 @@ void gather(const bf16* weight, const uint* indices, uint nIndices, uint dim, fl
 void rmsNorm(const bf16* weight, const float* x, uint batch, uint dim, float epsilon, float* out);
 // lhs {dM, dK}, rhs {dN, dK}, out {dM, dN}
 void matmulT(const float* lhs, const bf16* rhs, uint dM, uint dK, uint dN, float* out);
+uint sample(const float* logits,
+            uint n,
+            float temperature,
+            uint topK,
+            float topP,
+            std::default_random_engine&);
 
 }  // namespace squash::ops

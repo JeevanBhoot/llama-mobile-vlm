@@ -86,9 +86,10 @@ Tensor mlp(const Model& model, const Model::MLPLayer& layer, const TensorV& x) {
     return projection(layer.down, up);
 }
 
-uint nextToken(const TensorV& logits) {
-    auto start = getFloat(logits) + (logits.shape[0] - 1) * logits.shape[1];
-    return uint(std::max_element(start, start + logits.shape[1]) - start);
+uint nextToken(Generator& g, const TensorV& logits) {
+    auto data = getFloat(logits) + (logits.shape[0] - 1) * logits.shape[1];
+    return ops::sample(data, logits.shape[1], g.options.temperature, g.options.topK, g.options.topP,
+                       g.rng);
 }
 
 void resetCache(Generator& g, uint dSequenceMax) {
@@ -118,17 +119,32 @@ void forward(Generator& g, const std::vector<uint>& tokens) {
     x = rmsNorm(g.model.finalNorm, x, g.model.normEpsilon);
     x = projection(g.model.embedTokens, x);
     g.kvCache.dSequence += uint(tokens.size());
-    g.prevToken = nextToken(x);
+    g.prevToken = nextToken(g, x);
 }
 
 }  // namespace
 
+Generator::Options Generator::Options::greedy(uint maxGeneratedTokens) {
+    return {.maxGeneratedTokens = maxGeneratedTokens,
+            .seed = std::nullopt,
+            .temperature = 0,
+            .topK = 1,
+            .topP = 0};
+}
+
 Generator::Generator(Model& model) : model(model) {}
 
-std::vector<std::string> Generator::prefill(const std::string& prefix, uint maxGeneratedTokens) {
+std::vector<std::string> Generator::prefill(const std::string& prefix, const Options& options) {
+    this->options = options;
+    if (options.seed.has_value()) {
+        this->rng.seed(*options.seed);
+    } else {
+        std::random_device d;
+        this->rng.seed(d());
+    }
     auto tokens = model.tokenizer.encode(prefix);
     tokens.insert(tokens.begin(), model.beginOfTextID);
-    resetCache(*this, uint(tokens.size() + maxGeneratedTokens));
+    resetCache(*this, uint(tokens.size() + options.maxGeneratedTokens));
     forward(*this, tokens);
     if (prevToken != model.endOfTextID) {
         tokens.push_back(prevToken);

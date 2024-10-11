@@ -137,7 +137,7 @@ TEST_CASE("squash::TextGenerator", "[squash]") {
     auto generationCount = 5u;
     Generator generator(m);
     std::string text = "_10_20_30";
-    auto prefillOut = generator.prefill(text, generationCount);
+    auto prefillOut = generator.prefill(text, Generator::Options::greedy(generationCount));
     REQUIRE(prefillOut.size() == 4u);
     text += prefillOut.back();
     for (auto i = 0u; i < generationCount; ++i) {
