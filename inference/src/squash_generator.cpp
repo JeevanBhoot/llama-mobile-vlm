@@ -8,11 +8,9 @@ namespace squash {
 
 namespace {
 
-constexpr ulong ActivationAlignment = 32u;
-
 template <class T>
 Tensor allocateTensor(std::vector<uint>&& shape) {
-    auto buffer = Buffer(sizeof(T) * prod(shape), ActivationAlignment);
+    auto buffer = Buffer(sizeof(T) * prod(shape));
     return Tensor{{.data = tensor_data::Flat<float>(reinterpret_cast<float*>(buffer.get())),
                    .shape = std::move(shape)},
                   std::move(buffer)};

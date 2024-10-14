@@ -20,6 +20,8 @@ using uint = uint32_t;
 using ulong = uint64_t;
 using bf16 = int16_t;
 
+constexpr ulong DefaultAlignment = 32u;
+
 float bf16ToFloat(bf16 value);
 uint prod(const std::vector<uint>&);
 
@@ -42,12 +44,14 @@ std::ostream& operator<<(std::ostream&, const Dump<T>&);
 /// Tensor ///
 
 struct Buffer {
-    Buffer(ulong size, ulong alignment);
+    Buffer(ulong size, ulong alignment = DefaultAlignment);
     Buffer(Buffer&&);
     Buffer& operator=(Buffer&&);
     ~Buffer();
-    char* get() const;
     void reset();
+    template <class T = char>
+    T* get() const;
+    Buffer copy(ulong size, ulong alignment = DefaultAlignment) const;
 
    private:
     char* _data;

@@ -72,8 +72,15 @@ inline void Buffer::reset() {
     }
 }
 
-inline char* Buffer::get() const {
-    return _data;
+template <class T>
+inline T* Buffer::get() const {
+    return reinterpret_cast<T*>(_data);
+}
+
+inline Buffer Buffer::copy(ulong size, ulong alignment) const {
+    Buffer result(size, alignment);
+    std::copy(_data, _data + size, result._data);
+    return result;
 }
 
 }  // namespace squash

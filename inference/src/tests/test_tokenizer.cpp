@@ -1,6 +1,5 @@
-#include <catch_amalgamated.hpp>
-
 #include "squash.hpp"
+#include "tests.hpp"
 #include "tokenizer.hpp"
 
 using namespace squash;

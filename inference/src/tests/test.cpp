@@ -1,8 +1,7 @@
-#include <catch_amalgamated.hpp>
 #include <random>
 #include <regex>
 
-#include "squash.hpp"
+#include "tests.hpp"
 
 using namespace squash;
 
@@ -39,19 +38,9 @@ std::vector<float> ropeAngularFrequency(uint dHead) {
     }
     return freq;
 }
-inline bf16 floatToBf16_truncate(float value) {
-    union {
-        float f;
-        int16_t i[2];
-    } u;
-    u.f = value;
-    return u.i[1];
-}
 }  // namespace
 
 TEST_CASE("squash::TextGenerator", "[squash]") {
-    constexpr auto alignment = 32u;
-
     // Create vocab
     std::vector<std::string> vocab;
     for (auto i = 0u; i < 256 - 2; ++i) {
@@ -63,7 +52,7 @@ TEST_CASE("squash::TextGenerator", "[squash]") {
         // Metadata
         .source = "test",
         .created = "",
-        .alignment = alignment,
+        .alignment = DefaultAlignment,
         // Config
         .dLayers = 3,
         .dVocab = uint(vocab.size() + 2),
@@ -84,7 +73,7 @@ TEST_CASE("squash::TextGenerator", "[squash]") {
         .beginOfTextID = uint(vocab.size()),
         .endOfTextID = uint(vocab.size() + 1),
         // Data
-        ._data = Buffer(0, alignment),
+        ._data = Buffer(0),
     };
 
     // Create buffer
@@ -97,11 +86,11 @@ TEST_CASE("squash::TextGenerator", "[squash]") {
                                       + 3 * m.dModel * m.dMLP                             // mlp
                                       )                                                   //
                        + m.dModel;                                                        // norm
-    m._data = Buffer(sizeof(bf16) * nParameters, alignment);
+    m._data = Buffer(sizeof(bf16) * nParameters);
     auto buffer = reinterpret_cast<bf16*>(m._data.get());
     std::default_random_engine rng(12345u);
     for (auto i = 0u; i < nParameters; ++i) {
-        buffer[i] = floatToBf16_truncate(std::normal_distribution<float>(0, 0.02f)(rng));
+        buffer[i] = convertTruncate<bf16>(std::normal_distribution<float>(0, 0.02f)(rng));
     }
 
     // Create tensor views
