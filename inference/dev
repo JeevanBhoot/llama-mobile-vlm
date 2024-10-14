@@ -33,6 +33,11 @@ def _run_on_device(command: Iterable[Any]) -> None:
     _run(["adb", "shell", f"cd /data/local/tmp && ./{Path(program).name} {args_str}"])
 
 
+def _run_under_gdb(command: Iterable[Any]) -> None:
+    """Run under GDB (on host)"""
+    _run(["gdb", "-ex", "run", "--args", *command])
+
+
 def cli(*args: Any, **kwargs: Any) -> Callable[[T], T]:
     """Declare a CLI command / arguments for that command."""
 
@@ -175,18 +180,25 @@ def build(platforms: List[str], targets: List[str]) -> None:
     help="arguments for Catch2"
     "(https://github.com/catchorg/Catch2/blob/devel/docs/command-line.md)",
 )
-def tests(platforms: List[str], args: List[str]) -> None:
+@cli("--gdb", action="store_true", help="run under gdb")
+def tests(platforms: List[str], gdb: bool, args: List[str]) -> None:
     """run unit tests"""
-    run(platforms=platforms, program="tests", args=args)
+    run(platforms=platforms, program="tests", gdb=gdb, args=args)
 
 
 @cli("program", help="program to run (see src/programs)")
 @cli("args", nargs="*", help="arguments")
-def run(platforms: List[str], program: str, args: List[str]) -> None:
+@cli("--gdb", action="store_true", help="run under gdb")
+def run(platforms: List[str], program: str, gdb: bool, args: List[str]) -> None:
     """build and run the given program"""
     build(platforms=platforms, targets=[program])
     for platform in platforms:
-        runner = _run_on_device if platform == "android" else _run
+        if platform == "android":
+            runner = _run_on_device
+        elif gdb:
+            runner = _run_under_gdb
+        else:
+            runner = _run
         runner([BUILD / platform / program, *args])
 
 
@@ -203,7 +215,9 @@ def _main() -> None:
         dest="platforms",
         help=f"platforms to build (default: [{PLATFORMS[0]}])",
     )
-    parser.set_defaults(_action=lambda platforms: tests(platforms=platforms, args=[]))
+    parser.set_defaults(
+        _action=lambda platforms: tests(platforms=platforms, gdb=False, args=[])
+    )
 
     subs = parser.add_subparsers()
     for key, value in globals().items():

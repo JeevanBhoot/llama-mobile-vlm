@@ -5,6 +5,8 @@
 
 namespace squash::ops {
 
+// float
+
 void copy(const float* src, uint n, float* dest);
 void addInPlace(float* x, const float* y, uint n);
 void rotateInPlace(float* x, const float* freq, uint offsetS, uint dS, uint dH, uint dim);
@@ -18,6 +20,8 @@ void selfAttentionInPlace(float* queryOut,
                           uint dHkv,  // heads (key-value)
                           uint dim);  // head dimension
 void swiGluInPlace(float* x, const float* gate, uint n);
+
+// bf16
 
 void gather(const bf16* weight, const uint* indices, uint nIndices, uint dim, float* out);
 void rmsNorm(const bf16* weight, const float* x, uint batch, uint dim, float epsilon, float* out);

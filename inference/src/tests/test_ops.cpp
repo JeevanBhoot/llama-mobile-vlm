@@ -114,7 +114,7 @@ Measurement operator*(double lhs, const Measurement& rhs) {
     return {lhs * rhs.mean, lhs * rhs.error, rhs.count};
 }
 Measurement operator/(double lhs, const Measurement& rhs) {
-    // Very rough - maybe correct for small values of error
+    // Very rough - possibly correct for small values of error
     return {lhs / rhs.mean, rhs.error * (lhs / rhs.mean), rhs.count};
 }
 std::ostream& operator<<(std::ostream& out, const Measurement& m) {
@@ -124,16 +124,16 @@ std::ostream& operator<<(std::ostream& out, const Measurement& m) {
 }  // namespace benchmarking
 }  // namespace
 
-TEST_CASE("benchmark-ops-MLP", "[squash][benchmark]") {
+TEMPLATE_TEST_CASE("benchmark-ops-MLP", "[squash][benchmark]", bf16) {
     random_engine rng(100);
     uint batchSize = 1;
     uint dModel = 2048;
     uint dFFN = 8192;
 
     auto inputs = randn<float>(batchSize * dModel, 1, rng);
-    auto wUp = randn<bf16>(dModel * dFFN, 0.02f, rng);
-    auto wGate = wUp.copy(dModel * dFFN);  // save RNG time
-    auto wDown = wUp.copy(dModel * dFFN);
+    auto wUp = randn<TestType>(dModel * dFFN, 0.02f, rng);
+    auto wGate = wUp.copy(dModel * dFFN * sizeof(TestType));  // save RNG time
+    auto wDown = wUp.copy(dModel * dFFN * sizeof(TestType));
 
     benchmarking::Benchmark benchmark;
     for (auto rep = 0u; rep < 10u; ++rep) {
@@ -141,12 +141,12 @@ TEST_CASE("benchmark-ops-MLP", "[squash][benchmark]") {
         Buffer up(batchSize * dFFN * sizeof(float));
         Buffer gate(batchSize * dFFN * sizeof(float));
         auto outputs = zeros<float>(batchSize * dModel);
-        ops::matmulT(inputs.get<float>(), wUp.get<bf16>(), batchSize, dModel, dFFN,
+        ops::matmulT(inputs.get<float>(), wUp.template get<TestType>(), batchSize, dModel, dFFN,
                      up.get<float>());
-        ops::matmulT(inputs.get<float>(), wGate.get<bf16>(), batchSize, dModel, dFFN,
+        ops::matmulT(inputs.get<float>(), wGate.template get<TestType>(), batchSize, dModel, dFFN,
                      gate.get<float>());
         ops::swiGluInPlace(up.get<float>(), gate.get<float>(), batchSize * dFFN);
-        ops::matmulT(up.get<float>(), wDown.get<bf16>(), batchSize, dFFN, dModel,
+        ops::matmulT(up.get<float>(), wDown.template get<TestType>(), batchSize, dFFN, dModel,
                      outputs.get<float>());
     }
     auto result = benchmark.result();
