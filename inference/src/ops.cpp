@@ -133,6 +133,7 @@ void matmulT(const float* __restrict__ lhs,
              const uint dK,
              const uint dN,
              float* __restrict__ out) {
+#pragma omp parallel for
     for (auto n = 0u; n < dN; ++n) {
         for (auto m = 0u; m < dM; ++m) {
             float dot = 0;

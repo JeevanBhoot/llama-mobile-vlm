@@ -30,7 +30,14 @@ def _run_on_device(command: Iterable[Any]) -> None:
     program, *args = command
     _run(["adb", "push", program, f"/data/local/tmp/{Path(program).name}"])
     args_str = " ".join(str(arg) for arg in args if arg is not None)
-    _run(["adb", "shell", f"cd /data/local/tmp && ./{Path(program).name} {args_str}"])
+    _run(
+        [
+            "adb",
+            "shell",
+            "cd /data/local/tmp && env LD_LIBRARY_PATH=/data/local/tmp"
+            f" ./{Path(program).name} {args_str}",
+        ]
+    )
 
 
 def _run_under_gdb(command: Iterable[Any]) -> None:
@@ -89,6 +96,7 @@ def _generate_build_ninja(w: ninja_syntax.Writer, platform: str) -> None:
         linkflags += ["-static-libstdc++"]
     if platform == "android":
         libs += ["-llog"]
+    flags += ["-fopenmp"]
 
     root_to_files = {}  # [root] -> (src, obj, {variable: value})
     for root in ["", "tests", "programs"]:
