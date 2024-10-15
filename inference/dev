@@ -95,7 +95,7 @@ def _generate_build_ninja(w: ninja_syntax.Writer, platform: str) -> None:
         cxxflags += ["-DANDROID"]
         linkflags += ["-static-libstdc++"]
     if platform == "android":
-        libs += ["-llog"]
+        libs += ["-llog", "-static-openmp"]
     flags += ["-fopenmp"]
 
     root_to_files = {}  # [root] -> (src, obj, {variable: value})

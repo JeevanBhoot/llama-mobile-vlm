@@ -41,6 +41,7 @@ T errorGuard(JNIEnv* env, F&& func) {
 extern "C" JNIEXPORT void JNICALL  //
 Java_ai_graphcore_squashedllama_Lib_load(JNIEnv* env, jobject /*this*/, jstring _path) {
     errorGuard<void>(env, [&] {
+        squash::selectOmpNumThreads();
         StringHolder path(env, _path);
         session.reset();  // free memory before loading a new model
         std::ifstream file(path.data);
