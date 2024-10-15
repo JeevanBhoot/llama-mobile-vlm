@@ -41,6 +41,8 @@ Dump<T> dump(const T&);
 template <class T>
 std::ostream& operator<<(std::ostream&, const Dump<T>&);
 
+void selectOmpNumThreads();
+
 /// Tensor ///
 
 struct Buffer {

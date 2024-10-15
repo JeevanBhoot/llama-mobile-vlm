@@ -22,6 +22,7 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    squash::selectOmpNumThreads();
     squash::Timer timer;
     std::ifstream modelFile(args["model_file"].as<std::string>());
     auto model = squash::loadSquashedTensors(modelFile);

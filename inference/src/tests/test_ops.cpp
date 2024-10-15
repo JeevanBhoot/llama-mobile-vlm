@@ -125,6 +125,7 @@ std::ostream& operator<<(std::ostream& out, const Measurement& m) {
 }  // namespace
 
 TEMPLATE_TEST_CASE("benchmark-ops-MLP", "[squash][benchmark]", bf16) {
+    selectOmpNumThreads();
     random_engine rng(100);
     uint batchSize = 1;
     uint dModel = 2048;

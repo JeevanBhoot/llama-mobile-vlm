@@ -1,5 +1,8 @@
 #include "squash.hpp"
 
+#include <omp.h>
+#include <thread>
+
 namespace squash {
 
 namespace {
@@ -35,6 +38,15 @@ void printFlatTensorData(std::ostream& out, const tensor_data::Flat<T>& data, ul
 }
 
 }  // namespace
+
+void selectOmpNumThreads() {
+    auto nthreads = std::thread::hardware_concurrency();
+#if defined(ANDROID) && defined(__aarch64__)
+    // Assume BIG.little on Android/ARM, e.g. 9-core = 5 threads
+    nthreads = uint(std::ceil(double(nthreads) / 2));
+#endif
+    omp_set_num_threads(int(nthreads));
+}
 
 std::ostream& operator<<(std::ostream& out, const TensorV& tensor) {
     out << "Tensor{(" << dump(tensor.shape) << "): ";
