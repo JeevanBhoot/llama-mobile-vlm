@@ -2,6 +2,10 @@ __pycache__
 .venv
 .vscode
 
+/data
 /local
 /models
 /notebooks
+/third-party
+/out
+/wandb
