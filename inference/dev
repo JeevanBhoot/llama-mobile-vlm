@@ -8,9 +8,6 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Iterable, List, TypeVar
 
-sys.path.append("third-party")
-import ninja_syntax
-
 T = TypeVar("T")
 
 
@@ -62,6 +59,21 @@ BUILD = Path("build")
 SRC = Path("src")
 ANDROID_NDK = Path("/opt/android-sdk/ndk/latest")
 PLATFORMS = ["release", "debug"] + (["android"] if ANDROID_NDK.exists() else [])
+THIRD_PARTY_SOURCES = (
+    "https://raw.githubusercontent.com/nlohmann/json/refs/tags/v3.11.3/single_include/nlohmann/json.hpp",
+    "https://raw.githubusercontent.com/ninja-build/ninja/refs/tags/v1.12.1/misc/ninja_syntax.py",
+    "https://raw.githubusercontent.com/catchorg/Catch2/refs/tags/v3.7.1/extras/catch_amalgamated.hpp",
+    "https://raw.githubusercontent.com/catchorg/Catch2/refs/tags/v3.7.1/extras/catch_amalgamated.cpp",
+    "https://github.com/jarro2783/cxxopts/raw/refs/tags/v3.2.1/include/cxxopts.hpp",
+)
+
+@cli()
+def setup(platforms: List[str]) -> None:
+    """download third-party libraries"""
+    third_party = Path("third-party")
+    third_party.mkdir(exist_ok=True)
+    for path in THIRD_PARTY_SOURCES:
+        _run(["wget", "-nv", "-O", third_party / Path(path).name, path])
 
 
 @cli()
@@ -75,7 +87,7 @@ def clean(platforms: List[str]) -> None:
         BUILD.rmdir()
 
 
-def _generate_build_ninja(w: ninja_syntax.Writer, platform: str) -> None:
+def _generate_build_ninja(w: Any, platform: str) -> None:
     cxx = (
         ANDROID_NDK / "toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
         if platform == "android"
@@ -174,6 +186,11 @@ def _generate_build_ninja(w: ninja_syntax.Writer, platform: str) -> None:
 @cli("targets", nargs="*", help="build targets")
 def build(platforms: List[str], targets: List[str]) -> None:
     """build C++ code"""
+    third_party = str(Path(__file__).parent / "third-party")
+    if third_party not in sys.path:
+        sys.path.append(third_party)
+    import ninja_syntax
+
     for platform in platforms:
         root = BUILD / platform
         root.mkdir(parents=True, exist_ok=True)

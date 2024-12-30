@@ -5,12 +5,15 @@
 ```sh
 ./dev
 ./dev -p all tests
+
+# Try out a language model
+./dev run cli ../models/Llama-3.2-1B-Instruct-BF16.sqt
 ```
 
 ## Setup
 
 ```sh
-./third-party/fetch.sh
+./dev setup
 sudo apt install ninja-build clang clang-format
 # If android: install NDK to /opt/android-sdk/ndk/latest
 ```
