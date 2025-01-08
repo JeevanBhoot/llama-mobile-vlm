@@ -10,7 +10,7 @@
 #include <variant>
 #include <vector>
 
-#include "tokenizer.hpp"
+#include "lib/tokenizer.hpp"
 
 namespace squash {
 
@@ -176,4 +176,4 @@ struct Generator {
 
 }  // namespace squash
 
-#include "squash_impl.hpp"
+#include "squash_impl.ipp"

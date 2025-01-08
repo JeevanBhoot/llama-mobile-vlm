@@ -1,4 +1,4 @@
-#include "ops.hpp"
+#include "lib/ops.hpp"
 #include "squash.hpp"
 
 #include <algorithm>

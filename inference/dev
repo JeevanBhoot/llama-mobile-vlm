@@ -65,7 +65,10 @@ THIRD_PARTY_SOURCES = (
     "https://raw.githubusercontent.com/catchorg/Catch2/refs/tags/v3.7.1/extras/catch_amalgamated.hpp",
     "https://raw.githubusercontent.com/catchorg/Catch2/refs/tags/v3.7.1/extras/catch_amalgamated.cpp",
     "https://github.com/jarro2783/cxxopts/raw/refs/tags/v3.2.1/include/cxxopts.hpp",
+    "https://raw.githubusercontent.com/nothings/stb/013ac3beddff3dbffafd5177e7972067cd2b5083/stb_image.h",
+    "https://raw.githubusercontent.com/nothings/stb/2e2bef463a5b53ddf8bb788e25da6b8506314c08/stb_image_resize2.h",
 )
+
 
 @cli()
 def setup(platforms: List[str]) -> None:
@@ -111,7 +114,7 @@ def _generate_build_ninja(w: Any, platform: str) -> None:
     flags += ["-fopenmp"]
 
     root_to_files = {}  # [root] -> (src, obj, {variable: value})
-    for root in ["", "tests", "programs"]:
+    for root in ["", "lib", "tests", "programs"]:
         root_to_files[root] = []
         for cpp in (s.relative_to(SRC) for s in (SRC / root).glob("*.cpp")):
             root_to_files[root] += [
@@ -169,17 +172,22 @@ def _generate_build_ninja(w: Any, platform: str) -> None:
         w.build(
             f"{Path(obj).stem}",
             "linkexe",
-            [obj] + [obj for _, obj, _ in root_to_files[""]],
+            [obj] + [obj for _, obj, _ in root_to_files[""] + root_to_files["lib"]],
         )
     w.build(
         "tests",
         "linkexe",
-        [obj for root in ["", "tests", "catch"] for _, obj, _ in root_to_files[root]],
+        [
+            obj
+            for root, fs in root_to_files.items()
+            if root != "programs"
+            for _, obj, _ in fs
+        ],
     )
     w.build(
         "libsquashed-llama.so",
         "linkso",
-        [obj for _, obj, _ in root_to_files[""]],
+        [obj for _, obj, _ in root_to_files[""] + root_to_files["lib"]],
     )
 
 

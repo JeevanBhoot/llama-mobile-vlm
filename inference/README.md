@@ -28,3 +28,4 @@ sudo apt install ninja-build clang clang-format
    - nlohmann/json, MIT License
    - jarro2783/cxxopts, MIT License
    - catchorg/Catch2, Boost Software License 1.0
+   - nothings/stb/{stb_image.h, stb_image_resize2.h}, Public Domain

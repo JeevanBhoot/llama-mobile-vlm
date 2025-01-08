@@ -1,4 +1,4 @@
-#include "ops.hpp"
+#include "lib/ops.hpp"
 #include "tests.hpp"
 
 using namespace squash;
