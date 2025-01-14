@@ -7,6 +7,7 @@ int main(int argc, char** argv) {
     cxxopts::Options options("cli", "Text generation CLI");
     options.add_options()                                                      //
         ("model_file", "Model to load (.sqt)", cxxopts::value<std::string>())  //
+        ("image", "Image file", cxxopts::value<std::string>())                 //
         ("help", "Print help")                                                 //
         ("g,max_generated_tokens", "Maximum number of generated tokens",
          cxxopts::value<uint>()->default_value("16"))                                           //
@@ -23,6 +24,12 @@ int main(int argc, char** argv) {
     }
 
     squash::selectOmpNumThreads();
+
+    std::optional<squash::Image> image;
+    if (args.count("image")) {
+        image.emplace(squash::loadImage(args["image"].as<std::string>()));
+    }
+
     squash::Timer timer;
     std::ifstream modelFile(args["model_file"].as<std::string>());
     auto model = squash::loadSquashedTensors(modelFile);
@@ -39,7 +46,7 @@ int main(int argc, char** argv) {
     };
     while (std::getline(std::cin, prompt)) {
         timer = squash::Timer();
-        auto prefillOut = generator.prefill(prompt, generatorOptions);
+        auto prefillOut = generator.prefill(prompt, image, generatorOptions);
         std::cout << prefillOut.back();
         auto prefillRate = double(prefillOut.size()) / timer.elapsed();
         timer = squash::Timer();

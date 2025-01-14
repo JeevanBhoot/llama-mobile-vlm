@@ -41,6 +41,19 @@ Dump<T> dump(const T&);
 template <class T>
 std::ostream& operator<<(std::ostream&, const Dump<T>&);
 
+struct Image {
+    uint height;
+    uint width;
+    std::vector<uint8_t> data;
+
+    Image(uint height, uint width, std::vector<uint8_t>&& data);
+    Image(const Image&) = delete;
+    Image& operator=(const Image&) = delete;
+    Image(Image&&) = default;
+};
+Image loadImage(const std::string&);
+Image resizeImage(const Image&, uint height, uint width);
+
 void selectOmpNumThreads();
 
 /// Tensor ///
@@ -169,7 +182,9 @@ struct Generator {
     uint prevToken;
 
     explicit Generator(Model&);
-    std::vector<std::string> prefill(const std::string& prefix, const Options& options);
+    std::vector<std::string> prefill(const std::string& prefix,
+                                     const std::optional<Image>& image,
+                                     const Options& options);
     // Returns an empty token for endOfText or reaching maxGeneratedTokens
     std::string generate();
 };

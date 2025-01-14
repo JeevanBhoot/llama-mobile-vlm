@@ -132,7 +132,13 @@ Generator::Options Generator::Options::greedy(uint maxGeneratedTokens) {
 
 Generator::Generator(Model& model) : model(model) {}
 
-std::vector<std::string> Generator::prefill(const std::string& prefix, const Options& options) {
+std::vector<std::string> Generator::prefill(const std::string& prefix,
+                                            const std::optional<Image>& image,
+                                            const Options& options) {
+    if (image) {
+        auto resized = resizeImage(*image, 560, 560);
+        std::cerr << "TODO prefill image " << resized.height << "x" << resized.width << "\n";
+    }
     this->options = options;
     if (options.seed.has_value()) {
         this->rng.seed(*options.seed);
