@@ -97,7 +97,7 @@ def _generate_build_ninja(w: Any, platform: str) -> None:
         else os.getenv("CXX", "clang++")
     )
     flags, cxxflags, linkflags, libs = [], [], [], []
-    cxxflags += ["$flags", "-fcolor-diagnostics"]
+    cxxflags += ["$flags", "-fcolor-diagnostics", "-fdiagnostics-absolute-paths"]
     cxxflags += ["-Wall", "-Wextra", "-Wconversion", "-Wdouble-promotion", "-Werror"]
     cxxflags += [f"-I$src", f"-isystem $third-party"]
     cxxflags += ["-g", "-fPIC", "-std=c++20"]

@@ -10,44 +10,6 @@
 
 namespace squash {
 
-namespace {
-constexpr auto Magic = 0x7471732eu;
-constexpr auto Version = 0u;
-constexpr auto MaxRamProportion = 0.75f;
-constexpr auto BufferChunkSize = 4096u;
-
-using json = nlohmann::json;
-
-ulong align(ulong index, ulong alignment) {
-    return alignment * ((index + alignment - 1) / alignment);
-}
-
-void checkRAM(ulong bufferSize) {
-    struct sysinfo info;
-    if (sysinfo(&info)) {
-        throw std::runtime_error("Could not get sysinfo (to get total RAM)");
-    }
-    auto bufferSizeGB = static_cast<float>(bufferSize) / 1e9f;
-    auto ramGB = static_cast<float>(info.totalram) / 1e9f;
-    if (ramGB * MaxRamProportion < bufferSizeGB) {
-        std::ostringstream err;
-        err << "Cannot load model - would consume " << bufferSizeGB
-            << " GB of RAM for parameters, which is more than " << MaxRamProportion << " * "
-            << ramGB << " GB available";
-        throw std::runtime_error(err.str());
-    }
-}
-
-Tokenizer loadTokenizer(const json& j) {
-    std::regex preTokenizer(
-        impl::regexUnicodeToModifiedECMA(j.at("pre_tokenizer").template get<std::string>()));
-    auto merges = j.at("merges").template get<std::vector<std::string>>();
-    auto vocab = j.at("vocab").template get<std::vector<std::string>>();
-    return Tokenizer(preTokenizer, merges, std::move(vocab));
-}
-
-}  // namespace
-
 namespace impl {
 // Convert a subset of unicode/Python regexes to C++ (modified ECMAScript) compatible
 // regexes. In particular, remove "?i:", and convert \p{N} -> [:digit:],
@@ -85,6 +47,129 @@ std::string regexUnicodeToModifiedECMA(const std::string& original) {
 }
 }  // namespace impl
 
+namespace {
+constexpr auto Magic = 0x7471732eu;
+constexpr auto Version = 0u;
+constexpr auto MaxRamProportion = 0.75f;
+constexpr auto BufferChunkSize = 4096u;
+
+using json = nlohmann::json;
+
+ulong align(ulong index, ulong alignment) {
+    return alignment * ((index + alignment - 1) / alignment);
+}
+
+void checkRAM(ulong bufferSize) {
+    struct sysinfo info;
+    if (sysinfo(&info)) {
+        throw std::runtime_error("Could not get sysinfo (to get total RAM)");
+    }
+    auto bufferSizeGB = static_cast<float>(bufferSize) / 1e9f;
+    auto ramGB = static_cast<float>(info.totalram) / 1e9f;
+    if (ramGB * MaxRamProportion < bufferSizeGB) {
+        std::ostringstream err;
+        err << "Cannot load model - would consume " << bufferSizeGB
+            << " GB of RAM for parameters, which is more than " << MaxRamProportion << " * "
+            << ramGB << " GB available";
+        throw std::runtime_error(err.str());
+    }
+}
+
+Tokenizer loadTokenizer(const json& j) {
+    std::regex preTokenizer(
+        impl::regexUnicodeToModifiedECMA(j.at("pre_tokenizer").template get<std::string>()));
+    auto merges = j.at("merges").template get<std::vector<std::string>>();
+    auto vocab = j.at("vocab").template get<std::vector<std::string>>();
+    return Tokenizer(preTokenizer, merges, std::move(vocab));
+}
+
+TextModel loadTextModel(const json& header,
+                        const json& metadata,
+                        ulong alignment,
+                        const Buffer& _data) {
+    auto loadTensorV = [&](const std::string& name) -> TensorV {
+        auto fullName = name + ".weight";
+        auto& entry = header.at(fullName);
+        auto dtype = entry.at("dtype").template get<std::string>();
+        if (dtype != "BF16") {
+            std::ostringstream err;
+            err << "Tensor " << fullName << " has unsupported dtype = " << dtype;
+            throw std::runtime_error(err.str());
+        }
+        auto offset = entry.at("data_offsets")[0].template get<ulong>();
+        if (offset % alignment) {
+            std::ostringstream err;
+            err << "Tensor " << fullName << " is misaligned, offset = " << offset;
+            throw std::runtime_error(err.str());
+        }
+        return TensorV{
+            tensor_data::Flat(reinterpret_cast<bf16*>(_data.get() + offset)),
+            entry.at("shape").template get<std::vector<uint>>(),
+        };
+    };
+    auto& c = metadata.at("config").at("text");
+    auto& v = metadata.at("vocab");
+    auto dLayers = c.at("d_layers").template get<uint>();
+    std::vector<TextModel::Layer> layers;
+    for (auto n = 0u; n < dLayers; ++n) {
+        auto base = "text_model.layers." + std::to_string(n);
+        auto attn = base + ".attn";
+        auto mlp = base + ".mlp";
+        layers.push_back(  //
+            {{
+                 .norm = loadTensorV(base + ".input_layernorm"),
+                 .query = loadTensorV(attn + ".q_proj"),
+                 .key = loadTensorV(attn + ".k_proj"),
+                 .value = loadTensorV(attn + ".v_proj"),
+                 .output = loadTensorV(attn + ".o_proj"),
+             },
+             {
+                 .norm = loadTensorV(base + ".post_attention_layernorm"),
+                 .up = loadTensorV(mlp + ".up_proj"),
+                 .gate = loadTensorV(mlp + ".gate_proj"),
+                 .down = loadTensorV(mlp + ".down_proj"),
+             }});
+    }
+    return TextModel{
+        // Config
+        .dLayers = c.at("d_layers").template get<uint>(),
+        .dVocab = c.at("d_vocab").template get<uint>(),
+        .dModel = c.at("d_model").template get<uint>(),
+        .dMLP = c.at("d_mlp").template get<uint>(),
+        .dAttentionHead = c.at("d_attention_head").template get<uint>(),
+        .dAttentionQ = c.at("d_attention_q").template get<uint>(),
+        .dAttentionKV = c.at("d_attention_kv").template get<uint>(),
+        .dSequenceMax = c.at("d_sequence_max").template get<uint>(),
+        .normEpsilon = c.at("norm_epsilon").template get<float>(),
+        .ropeAngularFrequency = c.at("rope_angular_frequency").template get<std::vector<float>>(),
+
+        // Parameters
+        .embedTokens = loadTensorV("text_model.embed_tokens"),
+        .layers = layers,
+        .finalNorm = loadTensorV("text_model.norm"),
+
+        // Vocab
+        .tokenizer = loadTokenizer(v),
+        .beginOfTextID = v.at("begin_of_text_id").template get<uint>(),
+        .endOfTextID = v.at("end_of_text_id").template get<uint>(),
+    };
+}
+
+VisionModel loadVisionModel(const json& /*header*/,
+                            const json& metadata,
+                            ulong /*alignment*/,
+                            const Buffer& /*_data*/) {
+    auto& c = metadata.at("config").at("vision");
+    return VisionModel{
+        .imageMean = c.at("image_mean").template get<std::vector<float>>(),
+        .imageStd = c.at("image_std").template get<std::vector<float>>(),
+        .dImage = c.at("d_image").template get<uint>(),
+        .dPatch = c.at("d_patch").template get<uint>(),
+    };
+}
+
+}  // namespace
+
 Model loadSquashedTensors(std::istream& in) {
     // Preamble
     char preamble[16];
@@ -109,15 +194,15 @@ Model loadSquashedTensors(std::istream& in) {
     std::string headerStr(headerSize, ' ');
     in.read(headerStr.data(), static_cast<long>(headerSize));
     auto header = json::parse(headerStr);
-    auto metadata = header["__metadata__"];
+    auto metadata = header.at("__metadata__");
     header.erase("__metadata__");
-    auto alignment = metadata["alignment"].template get<ulong>();
+    auto alignment = metadata.at("alignment").template get<ulong>();
 
     // Buffer
     auto bufferLength = ulong(0);
     for (auto& x : header) {
         bufferLength =
-            std::max(bufferLength, align(x["data_offsets"][1].template get<ulong>(), alignment));
+            std::max(bufferLength, align(x.at("data_offsets")[1].template get<ulong>(), alignment));
     }
     checkRAM(bufferLength);
     Buffer _data(bufferLength, alignment);
@@ -126,79 +211,16 @@ Model loadSquashedTensors(std::istream& in) {
                 static_cast<std::streamsize>(std::min(i + BufferChunkSize, bufferLength) - i));
     }
 
-    // Tensors & model config
-    auto loadTensorV = [&](const std::string& name) -> TensorV {
-        auto fullName = "model." + name + ".weight";
-        auto& entry = header[fullName];
-        auto dtype = entry["dtype"].template get<std::string>();
-        if (dtype != "BF16") {
-            std::ostringstream err;
-            err << "Tensor " << fullName << " has unsupported dtype = " << dtype;
-            throw std::runtime_error(err.str());
-        }
-        auto offset = entry["data_offsets"][0].template get<ulong>();
-        if (offset % alignment) {
-            std::ostringstream err;
-            err << "Tensor " << fullName << " is misaligned, offset = " << offset;
-            throw std::runtime_error(err.str());
-        }
-        return TensorV{
-            tensor_data::Flat(reinterpret_cast<bf16*>(_data.get() + offset)),
-            entry["shape"].template get<std::vector<uint>>(),
-        };
-    };
-    auto& c = metadata["config"];
-    auto& v = metadata["vocab"];
-    auto dLayers = c["d_layers"].template get<uint>();
-    std::vector<Model::Layer> layers;
-    for (auto n = 0u; n < dLayers; ++n) {
-        auto base = "layers." + std::to_string(n);
-        auto attn = base + ".self_attn";
-        auto mlp = base + ".mlp";
-        layers.push_back(  //
-            {{
-                 .norm = loadTensorV(base + ".input_layernorm"),
-                 .query = loadTensorV(attn + ".q_proj"),
-                 .key = loadTensorV(attn + ".k_proj"),
-                 .value = loadTensorV(attn + ".v_proj"),
-                 .output = loadTensorV(attn + ".o_proj"),
-             },
-             {
-                 .norm = loadTensorV(base + ".post_attention_layernorm"),
-                 .up = loadTensorV(mlp + ".up_proj"),
-                 .gate = loadTensorV(mlp + ".gate_proj"),
-                 .down = loadTensorV(mlp + ".down_proj"),
-             }});
-    }
     return Model{
-        // Metadata
-        .source = metadata["source"].template get<std::string>(),
-        .created = metadata["created"].template get<std::string>(),
-        .alignment = metadata["alignment"].template get<ulong>(),
+        .textModel = loadTextModel(header, metadata, alignment, _data),
+        .visionModel = metadata.at("config").at("vision").is_null()
+                           ? std::optional<VisionModel>{}
+                           : loadVisionModel(header, metadata, alignment, _data),
 
-        // Config
-        .dLayers = c["d_layers"].template get<uint>(),
-        .dVocab = c["d_vocab"].template get<uint>(),
-        .dModel = c["d_model"].template get<uint>(),
-        .dMLP = c["d_mlp"].template get<uint>(),
-        .dAttentionHead = c["d_attention_head"].template get<uint>(),
-        .dAttentionQ = c["d_attention_q"].template get<uint>(),
-        .dAttentionKV = c["d_attention_kv"].template get<uint>(),
-        .dSequenceMax = c["d_sequence_max"].template get<uint>(),
-        .normEpsilon = c["norm_epsilon"].template get<float>(),
-        .ropeAngularFrequency = c["rope_angular_frequency"].template get<std::vector<float>>(),
-
-        // Parameters
-        .embedTokens = loadTensorV("embed_tokens"),
-        .layers = layers,
-        .finalNorm = loadTensorV("norm"),
-
-        // Vocab
-        .tokenizer = loadTokenizer(v),
-        .beginOfTextID = v.at("begin_of_text_id").template get<uint>(),
-        .endOfTextID = v.at("end_of_text_id").template get<uint>(),
-
-        // Data
+        // Metadata & data buffer
+        .source = metadata.at("source").template get<std::string>(),
+        .created = metadata.at("created").template get<std::string>(),
+        .alignment = metadata.at("alignment").template get<ulong>(),
         ._data = std::move(_data),
     };
 };

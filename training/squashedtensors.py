@@ -4,19 +4,22 @@ import contextlib
 import datetime
 import io
 import json
+import re
 import struct
 import tempfile
+import warnings
 from pathlib import Path
-from typing import IO, Any, Dict, Tuple, Union
+from typing import IO, Any, Union
 
 import torch
 import transformers
-from torch import Tensor
-from transformers.models.llama.configuration_llama import LlamaConfig
+from torch import Tensor, nn
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
+from transformers.models.mllama.modeling_mllama import MllamaForConditionalGeneration
+from transformers.models.mllama.image_processing_mllama import MllamaImageProcessor
 
 
-def encode_bf16(tensor: Tensor) -> Tuple[str, Tensor]:
+def encode_bf16(tensor: Tensor) -> tuple[str, Tensor]:
     return ("BF16", tensor.contiguous().flatten().to(torch.bfloat16).view(torch.uint8))
 
 
@@ -24,9 +27,12 @@ def align(n: int, alignment: int) -> int:
     return n + (-n % alignment)
 
 
-def rope_angular_frequency(config: LlamaConfig) -> Tensor:
+def rope_angular_frequency(config: transformers.PretrainedConfig) -> Tensor:
+    head_dim = getattr(
+        config, "head_dim", config.hidden_size // config.num_attention_heads
+    )
     freq = config.rope_theta ** -(
-        torch.arange(0, config.head_dim, 2, dtype=torch.float) / config.head_dim
+        torch.arange(0, head_dim, 2, dtype=torch.float) / head_dim
     )
     s = config.rope_scaling
     z = (
@@ -37,7 +43,7 @@ def rope_angular_frequency(config: LlamaConfig) -> Tensor:
     return freq
 
 
-def get_vocab_dict(tokenizer: transformers.PreTrainedTokenizerFast) -> Dict[str, Any]:
+def get_vocab_dict(tokenizer: transformers.PreTrainedTokenizerFast) -> dict[str, Any]:
     # Persist-to-file & load to get acccess to the tokenizer internals
     with tempfile.TemporaryDirectory() as tmp:
         tokenizer.backend_tokenizer.save(tmp + "/tokenizer.json")
@@ -46,7 +52,11 @@ def get_vocab_dict(tokenizer: transformers.PreTrainedTokenizerFast) -> Dict[str,
 
     # Checks, pre-tokenizer regex, special IDs
     assert data["model"]["type"] == "BPE"
-    assert data["model"]["ignore_merges"]
+    if not data["model"]["ignore_merges"]:
+        warnings.warn(
+            "The tokenizer does not set `ignore_merges` (which matches full tokens first)"
+            ", but our codebase always behaves as if `ignore_merges` is `True`"
+        )
     pre_split, pre_byte = data["pre_tokenizer"]["pretokenizers"]
     pre_regex = pre_split["pattern"]["Regex"]
     assert pre_byte["type"] == "ByteLevel"
@@ -81,9 +91,72 @@ def get_vocab_dict(tokenizer: transformers.PreTrainedTokenizerFast) -> Dict[str,
     )
 
 
+def prepare_parameters(
+    model: LlamaForCausalLM | MllamaForConditionalGeneration,
+) -> dict[str, nn.Parameter]:
+    """Rename parameters for uniform storage between models."""
+    params = {}
+    for name, parameter in model.named_parameters():
+        name = re.sub(r"^model.", "text_model.", name)
+        name = re.sub(r"^language_model.model.", "text_model.", name)
+        name = re.sub(r"cross_attn|self_attn", "attn", name)
+        params[name] = parameter
+    # TODO -- need to do a few more things:
+    #  - merge vision embedding params
+    #  - merge cross attention gates
+    return params
+
+
+def get_config_dict(
+    config: transformers.PretrainedConfig, image_processor: MllamaImageProcessor | None
+) -> dict[str, Any]:
+    if hasattr(config, "vision_config"):
+        text, vision = config.text_config, config.vision_config
+    else:
+        text, vision = config, None
+    return dict(
+        text=dict(
+            d_layers=text.num_hidden_layers,
+            d_vocab=text.vocab_size,
+            d_model=text.hidden_size,
+            d_mlp=text.intermediate_size,
+            d_attention_head=getattr(
+                text, "head_dim", text.hidden_size // text.num_attention_heads
+            ),
+            d_attention_q=text.num_attention_heads // text.num_key_value_heads,
+            d_attention_kv=text.num_key_value_heads,
+            d_sequence_max=text.max_position_embeddings,
+            norm_epsilon=text.rms_norm_eps,
+            rope_angular_frequency=rope_angular_frequency(text).tolist(),
+        ),
+        vision=(
+            dict(
+                # Input
+                image_mean=image_processor.image_mean,
+                image_std=image_processor.image_std,
+                d_image=vision.image_size,
+                d_patch=vision.patch_size,
+                # Core
+                d_layers0=vision.num_hidden_layers,
+                d_layers1=vision.num_global_layers,
+                d_model=vision.hidden_size,
+                d_mlp=vision.intermediate_size,
+                d_attention_head=vision.hidden_size // vision.attention_heads,
+                d_attention_qkv=vision.attention_heads,
+                norm_epsilon=vision.norm_eps,
+                # Output
+                output_taps=vision.intermediate_layers_indices,
+            )
+            if vision
+            else None
+        ),
+    )
+
+
 def save(
     model: LlamaForCausalLM,
     tokenizer: transformers.PreTrainedTokenizerFast,
+    image_processor: MllamaImageProcessor | None,
     file_or_path: Union[str, Path, IO[bytes]],
     alignment: int = 32,
 ) -> None:
@@ -93,25 +166,15 @@ def save(
             source=model.config._name_or_path,
             created=datetime.datetime.now().isoformat(timespec="seconds"),
             alignment=alignment,
-            config=dict(
-                d_layers=model.config.num_hidden_layers,
-                d_vocab=model.config.vocab_size,
-                d_model=model.config.hidden_size,
-                d_mlp=model.config.intermediate_size,
-                d_attention_head=model.config.head_dim,
-                d_attention_q=model.config.num_attention_heads
-                // model.config.num_key_value_heads,
-                d_attention_kv=model.config.num_key_value_heads,
-                d_sequence_max=model.config.max_position_embeddings,
-                norm_epsilon=model.config.rms_norm_eps,
-                rope_angular_frequency=rope_angular_frequency(model.config).tolist(),
-            ),
+            config=get_config_dict(model.config, image_processor),
             vocab=get_vocab_dict(tokenizer),
         )
     )
+    params = prepare_parameters(model)
+
     # Measure serialized tensors, but discard them (for sake of memory usage)
     last_offset = 0
-    for name, tensor in model.named_parameters():
+    for name, tensor in params.items():
         dtype, data = encode_bf16(tensor)
         header_dict[name] = dict(
             dtype=dtype,
@@ -137,7 +200,7 @@ def save(
         # buffer
         buffer_start = f.tell()
         assert buffer_start % alignment == 0
-        for name, tensor in model.named_parameters():
+        for name, tensor in params.items():
             begin, end = header_dict[name]["data_offsets"]
             _, data = encode_bf16(tensor)
             assert f.tell() == buffer_start + begin

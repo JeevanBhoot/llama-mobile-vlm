@@ -44,7 +44,7 @@ std::ostream& operator<<(std::ostream&, const Dump<T>&);
 struct Image {
     uint height;
     uint width;
-    std::vector<uint8_t> data;
+    std::vector<uint8_t> data;  // [y*(width*3) + x*3 + c]
 
     Image(uint height, uint width, std::vector<uint8_t>&& data);
     Image(const Image&) = delete;
@@ -93,9 +93,9 @@ struct Tensor : TensorV {
 std::ostream& operator<<(std::ostream&, const TensorV&);
 
 /// Model ///
+// Holds all shape and parameter data (views onto an underlying buffer)
 
-// The model holds all shape and parameter data (views onto an underlying buffer)
-struct Model {
+struct TextModel {
     struct AttentionLayer {
         TensorV norm;
         TensorV query;
@@ -113,11 +113,6 @@ struct Model {
         AttentionLayer attention;
         MLPLayer mlp;
     };
-
-    // Metadata
-    std::string source;
-    std::string created;
-    ulong alignment;
 
     // Config
     uint dLayers;
@@ -140,8 +135,23 @@ struct Model {
     Tokenizer tokenizer;
     uint beginOfTextID;
     uint endOfTextID;
+};
 
-    // Data
+struct VisionModel {
+    std::vector<float> imageMean;
+    std::vector<float> imageStd;
+    uint dImage;
+    uint dPatch;
+};
+
+struct Model {
+    TextModel textModel;
+    std::optional<VisionModel> visionModel;
+
+    // Metadata & data buffer
+    std::string source;
+    std::string created;
+    ulong alignment;
     Buffer _data;
 };
 
