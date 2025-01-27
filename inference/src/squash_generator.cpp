@@ -137,13 +137,17 @@ void forward(Generator& g, const std::vector<uint>& tokens) {
     auto& textModel = g.model.textModel;
     auto x = embeddingLookup(textModel.embedTokens, tokens);
     for (auto i = 0u; i < textModel.dLayers; ++i) {
+        if (std::find(textModel.crossAttentionLayers.begin(), textModel.crossAttentionLayers.end(),
+                      i) != textModel.crossAttentionLayers.end()) {
+            continue;  // TODO - cross attention
+        }
         auto a = attention(textModel, textModel.layers[i].attention, x, g.kvCache.dSequence,
                            g.kvCache.entries[i]);
         addInPlace(x, a);
         addInPlace(x, mlp(textModel, textModel.layers[i].mlp, x));
     }
     x = rmsNorm(textModel.finalNorm, x, textModel.normEpsilon);
-    x = projection(textModel.embedTokens, x);
+    x = projection(textModel.predictTokens, x);
     g.kvCache.dSequence += uint(tokens.size());
     g.prevToken = nextToken(g, x);
 }

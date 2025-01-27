@@ -130,6 +130,7 @@ TextModel loadTextModel(const json& header,
                  .down = loadTensorV(mlp + ".down_proj"),
              }});
     }
+    auto tiedEmbeddings = c.at("tied_embeddings").template get<bool>();
     return TextModel{
         // Config
         .dLayers = c.at("d_layers").template get<uint>(),
@@ -142,11 +143,15 @@ TextModel loadTextModel(const json& header,
         .dSequenceMax = c.at("d_sequence_max").template get<uint>(),
         .normEpsilon = c.at("norm_epsilon").template get<float>(),
         .ropeAngularFrequency = c.at("rope_angular_frequency").template get<std::vector<float>>(),
+        .tiedEmbeddings = tiedEmbeddings,
+        .crossAttentionLayers = c.at("cross_attention_layers").template get<std::vector<uint>>(),
 
         // Parameters
         .embedTokens = loadTensorV("text_model.embed_tokens"),
         .layers = layers,
         .finalNorm = loadTensorV("text_model.norm"),
+        .predictTokens =
+            loadTensorV(tiedEmbeddings ? "text_model.embed_tokens" : "text_model.lm_head"),
 
         // Vocab
         .tokenizer = loadTokenizer(v),

@@ -101,9 +101,25 @@ def prepare_parameters(
         name = re.sub(r"^language_model.model.", "text_model.", name)
         name = re.sub(r"cross_attn|self_attn", "attn", name)
         params[name] = parameter
-    # TODO -- need to do a few more things:
-    #  - merge vision embedding params
-    #  - merge cross attention gates
+
+    # Standardise "lm_head"
+    for head_name in ["language_model.lm_head.weight", "lm_head.weight"]:
+        if head_name in params:
+            params["text_model.lm_head.weight"] = params.pop(head_name)
+
+    # Merge cross-attn gates
+    for name in list(params):
+        if m := re.match(
+            r"^(text_model.layers.\d+).(attn_attn_gate|attn_mlp_gate)", name
+        ):
+            gate = params.pop(name)
+            o_name = dict(
+                attn_attn_gate=".attn.o_proj", attn_mlp_gate=".mlp.down_proj"
+            )[m.group(2)]
+            o_proj = m.group(1) + o_name + ".weight"
+            params[o_proj] = params[o_proj] * gate.view(()).tanh()
+
+    # TODO -- need to merge vision embedding params
     return params
 
 
@@ -128,6 +144,8 @@ def get_config_dict(
             d_sequence_max=text.max_position_embeddings,
             norm_epsilon=text.rms_norm_eps,
             rope_angular_frequency=rope_angular_frequency(text).tolist(),
+            tied_embeddings=text.tie_word_embeddings,
+            cross_attention_layers=getattr(text, "cross_attention_layers", []),
         ),
         vision=(
             dict(

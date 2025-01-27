@@ -125,11 +125,14 @@ struct TextModel {
     uint dSequenceMax;
     float normEpsilon;
     std::vector<float> ropeAngularFrequency;
+    bool tiedEmbeddings;
+    std::vector<uint> crossAttentionLayers;
 
     // Parameters
     TensorV embedTokens;
     std::vector<Layer> layers;
     TensorV finalNorm;
+    TensorV predictTokens;
 
     // Vocab
     Tokenizer tokenizer;
