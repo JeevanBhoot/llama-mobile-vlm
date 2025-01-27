@@ -1,4 +1,4 @@
-from training.utility import batches
+from utility import batches
 
 
 def test_batches() -> None:

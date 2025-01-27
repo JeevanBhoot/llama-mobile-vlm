@@ -1,1 +1,5 @@
+/data
 /local
+/notebooks
+/out
+/wandb

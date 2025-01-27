@@ -5,7 +5,8 @@
 import math
 import re
 from dataclasses import dataclass
-from typing import Callable, Iterable, Optional, Sequence, Tuple, Union, cast, Literal
+from typing import (Callable, Iterable, Literal, Optional, Sequence, Tuple,
+                    Union, cast)
 
 import torch
 from torch import Tensor, nn

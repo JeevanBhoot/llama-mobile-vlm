@@ -16,7 +16,7 @@ import tqdm
 import transformers
 from torch import Tensor
 
-from training.utility import batches
+from utility import batches
 
 DEFAULT_DTYPE = dict(cpu=torch.float32, cuda=torch.bfloat16)
 
