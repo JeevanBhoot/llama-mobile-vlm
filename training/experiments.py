@@ -20,13 +20,15 @@ class Task:
     n_examples: Optional[int]
     metrics: list[str]
 
+    @classmethod
     def outcompare(
-        n_examples: Optional[int] = None, metrics=outcompare.METRICS
+        cls, n_examples: Optional[int] = None, metrics=outcompare.METRICS
     ) -> "Task":
-        return Task(name="outcompare", n_examples=n_examples, metrics=metrics)
+        return cls(name="outcompare", n_examples=n_examples, metrics=metrics)
 
-    def vqa(n_examples: int = 1000) -> "Task":
-        return Task(name="vqa", n_examples=n_examples, metrics=["accuracy"])
+    @classmethod
+    def vqa(cls, n_examples: int = 1000) -> "Task":
+        return cls(name="vqa", n_examples=n_examples, metrics=["accuracy"])
 
 
 @dataclass
