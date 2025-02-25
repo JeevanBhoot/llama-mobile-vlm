@@ -3,7 +3,6 @@ datasets==3.0.1
 pillow==11.0.0
 pytest==8.3.4
 torch==2.5.0
-torchao==0.7.0
 torchaudio==2.5.0
 transformers==4.45.1
 wandb==0.19.1
