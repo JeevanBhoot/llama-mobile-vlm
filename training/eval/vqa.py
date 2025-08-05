@@ -1,6 +1,5 @@
 # Evaluate standard visual QA tasks (currently just VQAv2)
 
-import unittest.mock as um
 from itertools import islice
 from typing import Iterable, Iterator, Optional
 
@@ -9,7 +8,7 @@ import regex as re
 import torch
 import transformers
 
-from utility import batches
+from utility import batches, set_padding_side_left
 
 
 class VQA:
@@ -168,11 +167,11 @@ def evaluate(
         # TODO: Move tokenisation + generation to a separate adapter?
 
         # Tokenise the batch
-        imgs = [x["image"] for x in batch]
+        imgs = [[x["image"]] for x in batch]  # NOTE: Each example gets a list of images
         prompts = [system_template.format(prompt=x["prompt"]) for x in batch]
 
         # Set to left-padding so we can call model.generate() when batched
-        with um.patch.object(processor.tokenizer, "padding_side", "left"):
+        with set_padding_side_left(processor.tokenizer):
             inp = processor(imgs, prompts, return_tensors="pt", padding=True).to(
                 model.device
             )
