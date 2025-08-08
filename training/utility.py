@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Optional, TypeVar
 
+import safetensors.torch
 import torch
 from torch import Tensor, nn
 from transformers import MllamaVisionModel, PreTrainedTokenizerBase
@@ -153,3 +154,21 @@ def compute_kl_loss(
         batch["attention_mask"].unsqueeze(-1),
     )
     return xent - reference_ent
+
+
+def save_model(model: nn.Module, path: Path | None, dtype: torch.dtype) -> None:
+    """Save a model to a local .safetensors file.
+
+    Note that this requires enough free memory to hold the whole model on one shard.
+    """
+    with torch.no_grad():
+        unsharded_tensors = {}
+        state_dict = model.state_dict()
+        for key in state_dict:
+            tensor = state_dict[key].to(dtype)
+            if isinstance(tensor, torch.distributed.tensor.DTensor):
+                tensor = tensor.full_tensor()
+            unsharded_tensors[key.replace("._orig_mod", "")] = tensor
+        if not torch.distributed.is_initialized() or (torch.distributed.get_rank() == 0):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            safetensors.torch.save_file(unsharded_tensors, path)

@@ -1,23 +1,28 @@
 import itertools as it
 import math
+import sys
 import time
+import traceback
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Iterable, Optional
-import traceback
 
 import torch
 import torch.distributed as dist
 import torch.distributed.fsdp as fsdp
 import torch.multiprocessing as mp
 import transformers
-from quantisation import quantisation as Q_old
-from quantisation.layers import quantise_linear_layers
 import weight_formats.quantisation as Q_new
 import weight_formats.quantisation_training as QT
-from transformers import MllamaForConditionalGeneration, MllamaProcessor
-from training_data import Datum
 from tqdm import tqdm
+from transformers import MllamaForConditionalGeneration, MllamaProcessor
+
+import wandb
+from quantisation import quantisation as Q_old
+from quantisation.layers import quantise_linear_layers
+from training_data import Dataset, Datum
+from utility import compute_kl_loss, distributed_batches, record_memory, save_model
 
 # from weight_formats.quantisation_training import (
 #     ScalingMode,
@@ -25,9 +30,6 @@ from tqdm import tqdm
 #     get_named_parameters,
 # )
 
-import wandb
-from training_data import Dataset
-from utility import distributed_batches, record_memory, compute_kl_loss
 
 WANDB_PROJECT = "llama-mobile"
 
@@ -93,6 +95,7 @@ class Settings:
     wandb: bool
     n_val_examples: int
     memory_profile: bool
+    save_checkpoint: bool
 
     @classmethod
     def default(cls) -> "Settings":
@@ -128,6 +131,7 @@ class Settings:
             wandb=True,
             n_val_examples=512,
             memory_profile=False,
+            save_checkpoint=False,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -232,6 +236,7 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
         world_size=settings.execution.world_size,
         rank=rank,
     )
+    total_t, total_val_t = None, None
     try:
         rank = dist.get_rank()
         world_size = dist.get_world_size()
@@ -285,7 +290,10 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                     # TODO: Get rid of this
                     if settings.quantisation.implementation == "new":
                         n_bits = QT.count_bits(
-                            student, compute_dtype=settings.execution.compute_dtype
+                            student,
+                            compute_dtype=getattr(
+                                torch, settings.execution.compute_dtype
+                            ),
                         )
                     else:
                         n_bits = None
@@ -417,15 +425,26 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                         out["perf/val_step_time"] = val_step_t
                     wandb.log(out, step=step)
             total_t = time.time() - total_t0
+            del opt  # save memory
+            if settings.save_checkpoint:
+                path = None
+                if rank == 0:
+                    filename = run.name if settings.wandb else settings.run_name
+                    path = Path(f"out/{filename}.safetensors")
+                save_model(
+                    student,
+                    path,
+                    dtype=getattr(torch, settings.execution.compute_dtype),
+                )
+
     except Exception as e:
         error_type = type(e).__name__
         error_message = str(e)
         tb = traceback.format_exc()
         if rank == 0:
-            print(error_type, error_message)
-            print(tb)
+            print(error_type, error_message, file=sys.stderr, flush=True)
+            print(tb, file=sys.stderr, flush=True)
             if settings.wandb:
-                run.summary["run_status"] = "Fail"
                 run.summary["error_type"] = error_type
                 run.summary["error_message"] = error_message
                 run.summary["traceback"] = tb
@@ -433,15 +452,11 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
         if settings.wandb and rank == 0:
             run.summary["total_time"] = total_t
             run.summary["total_val_time"] = total_val_t
-            if "run_status" not in run.summary.keys():
-                run.summary["run_status"] = "Success"
-            wandb.finish()
+            wandb.finish(1 if "error_type" in run.summary.keys() else 0)
         dist.destroy_process_group()
 
 
-if __name__ == "__main__":
-    settings = Settings.default()
-
+def run_experiment(settings: Settings) -> None:
     try:
         mp.spawn(
             fsdp_train,
@@ -450,5 +465,5 @@ if __name__ == "__main__":
             join=True,
         )
     except Exception as e:
-        print(e)
+        print(e, file=sys.stderr, flush=True)
         traceback.print_exc()
