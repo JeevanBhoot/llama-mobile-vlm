@@ -22,7 +22,13 @@ import wandb
 from quantisation import quantisation as Q_old
 from quantisation.layers import quantise_linear_layers
 from training_data import Dataset, Datum
-from utility import compute_kl_loss, distributed_batches, record_memory, save_model
+from utility import (
+    check_s3_access,
+    compute_kl_loss,
+    distributed_batches,
+    record_memory,
+    save_model_to_s3,
+)
 
 # from weight_formats.quantisation_training import (
 #     ScalingMode,
@@ -230,6 +236,8 @@ def run_validation(
 
 
 def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
+    if settings.save_checkpoint:
+        check_s3_access()
     dist.init_process_group(
         "nccl",
         init_method=init_method,
@@ -430,8 +438,8 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                 path = None
                 if rank == 0:
                     filename = run.name if settings.wandb else settings.run_name
-                    path = Path(f"out/{filename}.safetensors")
-                save_model(
+                    path = f"s3://graphcore-research/2024-10-squashedllama/checkpoints/{filename}.safetensors"
+                save_model_to_s3(
                     student,
                     path,
                     dtype=getattr(torch, settings.execution.compute_dtype),

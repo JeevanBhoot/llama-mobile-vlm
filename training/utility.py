@@ -1,4 +1,6 @@
 import copy
+import subprocess
+import tempfile
 import unittest.mock as um
 from contextlib import contextmanager
 from pathlib import Path
@@ -156,8 +158,15 @@ def compute_kl_loss(
     return xent - reference_ent
 
 
-def save_model(model: nn.Module, path: Path | None, dtype: torch.dtype) -> None:
-    """Save a model to a local .safetensors file.
+def check_s3_access() -> None:
+    """Check that we have credentials for AWS S3 access."""
+    subprocess.check_call(
+        ["aws", "s3", "ls", "s3://graphcore-research"], stdout=subprocess.DEVNULL
+    )
+
+
+def save_model_to_s3(model: nn.Module, s3_name: str | None, dtype: torch.dtype) -> None:
+    """Save a model to a .safetensors file and sync to S3.
 
     Note that this requires enough free memory to hold the whole model on one shard.
     """
@@ -169,6 +178,10 @@ def save_model(model: nn.Module, path: Path | None, dtype: torch.dtype) -> None:
             if isinstance(tensor, torch.distributed.tensor.DTensor):
                 tensor = tensor.full_tensor()
             unsharded_tensors[key.replace("._orig_mod", "")] = tensor
-        if not torch.distributed.is_initialized() or (torch.distributed.get_rank() == 0):
-            path.parent.mkdir(parents=True, exist_ok=True)
-            safetensors.torch.save_file(unsharded_tensors, path)
+        if not torch.distributed.is_initialized() or (
+            torch.distributed.get_rank() == 0
+        ):
+            assert s3_name is not None
+            with tempfile.NamedTemporaryFile() as f:
+                safetensors.torch.save_file(unsharded_tensors, f.name)
+                subprocess.check_call(["aws", "s3", "cp", f.name, s3_name])
