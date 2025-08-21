@@ -1,9 +1,12 @@
 import copy
+import subprocess
+import tempfile
 import unittest.mock as um
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Optional, TypeVar
 
+import safetensors.torch
 import torch
 from torch import Tensor, nn
 from transformers import MllamaVisionModel, PreTrainedTokenizerBase
@@ -153,3 +156,35 @@ def compute_kl_loss(
         batch["attention_mask"].unsqueeze(-1),
     )
     return xent - reference_ent
+
+
+def check_s3_access() -> None:
+    """Check that we have credentials for AWS S3 access."""
+    subprocess.check_call(
+        ["aws", "s3", "ls", "s3://graphcore-research"], stdout=subprocess.DEVNULL
+    )
+
+
+def save_model_to_s3(model: nn.Module, s3_path: str | None, dtype: torch.dtype) -> None:
+    """Save a model to a .safetensors file and sync to S3.
+
+    s3_path -- the path to save the object to in S3; should be s3://bucket/key...
+               (this can be `None` for `rank != 0` when using distributed training)
+
+    Note that this requires enough free memory to hold the whole model on one shard.
+    """
+    with torch.no_grad():
+        unsharded_tensors = {}
+        state_dict = model.state_dict()
+        for key in state_dict:
+            tensor = state_dict[key].to(dtype)
+            if isinstance(tensor, torch.distributed.tensor.DTensor):
+                tensor = tensor.full_tensor()
+            unsharded_tensors[key.replace("._orig_mod", "")] = tensor
+        if not torch.distributed.is_initialized() or (
+            torch.distributed.get_rank() == 0
+        ):
+            assert s3_path is not None
+            with tempfile.NamedTemporaryFile() as f:
+                safetensors.torch.save_file(unsharded_tensors, f.name)
+                subprocess.check_call(["aws", "s3", "cp", f.name, s3_path])
