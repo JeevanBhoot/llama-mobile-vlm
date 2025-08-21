@@ -165,8 +165,11 @@ def check_s3_access() -> None:
     )
 
 
-def save_model_to_s3(model: nn.Module, s3_name: str | None, dtype: torch.dtype) -> None:
+def save_model_to_s3(model: nn.Module, s3_path: str | None, dtype: torch.dtype) -> None:
     """Save a model to a .safetensors file and sync to S3.
+
+    s3_path -- the path to save the object to in S3; should be s3://bucket/key...
+               (this can be `None` for `rank != 0` when using distributed training)
 
     Note that this requires enough free memory to hold the whole model on one shard.
     """
@@ -181,7 +184,7 @@ def save_model_to_s3(model: nn.Module, s3_name: str | None, dtype: torch.dtype) 
         if not torch.distributed.is_initialized() or (
             torch.distributed.get_rank() == 0
         ):
-            assert s3_name is not None
+            assert s3_path is not None
             with tempfile.NamedTemporaryFile() as f:
                 safetensors.torch.save_file(unsharded_tensors, f.name)
-                subprocess.check_call(["aws", "s3", "cp", f.name, s3_name])
+                subprocess.check_call(["aws", "s3", "cp", f.name, s3_path])

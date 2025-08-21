@@ -3,9 +3,11 @@
 import base64
 import html
 import io
+import subprocess
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import PIL.Image
 import safetensors.torch
@@ -15,6 +17,8 @@ import transformers
 import weight_formats.quantisation as Q
 import weight_formats.quantisation_training as QT
 from torch import Tensor, nn
+
+import train
 
 # Components
 
@@ -128,7 +132,7 @@ class LlamaVQA:
         self.prompt_templates = dict(
             instruct="<|start_header_id|>user<|end_header_id|>"
             "\n\n<|image|>{prompt}<|eot_id|>"
-            "<|start_header_id|>assistant<|end_header_id|>",
+            "<|start_header_id|>assistant<|end_header_id|>\n\n",
             simple="<|image|>{prompt}",
         )
         self.images = {}
@@ -142,7 +146,14 @@ class LlamaVQA:
     def load_model(self, name: str, checkpoint_name: str, fmt: Q.TensorFormat) -> None:
         path = Path(__file__).parent / "checkpoints" / f"{checkpoint_name}.safetensors"
         if not path.exists():
-            raise ValueError(f"checkpoint not found: {checkpoint_name} at {path}")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            s3_path = train.CHECKPOINT_PATH.format(name=checkpoint_name)
+            try:
+                subprocess.check_call(["aws", "s3", "cp", s3_path, str(path)])
+            except subprocess.CalledProcessError as e:
+                raise ValueError(
+                    f"checkpoint not found: {checkpoint_name!r} at {path} or {s3_path}"
+                ) from e
         self.model.params[name] = load_parameters_from_file(self.model.model, fmt, path)
 
     def load_image(self, name: str, url: str) -> None:
@@ -157,9 +168,13 @@ class LlamaVQA:
         *models_and_templates: tuple[str, str],
         n_tokens: int = 40,
         progress: bool = True,
+        do_sample: bool = False,
+        **args: Any,
     ) -> Completions:
         image_data = self.images[image]
         completions = {}
+        if not do_sample:
+            args.update(temperature=None, top_p=None)  # avoid warnings
         for model, template in tqdm.tqdm(models_and_templates, disable=not progress):
             self.model.select(model)
             inputs = self.processor(
@@ -171,9 +186,8 @@ class LlamaVQA:
             out = self.model.model.generate(
                 **inputs.to(self.device),
                 max_new_tokens=n_tokens,
-                do_sample=False,
-                temperature=None,
-                top_p=None,
+                do_sample=do_sample,
+                **args,
             )[0, inputs.input_ids.shape[1] :]
             completions[f"{model}[{template}]"] = self.processor.decode(out)
         return Completions(image_data, prompt, completions)

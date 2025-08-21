@@ -38,6 +38,9 @@ from utility import (
 
 
 WANDB_PROJECT = "llama-mobile"
+CHECKPOINT_PATH = (
+    "s3://graphcore-research/2024-10-squashedllama/checkpoints/{name}.safetensors"
+)
 
 
 @dataclass
@@ -437,8 +440,9 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
             if settings.save_checkpoint:
                 path = None
                 if rank == 0:
-                    filename = run.name if settings.wandb else settings.run_name
-                    path = f"s3://graphcore-research/2024-10-squashedllama/checkpoints/{filename}.safetensors"
+                    path = CHECKPOINT_PATH.format(
+                        name=run.name if settings.wandb else settings.run_name
+                    )
                 save_model_to_s3(
                     student,
                     path,
