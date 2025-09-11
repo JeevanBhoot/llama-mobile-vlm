@@ -3,14 +3,14 @@
 import dataclasses
 import json
 from collections import OrderedDict
-from typing import cast, Any
+from typing import Any, cast
 
 import pytest
 import torch
 import torch.nn.functional as F
 from torch import nn, tensor
 
-from .. import quantisation as Q
+import quantisation as Q
 
 
 def _json_roundtrip(s: Any) -> Any:

@@ -1,1 +1,6 @@
+/checkpoints
+/data*
 /local
+/notebooks
+/out
+/wandb

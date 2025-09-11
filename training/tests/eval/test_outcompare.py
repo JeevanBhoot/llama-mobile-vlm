@@ -1,17 +1,19 @@
 # Copyright (c) 2023 Graphcore Ltd. All rights reserved.
 
-import transformers
 import torch
-from training.eval import outcompare
+import transformers
+
+from eval import outcompare
 
 
 def test_outcompare() -> None:
     dataset = outcompare.generate_dataset(
-        "meta-llama/Llama-3.2-1B",
+        "EleutherAI/pythia-70m",
         prompt_length=16,
         completion_length=20,
         batch_size=4,
         dataset="wikitext:wikitext-103-raw-v1:validation",
+        dtype="float32",
         limit=4,
         progress=False,
     )
@@ -21,7 +23,7 @@ def test_outcompare() -> None:
         dataset.model, torch_dtype=dataset.dtype
     )
     if torch.cuda.is_available():
-        model.to(device="cuda")
+        model.to("cuda")
     out = outcompare.evaluate(model, dataset, batch_size=4)
     assert out == dict(
         entropy_rmse=0,
@@ -33,7 +35,7 @@ def test_outcompare() -> None:
     )
 
     # Break the model a bit, and re-evaluate
-    model.model.layers[4].self_attn.o_proj.weight.data.fill_(0)
+    model.gpt_neox.layers[4].attention.dense.weight.data.fill_(0)
     out = outcompare.evaluate(model, dataset, batch_size=4)
     assert 0 < out["entropy_rmse"] < 10
     assert 0 < out["entropy_rmse_stderr"] < 10
