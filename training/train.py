@@ -27,7 +27,7 @@ from utility import (
     compute_kl_loss,
     distributed_batches,
     record_memory,
-    save_model_to_s3,
+    save_quantised_model_to_s3,
 )
 
 # from weight_formats.quantisation_training import (
@@ -443,7 +443,7 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                     path = CHECKPOINT_PATH.format(
                         name=run.name if settings.wandb else settings.run_name
                     )
-                save_model_to_s3(
+                save_quantised_model_to_s3(
                     student,
                     path,
                     dtype=getattr(torch, settings.execution.compute_dtype),

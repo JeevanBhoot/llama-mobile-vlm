@@ -8,6 +8,7 @@ from typing import Any, Callable, Iterable, Iterator, Optional, TypeVar
 
 import safetensors.torch
 import torch
+import weight_formats.quantisation_training as QT
 from torch import Tensor, nn
 from transformers import MllamaVisionModel, PreTrainedTokenizerBase
 
@@ -165,7 +166,7 @@ def check_s3_access() -> None:
     )
 
 
-def save_model_to_s3(model: nn.Module, s3_path: str | None, dtype: torch.dtype) -> None:
+def save_quantised_model_to_s3(model: nn.Module, s3_path: str | None, dtype: torch.dtype) -> None:
     """Save a model to a .safetensors file and sync to S3.
 
     s3_path -- the path to save the object to in S3; should be s3://bucket/key...
@@ -175,12 +176,14 @@ def save_model_to_s3(model: nn.Module, s3_path: str | None, dtype: torch.dtype) 
     """
     with torch.no_grad():
         unsharded_tensors = {}
-        state_dict = model.state_dict()
+        state_dict = QT.save(model)
         for key in state_dict:
-            tensor = state_dict[key].to(dtype)
+            tensor = state_dict[key]
+            if tensor.dtype.is_floating_point:
+                tensor = tensor.to(dtype)
             if isinstance(tensor, torch.distributed.tensor.DTensor):
                 tensor = tensor.full_tensor()
-            unsharded_tensors[key.replace("._orig_mod", "")] = tensor
+            unsharded_tensors[key] = tensor
         if not torch.distributed.is_initialized() or (
             torch.distributed.get_rank() == 0
         ):

@@ -1,6 +1,7 @@
 """Utilities for interacting with quantised models (designed for use with Jupyter)"""
 
 import base64
+import copy
 import html
 import io
 import subprocess
@@ -49,37 +50,22 @@ class MultiParameterSetModel:
         return device
 
 
-def load_parameter(
-    name: str, fmt: Q.TensorFormat, checkpoint: dict[str, Tensor], device: torch.device
-) -> Tensor:
-    if name in checkpoint:
-        return checkpoint[name].to(device)
-    master = checkpoint[f"{name}.master"]
-    q_weight = QT.Weight(
-        master,
-        fmt,
-        scaling_mode="parameter" if f"{name}.scale" in checkpoint else "dynamic",
-        clip_gradient=False,
-    )
-    q_weight.to(device)
-    for key in ["master", "scale", "sparse_idx", "sparse_weight"]:
-        full_key = f"{name}.{key}"
-        assert (full_key in checkpoint) == hasattr(q_weight, key), full_key
-        if full_key in checkpoint:
-            setattr(q_weight, key, nn.Parameter(checkpoint[full_key].to(device)))
-    with torch.no_grad():
-        return q_weight()
-
-
 def load_parameters_from_file(
-    model: transformers.PreTrainedModel, fmt: Q.TensorFormat, checkpoint: Path
+    model: transformers.PreTrainedModel, checkpoint: Path
 ) -> dict[str, Tensor]:
-    (device,) = set(p.device for p in model.parameters())
-    f = safetensors.torch.load_file(checkpoint)
-    return {
-        key: load_parameter(key, fmt, f, device).cpu()
-        for key, _ in model.named_parameters()
-    }
+    qmodel = copy.deepcopy(model)
+    QT.load_convert(qmodel, safetensors.torch.load_file(checkpoint))
+
+    # Convert to plain parameters (for the original/unconverted model)
+    params = {}
+    with torch.no_grad():
+        for name, module in qmodel.named_modules():
+            if isinstance(module, QT.Weight):
+                params[name] = module().cpu()
+            else:
+                for k, p in module._parameters.items():
+                    params[".".join(name.split(".") + [k])] = None if p is None else p.cpu()
+    return params
 
 
 @dataclass
@@ -143,7 +129,7 @@ class LlamaVQA:
             f" images={list(self.images)}, prompt_templates={list(self.prompt_templates)})"
         )
 
-    def load_model(self, name: str, checkpoint_name: str, fmt: Q.TensorFormat) -> None:
+    def load_model(self, name: str, checkpoint_name: str) -> None:
         path = Path(__file__).parent / "checkpoints" / f"{checkpoint_name}.safetensors"
         if not path.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -154,7 +140,7 @@ class LlamaVQA:
                 raise ValueError(
                     f"checkpoint not found: {checkpoint_name!r} at {path} or {s3_path}"
                 ) from e
-        self.model.params[name] = load_parameters_from_file(self.model.model, fmt, path)
+        self.model.params[name] = load_parameters_from_file(self.model.model, path)
 
     def load_image(self, name: str, url: str) -> None:
         image = PIL.Image.open(urllib.request.urlopen(url))
