@@ -14,7 +14,7 @@
 
 ```sh
 ./dev setup
-sudo apt install ninja-build clang clang-format
+sudo apt install clang clang-format libc++-dev libopenmp-dev ninja-build
 # If android: install NDK to /opt/android-sdk/ndk/latest
 ```
 

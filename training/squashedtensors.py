@@ -19,6 +19,9 @@ from transformers.models.mllama.modeling_mllama import MllamaForConditionalGener
 from transformers.models.mllama.image_processing_mllama import MllamaImageProcessor
 
 
+FILE_VERSION = 1
+
+
 def encode_bf16(tensor: Tensor) -> tuple[str, Tensor]:
     return ("BF16", tensor.contiguous().flatten().to(torch.bfloat16).view(torch.uint8))
 
@@ -95,32 +98,87 @@ def prepare_parameters(
     model: LlamaForCausalLM | MllamaForConditionalGeneration,
 ) -> dict[str, nn.Parameter]:
     """Rename parameters for uniform storage between models."""
-    params = {}
-    for name, parameter in model.named_parameters():
-        name = re.sub(r"^model.", "text_model.", name)
-        name = re.sub(r"^language_model.model.", "text_model.", name)
-        name = re.sub(r"cross_attn|self_attn", "attn", name)
-        params[name] = parameter
+    with torch.no_grad():
+        params = {}
 
-    # Standardise "lm_head"
-    for head_name in ["language_model.lm_head.weight", "lm_head.weight"]:
-        if head_name in params:
-            params["text_model.lm_head.weight"] = params.pop(head_name)
+        # Standardise names
+        for name, parameter in model.named_parameters():
+            name = re.sub(r"^model\.vision_model\.", "vision_model.", name)
+            name = re.sub(r"^model\.language_model\.", "text_model.", name)
+            name = re.sub(r"^model\.", "text_model.", name)
+            name = re.sub(r"^lm_head\.weight$", "text_model.lm_head.weight", name)
+            name = re.sub(r"\.(cross_attn|self_attn)\.", ".attn.", name)
+            name = re.sub(r"\.(fc1)\.", ".up_proj.", name)
+            name = re.sub(r"\.(fc2)\.", ".down_proj.", name)
+            name = re.sub(r"\.input_layernorm\.", ".attn.norm.", name)
+            name = re.sub(r"\.post_attention_layernorm\.", ".mlp.norm.", name)
+            assert name not in params, f"duplicate parameter {name!r}"
+            params[name] = parameter
 
-    # Merge cross-attn gates
-    for name in list(params):
-        if m := re.match(
-            r"^(text_model.layers.\d+).(attn_attn_gate|attn_mlp_gate)", name
-        ):
-            gate = params.pop(name)
-            o_name = dict(
-                attn_attn_gate=".attn.o_proj", attn_mlp_gate=".mlp.down_proj"
-            )[m.group(2)]
-            o_proj = m.group(1) + o_name + ".weight"
-            params[o_proj] = params[o_proj] * gate.view(()).tanh()
+        # Simplify downstream implementations by merging gates into linear projections
+        # and combining embeddings. Note:
+        # - Original embedding shapes are sometimes flattened, hence `unflatten()`
+        # - Original model uses 1-based indexing of aspect ratios, hence `[1:]` to
+        #   revert to 0-based indexing.
+        if isinstance(model, MllamaForConditionalGeneration):
+            # Merge cross-attention gates into output projections
+            for i in model.config.text_config.cross_attention_layers:
+                prefix = f"text_model.layers.{i}"
+                gate = f"{prefix}.cross_attn_attn_gate"
+                weight = f"{prefix}.attn.o_proj.weight"
+                params[weight] = params[weight] * params.pop(gate).view(()).tanh()
+                gate = f"{prefix}.cross_attn_mlp_gate"
+                weight = f"{prefix}.mlp.down_proj.weight"
+                params[weight] = params[weight] * params.pop(gate).view(()).tanh()
 
-    # TODO -- need to merge vision embedding params
-    return params
+            # Merge global_transformer gates into output projections
+            for i in range(model.config.vision_config.num_global_layers):
+                prefix = f"vision_model.global_transformer.layers.{i}"
+                gate = f"{prefix}.gate_attn"
+                weight = f"{prefix}.attn.o_proj.weight"
+                params[weight] = params[weight] * params.pop(gate).view(()).tanh()
+                gate = f"{prefix}.gate_ffn"
+                gate_tensor = params.pop(gate).view(()).tanh()
+                weight = f"{prefix}.mlp.up_proj.weight"
+                params[weight] = params[weight] * gate_tensor
+                bias = f"{prefix}.mlp.down_proj.bias"
+                params[bias] = params[bias] * gate_tensor
+
+            n_tiles = model.config.vision_config.max_num_tiles
+            n_patches = (
+                model.config.vision_config.image_size
+                // model.config.vision_config.patch_size
+            ) ** 2
+
+            # Create merged positional_embedding and class_embedding
+            prefix = "vision_model.gated_positional_embedding"
+            embedding0 = params.pop(f"{prefix}.embedding")
+            gate = params.pop(f"{prefix}.gate").view(()).tanh()
+            tile_embedding = params.pop(f"{prefix}.tile_embedding.weight")[
+                1:
+            ].unflatten(1, (n_tiles, n_patches + 1, -1))
+            embedding0 = embedding0 * (1 - gate) + tile_embedding * gate
+            prefix = "vision_model.pre_tile_positional_embedding"
+            pre_tile_embedding = params.pop(f"{prefix}.embedding.weight")[1:].unflatten(
+                1, (n_tiles, -1)
+            )
+            gate = params.pop(f"{prefix}.gate").view(()).tanh()
+            params["vision_model.positional_embedding.weight"] = (
+                pre_tile_embedding.unsqueeze(2) * gate + embedding0[:, :, 1:, :]
+            )
+            params["vision_model.class_embedding.weight"] = (
+                params.pop("vision_model.class_embedding") + embedding0[:, :, 0, :]
+            )
+
+            # Merge post_tile_positional_embedding gate
+            prefix = "vision_model.post_tile_positional_embedding"
+            weight = params.pop(f"{prefix}.embedding.weight")[1:].unflatten(
+                1, (n_tiles, -1)
+            )
+            gate = params.pop(f"{prefix}.gate").view(()).tanh()
+            params[f"{prefix}.weight"] = weight * gate
+
+        return params
 
 
 def get_config_dict(
@@ -172,7 +230,7 @@ def get_config_dict(
 
 
 def save(
-    model: LlamaForCausalLM,
+    model: LlamaForCausalLM | MllamaForConditionalGeneration,
     tokenizer: transformers.PreTrainedTokenizerFast,
     image_processor: MllamaImageProcessor | None,
     file_or_path: Union[str, Path, IO[bytes]],
@@ -209,7 +267,7 @@ def save(
         )
 
         f.write(b".sqt")  # magic
-        f.write(struct.pack("<I", 0))  # version
+        f.write(struct.pack("<I", FILE_VERSION))  # version
         header = json.dumps(header_dict, separators=(",", ":")).encode("utf8")
         nheader_pad = -(16 + len(header)) % alignment
         f.write(struct.pack("<Q", len(header) + nheader_pad))  # header length

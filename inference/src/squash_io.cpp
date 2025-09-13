@@ -49,7 +49,7 @@ std::string regexUnicodeToModifiedECMA(const std::string& original) {
 
 namespace {
 constexpr auto Magic = 0x7471732eu;
-constexpr auto Version = 0u;
+constexpr auto Version = 1u;
 constexpr auto MaxRamProportion = 0.75f;
 constexpr auto BufferChunkSize = 4096u;
 
@@ -117,14 +117,14 @@ TextModel loadTextModel(const json& header,
         auto mlp = base + ".mlp";
         layers.push_back(  //
             {{
-                 .norm = loadTensorV(base + ".input_layernorm"),
+                 .norm = loadTensorV(attn + ".norm"),
                  .query = loadTensorV(attn + ".q_proj"),
                  .key = loadTensorV(attn + ".k_proj"),
                  .value = loadTensorV(attn + ".v_proj"),
                  .output = loadTensorV(attn + ".o_proj"),
              },
              {
-                 .norm = loadTensorV(base + ".post_attention_layernorm"),
+                 .norm = loadTensorV(mlp + ".norm"),
                  .up = loadTensorV(mlp + ".up_proj"),
                  .gate = loadTensorV(mlp + ".gate_proj"),
                  .down = loadTensorV(mlp + ".down_proj"),

@@ -111,6 +111,8 @@ def _generate_build_ninja(w: Any, platform: str) -> None:
         linkflags += ["-static-libstdc++"]
     if platform == "android":
         libs += ["-llog", "-static-openmp"]
+    if cxx == "clang++":
+        flags += ["-stdlib=libc++"]
     flags += ["-fopenmp"]
 
     root_to_files = {}  # [root] -> (src, obj, {variable: value})
