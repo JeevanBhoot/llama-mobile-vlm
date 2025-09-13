@@ -103,4 +103,51 @@ std::ostream& operator<<(std::ostream& out, const TensorV& tensor) {
     return out << "}";
 }
 
+void saveNpy(std::ostream& out, const TensorV& tensor) {
+    // Magic + Version
+    std::string magic = "\x93NUMPY";
+    out.write(magic.c_str(), static_cast<std::streamsize>(magic.size()));
+    out.put(1);  // version.major
+    out.put(0);  // version.minor
+
+    // Header
+    std::string header = "{'descr': '<f4', 'fortran_order': False, 'shape': (";
+    for (size_t i = 0; i < tensor.shape.size(); i++) {
+        if (i) header += ", ";
+        header += std::to_string(tensor.shape[i]);
+    }
+    if (tensor.shape.size() == 1) header += ",";  // tuple syntax for 1D
+    header += "), }";
+
+    // Pad with spaces so that total_size is a multiple of 16
+    // size: magic + version + header_size (u16) + header + newline
+    size_t headerPad = 16 - ((magic.size() + 2 + 2 + header.size() + 1) % 16);
+    header.append(headerPad, ' ');
+    header.push_back('\n');
+    uint16_t headerSize = static_cast<uint16_t>(header.size());
+    out.write(reinterpret_cast<char*>(&headerSize), sizeof(headerSize));
+    out.write(header.c_str(), static_cast<std::streamsize>(header.size()));
+
+    // Data
+    auto nElement = prod(tensor.shape);
+    std::visit(
+        [&out, nElement](auto&& data) {
+            using T = std::decay_t<decltype(data)>;
+            if constexpr (std::is_same_v<T, tensor_data::Flat<float>>) {
+                out.write(reinterpret_cast<const char*>(data.data),
+                          static_cast<std::streamsize>(nElement * sizeof(float)));
+            } else if constexpr (std::is_same_v<T, tensor_data::Flat<bf16>>) {
+                std::vector<float> fData(nElement);
+                std::transform(data.data, data.data + nElement, fData.data(), bf16ToFloat);
+                out.write(reinterpret_cast<const char*>(fData.data()),
+                          static_cast<std::streamsize>(nElement * sizeof(float)));
+            } else {
+                std::ostringstream err;
+                err << "saveNpy: Unexpected TensorV.data type: " << typeid(T).name() << "\n";
+                throw std::runtime_error(err.str());
+            }
+        },
+        tensor.data);
+}
+
 }  // namespace squash

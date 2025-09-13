@@ -2,6 +2,7 @@
 #include "squash.hpp"
 
 #include <algorithm>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 
@@ -103,7 +104,7 @@ Tensor preprocess(const VisionModel& model, const Image& image) {
                 auto y = (n / nPatch) * dPatch + (i / dPatch);
                 auto px = resized.data[y * yStride + x * dChannel + c];
                 ptr[n * nStride + i * dChannel + c] =
-                    (px / 255 - model.imageMean[c]) / model.imageStd[c];
+                    (px / 255.0f - model.imageMean[c]) / model.imageStd[c];
             }
         }
     }
@@ -176,6 +177,8 @@ std::vector<std::string> Generator::prefill(const std::string& prefix,
         }
         auto imageIn = preprocess(*model.visionModel, *image);
         DUMPSQ(imageIn);
+        std::ofstream f("wip.npy", std::ios::binary);
+        saveNpy(f, imageIn);
     }
     this->options = options;
     if (options.seed.has_value()) {

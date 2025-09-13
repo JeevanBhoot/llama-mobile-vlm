@@ -91,6 +91,7 @@ struct Tensor : TensorV {
 };
 
 std::ostream& operator<<(std::ostream&, const TensorV&);
+void saveNpy(std::ostream&, const TensorV&);
 
 /// Model ///
 // Holds all shape and parameter data (views onto an underlying buffer)
