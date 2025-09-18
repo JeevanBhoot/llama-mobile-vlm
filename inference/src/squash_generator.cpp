@@ -18,6 +18,36 @@ Tensor allocateTensor(std::vector<uint>&& shape) {
                   std::move(buffer)};
 }
 
+TensorV reshape(const TensorV& tensor, const std::vector<uint>& shape) {
+    if (prod(tensor.shape) != prod(shape)) {
+        std::ostringstream msg;
+        msg << "Cannot reshape " << dump(tensor.shape) << " to " << dump(shape);
+        throw std::invalid_argument(msg.str());
+    }
+    return {tensor.data, shape};
+}
+
+std::vector<uint> strides(const TensorV& tensor) {
+    std::vector<uint> strides(tensor.shape.size(), 1u);
+    for (auto i = strides.size() - 1; i != 0; --i) {
+        strides[i - 1] = strides[i] * tensor.shape[i];
+    }
+    return strides;
+}
+
+TensorV sliceLeading(const TensorV& tensor, const std::vector<uint>& indices) {
+    auto stride = strides(tensor);
+    auto offset = 0u;
+    for (auto i = 0u; i < indices.size(); ++i) {
+        offset += stride[i] * indices[i];
+    }
+    auto data = std::visit(
+        [offset](auto& d) { return TensorV::DataT(std::decay_t<decltype(d)>(d.data + offset)); },
+        tensor.data);
+    return TensorV{
+        data, {tensor.shape.begin() + static_cast<ptrdiff_t>(indices.size()), tensor.shape.end()}};
+}
+
 const bf16* getBf16(const TensorV& tensor) {
     return std::get<tensor_data::Flat<bf16>>(tensor.data).data;
 }
@@ -88,22 +118,25 @@ Tensor mlp(const TextModel& model, const TextModel::MLPLayer& layer, const Tenso
 
 // High-level
 
+// Resize, normalise colour channels, and chop into patches
+// returns: (yPatchIdx * xPatchIdx, channel * yIdx * xIdx)
 Tensor preprocess(const VisionModel& model, const Image& image) {
     const auto resized = resizeImage(image, model.dImage, model.dImage);
     const auto nPatch = (model.dImage / model.dPatch);
     const auto dChannel = 3;
     const auto dPatch = model.dPatch;
-    auto result = allocateTensor<float>({nPatch * nPatch, dPatch * dPatch * dChannel});
+
+    auto result = allocateTensor<float>({nPatch * nPatch, dChannel * dPatch * dPatch});
     auto ptr = getFloat(result);
-    const auto nStride = dPatch * dPatch * dChannel;
-    const auto yStride = resized.width * dChannel;
+    const auto nStride = dChannel * dPatch * dPatch;
+    const auto cStride = dPatch * dPatch;
     for (auto n = 0u; n < nPatch * nPatch; ++n) {
         for (auto i = 0u; i < dPatch * dPatch; ++i) {
             for (auto c = 0u; c < dChannel; ++c) {
                 auto x = (n % nPatch) * dPatch + (i % dPatch);
                 auto y = (n / nPatch) * dPatch + (i / dPatch);
-                auto px = resized.data[y * yStride + x * dChannel + c];
-                ptr[n * nStride + i * dChannel + c] =
+                auto px = resized.data[y * (resized.width * dChannel) + x * dChannel + c];
+                ptr[n * nStride + c * cStride + i] =
                     (px / 255.0f - model.imageMean[c]) / model.imageStd[c];
             }
         }
@@ -136,22 +169,40 @@ void forward(Generator& g, const std::vector<uint>& tokens) {
         err << "Over-full KV cache of maximum size " << g.kvCache.dSequenceMax << " tokens";
         throw std::runtime_error(err.str());
     }
-    auto& textModel = g.model.textModel;
-    auto x = embeddingLookup(textModel.embedTokens, tokens);
-    for (auto i = 0u; i < textModel.dLayers; ++i) {
-        if (std::find(textModel.crossAttentionLayers.begin(), textModel.crossAttentionLayers.end(),
-                      i) != textModel.crossAttentionLayers.end()) {
+    auto& model = g.model.textModel;
+    auto x = embeddingLookup(model.embedTokens, tokens);
+    for (auto i = 0u; i < model.dLayers; ++i) {
+        if (std::find(model.crossAttentionLayers.begin(), model.crossAttentionLayers.end(), i) !=
+            model.crossAttentionLayers.end()) {
             continue;  // TODO - cross attention
         }
-        auto a = attention(textModel, textModel.layers[i].attention, x, g.kvCache.dSequence,
+        auto a = attention(model, model.layers[i].attention, x, g.kvCache.dSequence,
                            g.kvCache.entries[i]);
         addInPlace(x, a);
-        addInPlace(x, mlp(textModel, textModel.layers[i].mlp, x));
+        addInPlace(x, mlp(model, model.layers[i].mlp, x));
     }
-    x = rmsNorm(textModel.finalNorm, x, textModel.normEpsilon);
-    x = projection(textModel.predictTokens, x);
+    x = rmsNorm(model.finalNorm, x, model.normEpsilon);
+    x = projection(model.predictTokens, x);
     g.kvCache.dSequence += uint(tokens.size());
     g.prevToken = nextToken(g, x);
+}
+
+void forwardImage(Generator& g, const TensorV& image) {
+    auto& model = *g.model.visionModel;
+    auto x = projection(
+        reshape(model.patchEmbedding, {model.dModel, 3 * model.dPatch * model.dPatch}), image);
+
+    if (false) {  // TODO: cast to float or mixed-precision addInPlace
+        // Lookup {aspectRatioID = 0, tileIndex = 0}
+        addInPlace(x, sliceLeading(model.positionalEmbedding, {0, 0}));
+    }
+
+    DUMPSQ(x);
+    DUMPSQ(model.positionalEmbedding);
+    DUMPSQ(model.classEmbedding);
+
+    std::ofstream f("wip.npy", std::ios::binary);
+    saveNpy(f, x);
 }
 
 }  // namespace
@@ -169,17 +220,7 @@ Generator::Generator(Model& model) : model(model) {}
 std::vector<std::string> Generator::prefill(const std::string& prefix,
                                             const std::optional<Image>& image,
                                             const Options& options) {
-    if (image) {
-        if (!model.visionModel) {
-            std::ostringstream err;
-            err << "Passed an image to " << model.source << ", which does not support vision input";
-            throw std::runtime_error(err.str());
-        }
-        auto imageIn = preprocess(*model.visionModel, *image);
-        DUMPSQ(imageIn);
-        std::ofstream f("wip.npy", std::ios::binary);
-        saveNpy(f, imageIn);
-    }
+    // Set generation state
     this->options = options;
     if (options.seed.has_value()) {
         this->rng.seed(*options.seed);
@@ -187,12 +228,26 @@ std::vector<std::string> Generator::prefill(const std::string& prefix,
         std::random_device d;
         this->rng.seed(d());
     }
+
+    // Handle image
+    if (image) {
+        if (!model.visionModel) {
+            std::ostringstream err;
+            err << "Passed an image to " << model.source << ", which does not support vision input";
+            throw std::runtime_error(err.str());
+        }
+        forwardImage(*this, preprocess(*model.visionModel, *image));
+    }
+
+    // Handle text
     auto tokens = model.textModel.tokenizer.encode(prefix);
     tokens.insert(tokens.begin(), model.textModel.beginOfTextID);
     resetCache(*this, uint(tokens.size() + options.maxGeneratedTokens));
     forward(*this, tokens);
-    if (prevToken != model.textModel.endOfTextID) {
-        tokens.push_back(prevToken);
+
+    // Return tokens, including prompt
+    if (this->prevToken != model.textModel.endOfTextID) {
+        tokens.push_back(this->prevToken);
     }
     std::vector<std::string> stringTokens;
     stringTokens.reserve(tokens.size() - 1);

@@ -83,12 +83,21 @@ Tokenizer loadTokenizer(const json& j) {
     return Tokenizer(preTokenizer, merges, std::move(vocab));
 }
 
-TextModel loadTextModel(const json& header,
-                        const json& metadata,
-                        ulong alignment,
-                        const Buffer& _data) {
-    auto loadTensorV = [&](const std::string& name) -> TensorV {
-        auto fullName = name + ".weight";
+struct TensorLoader {
+    const json& header;
+    ulong alignment;
+    const Buffer& buffer;
+    std::string prefix;
+
+    // Create a scoped TensorLoader with `name` appended to the `prefix`
+    TensorLoader operator[](const std::string& name) const {
+        return TensorLoader{header, alignment, buffer,
+                            prefix.empty() ? name : (prefix + "." + name)};
+    }
+
+    // Load the given named tensor (full name "{prefix}.{name}")
+    TensorV operator()(const std::string& name) const {
+        auto fullName = prefix.empty() ? name : (prefix + "." + name);
         auto& entry = header.at(fullName);
         auto dtype = entry.at("dtype").template get<std::string>();
         if (dtype != "BF16") {
@@ -103,31 +112,38 @@ TextModel loadTextModel(const json& header,
             throw std::runtime_error(err.str());
         }
         return TensorV{
-            tensor_data::Flat(reinterpret_cast<bf16*>(_data.get() + offset)),
+            tensor_data::Flat(reinterpret_cast<bf16*>(buffer.get() + offset)),
             entry.at("shape").template get<std::vector<uint>>(),
         };
-    };
+    }
+};
+
+TextModel loadTextModel(const json& header,
+                        const json& metadata,
+                        ulong alignment,
+                        const Buffer& buffer) {
+    TensorLoader model{header, alignment, buffer, "text_model"};
     auto& c = metadata.at("config").at("text");
     auto& v = metadata.at("vocab");
     auto dLayers = c.at("d_layers").template get<uint>();
     std::vector<TextModel::Layer> layers;
     for (auto n = 0u; n < dLayers; ++n) {
-        auto base = "text_model.layers." + std::to_string(n);
-        auto attn = base + ".attn";
-        auto mlp = base + ".mlp";
+        auto layer = model["layers." + std::to_string(n)];
+        auto attn = layer["attn"];
+        auto mlp = layer["mlp"];
         layers.push_back(  //
             {{
-                 .norm = loadTensorV(attn + ".norm"),
-                 .query = loadTensorV(attn + ".q_proj"),
-                 .key = loadTensorV(attn + ".k_proj"),
-                 .value = loadTensorV(attn + ".v_proj"),
-                 .output = loadTensorV(attn + ".o_proj"),
+                 .norm = attn("norm.weight"),
+                 .query = attn("q_proj.weight"),
+                 .key = attn("k_proj.weight"),
+                 .value = attn("v_proj.weight"),
+                 .output = attn("o_proj.weight"),
              },
              {
-                 .norm = loadTensorV(mlp + ".norm"),
-                 .up = loadTensorV(mlp + ".up_proj"),
-                 .gate = loadTensorV(mlp + ".gate_proj"),
-                 .down = loadTensorV(mlp + ".down_proj"),
+                 .norm = mlp("norm.weight"),
+                 .up = mlp("up_proj.weight"),
+                 .gate = mlp("gate_proj.weight"),
+                 .down = mlp("down_proj.weight"),
              }});
     }
     auto tiedEmbeddings = c.at("tied_embeddings").template get<bool>();
@@ -147,11 +163,10 @@ TextModel loadTextModel(const json& header,
         .crossAttentionLayers = c.at("cross_attention_layers").template get<std::vector<uint>>(),
 
         // Parameters
-        .embedTokens = loadTensorV("text_model.embed_tokens"),
+        .embedTokens = model("embed_tokens.weight"),
         .layers = layers,
-        .finalNorm = loadTensorV("text_model.norm"),
-        .predictTokens =
-            loadTensorV(tiedEmbeddings ? "text_model.embed_tokens" : "text_model.lm_head"),
+        .finalNorm = model("norm.weight"),
+        .predictTokens = model(tiedEmbeddings ? "embed_tokens.weight" : "lm_head.weight"),
 
         // Vocab
         .tokenizer = loadTokenizer(v),
@@ -160,16 +175,31 @@ TextModel loadTextModel(const json& header,
     };
 }
 
-VisionModel loadVisionModel(const json& /*header*/,
+VisionModel loadVisionModel(const json& header,
                             const json& metadata,
-                            ulong /*alignment*/,
-                            const Buffer& /*_data*/) {
+                            ulong alignment,
+                            const Buffer& buffer) {
+    TensorLoader model{header, alignment, buffer, "vision_model"};
     auto& c = metadata.at("config").at("vision");
     return VisionModel{
+        // Config
         .imageMean = c.at("image_mean").template get<std::vector<float>>(),
         .imageStd = c.at("image_std").template get<std::vector<float>>(),
         .dImage = c.at("d_image").template get<uint>(),
         .dPatch = c.at("d_patch").template get<uint>(),
+        .dLayers0 = c.at("d_layers0").template get<uint>(),
+        .dLayers1 = c.at("d_layers1").template get<uint>(),
+        .dModel = c.at("d_model").template get<uint>(),
+        .dMlp = c.at("d_mlp").template get<uint>(),
+        .dAttentionHead = c.at("d_attention_head").template get<uint>(),
+        .dAttentionQkv = c.at("d_attention_qkv").template get<uint>(),
+        .normEpsilon = c.at("norm_epsilon").template get<float>(),
+        .outputTaps = c.at("output_taps").template get<std::vector<uint>>(),
+
+        // Parameters
+        .patchEmbedding = model("patch_embedding.weight"),
+        .positionalEmbedding = model("positional_embedding.weight"),
+        .classEmbedding = model("class_embedding.weight"),
     };
 }
 

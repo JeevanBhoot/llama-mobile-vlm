@@ -82,7 +82,8 @@ struct Flat {
 
 // TensorV is a non-owning Tensor view
 struct TensorV {
-    std::variant<tensor_data::Flat<bf16>, tensor_data::Flat<float>> data;
+    using DataT = std::variant<tensor_data::Flat<bf16>, tensor_data::Flat<float>>;
+    DataT data;
     std::vector<uint> shape;
 };
 
@@ -142,10 +143,24 @@ struct TextModel {
 };
 
 struct VisionModel {
+    // Config
     std::vector<float> imageMean;
     std::vector<float> imageStd;
     uint dImage;
     uint dPatch;
+    uint dLayers0;
+    uint dLayers1;
+    uint dModel;
+    uint dMlp;
+    uint dAttentionHead;
+    uint dAttentionQkv;
+    float normEpsilon;
+    std::vector<uint> outputTaps;
+
+    // Parameters
+    TensorV patchEmbedding;
+    TensorV positionalEmbedding;
+    TensorV classEmbedding;
 };
 
 struct Model {
