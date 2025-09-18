@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+import datasets
 import torch
 import torch.distributed as dist
 import torch.distributed.fsdp as fsdp
@@ -41,6 +42,12 @@ WANDB_PROJECT = "llama-mobile"
 CHECKPOINT_PATH = (
     "s3://graphcore-research/2024-10-squashedllama/checkpoints/{name}.safetensors"
 )
+
+
+def _log(*msg: Any) -> None:
+    """Log message to stderr (rank 0 only)."""
+    if dist.get_rank() == 0:
+        print(*msg, flush=True, file=sys.stderr)
 
 
 @dataclass
@@ -252,6 +259,10 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
         rank = dist.get_rank()
         world_size = dist.get_world_size()
 
+        if rank != 0:
+            transformers.utils.logging.disable_progress_bar()
+            datasets.utils.logging.disable_progress_bar()
+
         if settings.wandb and rank == 0:
             config = settings.to_dict()
             config["name"] = settings.run_name
@@ -386,11 +397,12 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                 )
             )
 
+            _log("training")
             total_t0 = time.time()
             total_val_t = 0.0
             total_n_toks = 0
             for step, batch in tqdm(
-                enumerate(batches), total=settings.training.n_steps
+                enumerate(batches), total=settings.training.n_steps, disable=bool(rank)
             ):
                 # TODO: Change this
                 if step % n_val_steps == 0:
@@ -438,6 +450,7 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
             total_t = time.time() - total_t0
             del opt  # save memory
             if settings.save_checkpoint:
+                _log("save checkpoint")
                 path = None
                 if rank == 0:
                     path = CHECKPOINT_PATH.format(
@@ -454,8 +467,7 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
         error_message = str(e)
         tb = traceback.format_exc()
         if rank == 0:
-            print(error_type, error_message, file=sys.stderr, flush=True)
-            print(tb, file=sys.stderr, flush=True)
+            _log(error_type, error_message, "\n", tb)
             if settings.wandb:
                 run.summary["error_type"] = error_type
                 run.summary["error_message"] = error_message

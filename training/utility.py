@@ -172,7 +172,7 @@ def save_quantised_model_to_s3(model: nn.Module, s3_path: str | None, dtype: tor
     s3_path -- the path to save the object to in S3; should be s3://bucket/key...
                (this can be `None` for `rank != 0` when using distributed training)
 
-    Note that this requires enough free memory to hold the whole model on one shard.
+    Note that this requires enough free host memory to hold the whole model.
     """
     with torch.no_grad():
         unsharded_tensors = {}
@@ -183,7 +183,7 @@ def save_quantised_model_to_s3(model: nn.Module, s3_path: str | None, dtype: tor
                 tensor = tensor.to(dtype)
             if isinstance(tensor, torch.distributed.tensor.DTensor):
                 tensor = tensor.full_tensor()
-            unsharded_tensors[key] = tensor
+            unsharded_tensors[key] = tensor.cpu()
         if not torch.distributed.is_initialized() or (
             torch.distributed.get_rank() == 0
         ):
