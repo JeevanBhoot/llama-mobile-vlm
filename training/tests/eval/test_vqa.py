@@ -6,11 +6,15 @@ import transformers
 from PIL import Image
 
 from eval import vqa
+from datasets import Dataset
 
 
 def test_vqa() -> None:
-    example = next(vqa.VQA.get_examples())
-    assert set(example.keys()) == {
+    # NOTE: Slow first time as it fetches the dataset
+
+    data = vqa.VQA.data(limit=10)
+    assert len(data) == 10
+    assert set(data.column_names) == {
         "question_id",
         "image_id",
         "question",
@@ -54,22 +58,23 @@ def test_evaluate() -> None:
     model.generate = um.Mock(side_effect=mock_generate)
     model.device = "cpu"
 
-    examples = (
+    rows = [
         dict(
             question_id=i,
-            prompt="<|image|> What?",
+            prompt="What?",
             image=Image.fromarray(
                 torch.randint(0, 256, (224, 224, 3), dtype=torch.uint8).numpy()
             ),
             answers=[{"answer": "car"}] + [{"answer": "bicycle"}] * i,
         )
-        for i in range(5)
-    )
+        for i in range(4)
+    ]
+    data = Dataset.from_list(rows)
     expected = (
         dict(id=i, output=" bicycle", accuracy=[0.0, 1 / 3, 2 / 3, 1.0][i])
         for i in range(4)
     )
     for o, expected_o in zip(
-        vqa.evaluate(model, processor, examples, batch_size=1, n_examples=4), expected
+        vqa.evaluate(model, processor, data, batch_size=1), expected
     ):
         assert o == expected_o

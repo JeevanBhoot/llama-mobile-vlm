@@ -20,6 +20,7 @@ import weight_formats.quantisation_training as QT
 from torch import Tensor, nn
 
 import train
+from utility import LLAMA_PROMPT_TEMPLATES
 
 # Components
 
@@ -115,12 +116,7 @@ class LlamaVQA:
         ).to(self.device)
         self.model = MultiParameterSetModel.create(raw_model)
         self.processor = transformers.AutoProcessor.from_pretrained(model_name)
-        self.prompt_templates = dict(
-            instruct="<|start_header_id|>user<|end_header_id|>"
-            "\n\n<|image|>{prompt}<|eot_id|>"
-            "<|start_header_id|>assistant<|end_header_id|>\n\n",
-            simple="<|image|>{prompt}",
-        )
+        self.prompt_templates = LLAMA_PROMPT_TEMPLATES
         self.images = {}
 
     def __repr__(self) -> str:

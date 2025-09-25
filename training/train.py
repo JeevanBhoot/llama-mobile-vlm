@@ -1,11 +1,11 @@
+import gc
 import itertools as it
-import math
+import json
 import sys
 import time
 import traceback
 from contextlib import nullcontext
-from dataclasses import asdict, dataclass
-from pathlib import Path
+from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable, Optional
 
 import datasets
@@ -14,29 +14,22 @@ import torch.distributed as dist
 import torch.distributed.fsdp as fsdp
 import torch.multiprocessing as mp
 import transformers
-import weight_formats.quantisation as Q_new
+import weight_formats.quantisation as Q
 import weight_formats.quantisation_training as QT
 from tqdm import tqdm
 from transformers import MllamaForConditionalGeneration, MllamaProcessor
+from weight_formats.experiments.qat import _compute_kl_loss
 
 import wandb
-from quantisation import quantisation as Q_old
-from quantisation.layers import quantise_linear_layers
-from training_data import Dataset, Datum
+from eval import vqa
+from train_data import Dataset, Datum, GenerationConfig
 from utility import (
+    LOCAL_DATA_PATH,
     check_s3_access,
-    compute_kl_loss,
     distributed_batches,
     record_memory,
     save_quantised_model_to_s3,
 )
-
-# from weight_formats.quantisation_training import (
-#     ScalingMode,
-#     convert,
-#     get_named_parameters,
-# )
-
 
 WANDB_PROJECT = "llama-mobile"
 CHECKPOINT_PATH = (
@@ -48,6 +41,24 @@ def _log(*msg: Any) -> None:
     """Log message to stderr (rank 0 only)."""
     if dist.get_rank() == 0:
         print(*msg, flush=True, file=sys.stderr)
+
+
+@dataclass
+class DataShard:
+    path: str
+    n_examples: int | None
+    config: GenerationConfig = field(init=False)
+
+    def __post_init__(self):
+        config_path = f"{LOCAL_DATA_PATH}/{self.path}/config.json"
+        with open(config_path) as f:
+            self.config = json.loads(f.read())
+
+
+@dataclass
+class DataSettings:
+    train: list[DataShard]
+    validation: list[DataShard] | None
 
 
 @dataclass
@@ -82,34 +93,24 @@ class ExecutionSettings:
     wrap_teacher: bool = True
 
 
-# NOTE: Temporarily allow both implementations
 @dataclass
 class QuantisationSettings:
-    el_fmt: str
-    scale_fmt: str
-    block_shape: tuple[int]
-    implementation: str  # "old"/"new"
-    trainable_centroids: bool
-
-
-# @dataclass
-# class QuantisationSettings:
-#     fmt: Q.TensorFormat
-#     scaling_mode: ScalingMode
-#     clip_gradient: bool
+    fmt: Q.TensorFormat
+    scaling_mode: QT.ScalingMode = "dynamic"
+    clip_gradient: bool = False
+    trainable_centroids: bool = False
 
 
 @dataclass
 class Settings:
     run_name: str
     model_name: str
-    train_dataset: str
-    val_dataset: Optional[str]
+    data: DataSettings
     quantisation: QuantisationSettings | None
     training: TrainingSettings
     execution: ExecutionSettings
     wandb: bool
-    n_val_examples: int
+    run_downstream: bool
     memory_profile: bool
     save_checkpoint: bool
 
@@ -118,34 +119,30 @@ class Settings:
         return cls(
             run_name="test",
             model_name="meta-llama/Llama-3.2-11B-Vision-Instruct",
-            train_dataset="imagenet",
-            val_dataset="coco",
+            data=DataSettings(
+                train=[
+                    DataShard("imagenet-train-generation/870805", None),
+                    DataShard("imagenet-train-generation/98cf95", None),
+                ],
+                validation=None,
+            ),  # TODO add validation
             quantisation=QuantisationSettings(
-                el_fmt="E0M2",
-                scale_fmt="BFLOAT16",
-                block_shape=(1, 64),
-                implementation="new",
-                trainable_centroids=False,
+                fmt=Q.LinearScalingFormat(
+                    Q.parse("E0M2"),
+                    scale_format=Q.parse("BFLOAT16"),
+                    block_shape=(1, 64),
+                    scaling="absmax",
+                )
             ),
-            # quantisation=QuantisationSettings(
-            #     fmt=Q.LinearScalingFormat(
-            #         Q.parse("E5M2"),
-            #         scale_format=Q.parse("BFLOAT16"),
-            #         block_shape=(1, 32),
-            #         scaling="absmax",
-            #     ),
-            #     scaling_mode="dynamic",
-            #     clip_gradient=False,
-            # ),
             training=TrainingSettings(
-                n_steps=10,
-                batch_size=torch.cuda.device_count(),
-                optimiser=OptimiserSettings(lr=1e-4),
+                n_steps=16,
+                batch_size=64,
+                optimiser=OptimiserSettings(lr=2**-16),
                 lr_schedule=LRScheduleSettings(),
             ),
             execution=ExecutionSettings(),
             wandb=True,
-            n_val_examples=512,
+            run_downstream=False,
             memory_profile=False,
             save_checkpoint=False,
         )
@@ -187,33 +184,16 @@ def _apply_fsdp(model: MllamaForConditionalGeneration, **kwargs) -> None:
 def _quantise(
     model: torch.nn.Module, settings: QuantisationSettings
 ) -> torch.nn.Module:
-    if settings.implementation == "new":
-        fmt = Q_new.LinearScalingFormat(
-            Q_new.parse(settings.el_fmt),
-            scale_format=Q_new.parse("BFLOAT16"),
-            block_shape=settings.block_shape,
-            scaling="absmax",
-        )
-        QT.convert(
-            model,
-            fmt,
-            scaling_mode="dynamic",
-            clip_gradient=False,
-            error_weight=None,
-        )
-        if not settings.trainable_centroids:
-            for _, p in QT.get_named_parameters(model, "centroids"):
-                p.requires_grad_(False)
-    elif settings.implementation == "old":
-        fmt = Q_old.LinearScalingFormat(
-            Q_old.parse(settings.el_fmt),
-            group_shapes=[settings.block_shape],
-            scale_format=Q_old.parse(settings.scale_fmt),
-            scale_combiner=None,
-        )
-        model = quantise_linear_layers(model, fmt)
-    else:
-        print(f"Invalid implementation {settings.implementation}")
+    QT.convert(
+        model,
+        fmt_spec=settings.fmt,
+        scaling_mode=settings.scaling_mode,
+        clip_gradient=settings.clip_gradient,
+        error_weight=None,
+    )
+    if not settings.trainable_centroids:
+        for _, p in QT.get_named_parameters(model, "centroids"):
+            p.requires_grad_(False)
 
     return model
 
@@ -234,7 +214,7 @@ def run_validation(
             imgs = [[x.image] for x in batch]
             texts = [x.out for x in batch]
             inps = processor(imgs, texts, return_tensors="pt", padding=True).to(device)
-            loss += compute_kl_loss(student, teacher, inps).item()
+            loss += _compute_kl_loss(student, teacher, inps).item()
             n_tokens += inps["attention_mask"].sum()
 
     if torch.distributed.is_initialized():
@@ -243,6 +223,40 @@ def run_validation(
 
     if dist.get_rank() == 0:
         return loss.item() / n_tokens.item()
+
+
+def run_downstream(
+    model: MllamaForConditionalGeneration,
+    processor: MllamaProcessor,
+    tasks: list[str],
+    local_batch_size: int = 16,
+) -> Optional[dict[str, Any]]:
+    rank, world_size = 0, 1
+    if dist.is_initialized():
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+
+    results = {}
+    for task in tasks:
+        if task == "vqa":
+            # TODO: Get limit from settings
+            n_examples = 1024
+            data = vqa.VQA.data(limit=n_examples).shard(
+                num_shards=world_size, index=rank
+            )
+            out = list(vqa.evaluate(model, processor, data, local_batch_size))
+            acc = torch.tensor([x["accuracy"] for x in out]).mean()
+            dist.all_reduce(acc, dist.ReduceOp.AVG)
+            results["vqa"] = dict(accuracy=acc, n_examples=n_examples)
+
+    if rank == 0:
+        return results
+
+
+def load_dataset(data_shards: list[DataShard]) -> Dataset:
+    paths = [f"{LOCAL_DATA_PATH}/{x.path}" for x in data_shards]
+    n_examples = [x.n_examples for x in data_shards]
+    return Dataset(paths, n_examples)
 
 
 def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
@@ -309,27 +323,12 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
             if settings.quantisation is not None:
                 student = _quantise(student, settings.quantisation)
                 if settings.wandb and rank == 0:
-                    # TODO: Get rid of this
-                    if settings.quantisation.implementation == "new":
-                        n_bits = QT.count_bits(
-                            student,
-                            compute_dtype=getattr(
-                                torch, settings.execution.compute_dtype
-                            ),
-                        )
-                    else:
-                        n_bits = None
+                    # TODO: This is incorrect for compressed formats
+                    n_bits = QT.count_bits(
+                        student,
+                        compute_dtype=getattr(torch, settings.execution.compute_dtype),
+                    )
                     run.config["n_bits"] = n_bits
-                # convert(
-                #     student,
-                #     settings.quantisation.fmt,
-                #     scaling_mode=settings.quantisation.scaling_mode,
-                #     clip_gradient=settings.quantisation.clip_gradient,
-                #     error_weight=None,
-                # )
-                # # Do not train centroids
-                # for _, p in get_named_parameters(student, "centroids"):
-                #     p.requires_grad_(False)
 
             if settings.execution.recomputation:
                 student.gradient_checkpointing_enable({"use_reentrant": False})
@@ -341,7 +340,6 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                 ),
             )
 
-            # TODO: Move compilation before FSDP
             if settings.execution.compile:
                 torch._dynamo.config.cache_size_limit = 64
                 teacher = torch.compile(
@@ -351,10 +349,7 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                 )
                 _compile_model(student, mode=settings.execution.compile)
 
-            dataset_path = "data/{}-generation/{}.json"
-            model_name = settings.model_name.replace("meta-llama/", "").lower()
-
-            data = Dataset.load(dataset_path.format(settings.train_dataset, model_name))
+            train_data = load_dataset(settings.data.train)
 
             opt = torch.optim.AdamW(
                 student.parameters(),
@@ -371,7 +366,7 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
 
             batches = it.islice(
                 distributed_batches(
-                    data.get_datums(),
+                    train_data.get_datums(),
                     settings.training.batch_size,
                     rank=rank,
                     world_size=world_size,
@@ -379,23 +374,19 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                 settings.training.n_steps,
             )
 
-            val_data = Dataset.load(
-                dataset_path.format(settings.val_dataset, model_name)
-            )
-            # Assuming n_validation_steps == n_training_steps
-            n_val_steps = settings.n_val_examples // settings.training.batch_size
-
-            val_batches = list(
-                it.islice(
+            if settings.data.validation:
+                val_data = load_dataset(settings.data.validation)
+                # Assuming n_validation_steps == n_training_steps
+                # TODO: Make this flexible
+                n_val_steps = len(val_data.data) // settings.training.batch_size
+                val_batches = list(
                     distributed_batches(
                         val_data.get_datums(),
                         settings.training.batch_size,
                         rank=rank,
                         world_size=world_size,
-                    ),
-                    n_val_steps,
+                    )
                 )
-            )
 
             _log("training")
             total_t0 = time.time()
@@ -404,8 +395,8 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
             for step, batch in tqdm(
                 enumerate(batches), total=settings.training.n_steps, disable=bool(rank)
             ):
-                # TODO: Change this
-                if step % n_val_steps == 0:
+                # TODO: Make this flexible
+                if settings.data.validation and step % n_val_steps == 0:
                     t0 = time.time()
                     val_loss = run_validation(teacher, student, processor, val_batches)
                     val_step_t = time.time() - t0
@@ -422,9 +413,8 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                 )
 
                 opt.zero_grad()
-                loss = compute_kl_loss(student, teacher, inps) / math.prod(
-                    inps["attention_mask"].shape
-                )
+
+                loss = _compute_kl_loss(student, teacher, inps)
 
                 loss.backward()
                 opt.step()
@@ -432,23 +422,35 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
 
                 # Log step data
                 out = {}
-                out_loss = loss.detach().clone()
-                dist.reduce(out_loss, dst=0, op=dist.ReduceOp.AVG)
+                total_loss = loss.detach().clone()
+                dist.reduce(total_loss, dst=0, op=dist.ReduceOp.SUM)
                 with torch.no_grad():
                     n_toks = inps["attention_mask"].sum()
                     dist.reduce(n_toks, dst=0, op=dist.ReduceOp.SUM)
                     total_n_toks += n_toks.item()
                 if settings.wandb and rank == 0:
                     out["train/tokens"] = total_n_toks
+                    out["train/toks_per_step"] = n_toks.item()
                     out["perf/step_time"] = time.time() - t0
-                    out["perf/toks_per_s"] = n_toks.item() / out["perf/step_time"]
-                    out["train/loss"] = out_loss.item()
+                    out["perf/toks_per_s"] = (
+                        out["train/toks_per_step"] / out["perf/step_time"]
+                    )
+                    out["train/loss"] = total_loss.item() / n_toks.item()
                     if val_loss:
                         out["val/loss"] = val_loss
                         out["perf/val_step_time"] = val_step_t
                     wandb.log(out, step=step)
             total_t = time.time() - total_t0
-            del opt  # save memory
+
+            del opt, teacher
+            gc.collect()
+            torch.cuda.empty_cache()
+
+            if settings.run_downstream:
+                results = run_downstream(student, processor, tasks=["vqa"])
+                if settings.wandb and rank == 0:
+                    run.summary["downstream"] = results
+
             if settings.save_checkpoint:
                 _log("save checkpoint")
                 path = None

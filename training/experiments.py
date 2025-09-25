@@ -1,17 +1,16 @@
-import logging
 import time
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, Optional, Union
+from typing import Any, Optional
 
 import torch
 import transformers
 import wandb
+import weight_formats.quantisation as Q
+import weight_formats.quantisation_training as QT
 
-import quantisation as Q
 from eval import outcompare, vqa
 
 WANDB_PROJECT = "llama-mobile"
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -35,7 +34,7 @@ class Task:
 class Execution:
     device: str
     batch_size: int
-    wandb: Union[bool, str]  # False | True | "offline"
+    wandb: bool
 
 
 @dataclass
@@ -43,12 +42,12 @@ class Experiment:
     name: str
     model: str
     task: Task
-    quantisation: list[Q.ParameterRule]
+    quantisation: Q.TensorFormat
     execution: Execution
     notes: Optional[str] = None
 
 
-Results = Dict[str, Any]
+Results = dict[str, Any]
 
 
 def run_experiment(xp: Experiment) -> Results:
@@ -80,7 +79,15 @@ def run_experiment(xp: Experiment) -> Results:
     processor = transformers.AutoProcessor.from_pretrained(xp.model)
 
     # Quantise the model
-    n_bytes = Q.quantise_model(model, xp.quantisation)
+    # TODO: Allow variable quantisation
+    QT.convert(
+        model,
+        fmt_spec=xp.quantisation,
+        scaling_mode="dynamic",
+        clip_gradient=False,
+        error_weight=None,
+    )
+    n_bytes = QT.count_bits(model, torch.bfloat16) / 8
 
     out = {}
     out["n_params"] = sum(p.nelement() for p in model.parameters())
@@ -105,9 +112,8 @@ def run_experiment(xp: Experiment) -> Results:
             vqa.evaluate(
                 model=model,
                 processor=processor,
-                examples=vqa.VQA.get_examples(),
+                data=vqa.VQA.data(limit=xp.task.n_examples),
                 batch_size=xp.execution.batch_size,
-                n_examples=xp.task.n_examples,
             )
         )
         accuracy = sum(x["accuracy"] for x in results) / len(results)

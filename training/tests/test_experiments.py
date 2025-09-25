@@ -2,6 +2,7 @@ import unittest.mock as um
 from dataclasses import asdict
 from typing import Any, Iterable
 
+import weight_formats.quantisation as Q
 from transformers import AutoModelForCausalLM
 
 import experiments as E
@@ -12,13 +13,18 @@ def test_run_experiment() -> None:
         name="test",
         model="meta-llama/Llama-3.2-11B-Vision-Instruct",
         task=E.Task.vqa(n_examples=2),
-        quantisation=[],
+        quantisation=Q.LinearScalingFormat(
+            Q.parse("E0M2"),
+            Q.parse("BFLOAT16"),
+            block_shape=(None, None),
+            scaling="absmax",
+        ),
         execution=E.Execution(device="cuda", batch_size=8, wandb=False),
         notes="testing",
     )
 
     def mock_vqa_evaluate(**kwargs: dict[str, Any]) -> Iterable[dict[str, Any]]:
-        for i in range(kwargs["n_examples"]):
+        for i in range(len(kwargs["data"])):
             yield dict(
                 id=i,
                 output=f"Output {i}",

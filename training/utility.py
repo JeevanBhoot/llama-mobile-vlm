@@ -4,15 +4,25 @@ import tempfile
 import unittest.mock as um
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Optional, TypeVar
+from typing import Callable, Iterable, Iterator, Optional, TypeVar
 
 import safetensors.torch
 import torch
 import weight_formats.quantisation_training as QT
-from torch import Tensor, nn
+from torch import nn
 from transformers import MllamaVisionModel, PreTrainedTokenizerBase
 
 T = TypeVar("T")
+
+LOCAL_DATA_PATH = f"{Path(__file__).parent}/data"
+S3_DATA_PATH = "s3://graphcore-research/2024-10-squashedllama/data"
+
+LLAMA_PROMPT_TEMPLATES = dict(
+    instruct="<|start_header_id|>user<|end_header_id|>"
+    "\n\n<|image|>{prompt}<|eot_id|>"
+    "<|start_header_id|>assistant<|end_header_id|>\n\n",
+    simple="<|image|>{prompt}",
+)
 
 
 def batches(
@@ -105,60 +115,6 @@ def merge_params_mllama(m: MllamaVisionModel) -> None:
         merge(layer)
 
 
-# NOTE: Copied from weight_formats.experiments.qat to avoid extra imports
-
-
-class AttrDict(dict):
-    def __init__(self, **kwargs: Any):
-        super().__init__(**kwargs)
-        self.__dict__ = self
-
-
-class XEnt_Destructive(torch.autograd.Function):
-    """A somewhat dangerous in-place Cross-Entropy, optimised for memory-efficiency.
-
-    Both forward and backward passes mutate `input_logits` in-place. It is unsafe for
-    `input_logits` to be consumed by any other operation.
-    """
-
-    @staticmethod
-    def forward(ctx, input_logits, target_p, mask):
-        input_logp = input_logits.sub_(torch.logsumexp(input_logits, -1, keepdim=True))
-        del input_logits
-        ctx.save_for_backward(input_logp, target_p, mask)
-        return torch.dot(target_p.flatten(), input_logp.flatten()).neg()
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        input_logp, target_p, mask = ctx.saved_tensors
-        grad_input_logits = (
-            input_logp.exp_().sub_(target_p).mul_(mask).mul_(grad_output)
-        )
-        del input_logp
-        return grad_input_logits, None, None
-
-
-def compute_kl_loss(
-    model: nn.Module, reference_model: nn.Module, batch: dict[str, Tensor]
-) -> Tensor:
-    """Computes the KL divergence between the output of two models, with care for memory."""
-    with torch.no_grad():
-        reference_logp = torch.log_softmax(
-            reference_model(**batch, use_cache=False).logits, -1
-        )
-        reference_p = reference_logp.exp().mul_(batch["attention_mask"].unsqueeze(-1))
-        # Calculate reference entropy here, so we can free up `reference_logp`
-        reference_ent = torch.dot(reference_p.flatten(), reference_logp.flatten()).neg()
-        del reference_logp
-
-    xent = XEnt_Destructive.apply(
-        model(**batch, use_cache=False).logits,
-        reference_p,
-        batch["attention_mask"].unsqueeze(-1),
-    )
-    return xent - reference_ent
-
-
 def check_s3_access() -> None:
     """Check that we have credentials for AWS S3 access."""
     subprocess.check_call(
@@ -166,7 +122,9 @@ def check_s3_access() -> None:
     )
 
 
-def save_quantised_model_to_s3(model: nn.Module, s3_path: str | None, dtype: torch.dtype) -> None:
+def save_quantised_model_to_s3(
+    model: nn.Module, s3_path: str | None, dtype: torch.dtype
+) -> None:
     """Save a model to a .safetensors file and sync to S3.
 
     s3_path -- the path to save the object to in S3; should be s3://bucket/key...
