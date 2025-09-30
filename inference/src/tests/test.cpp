@@ -49,43 +49,49 @@ TEST_CASE("squash::TextGenerator", "[squash]") {
         vocab.push_back(token.str());
     }
     Model m{
+        .textModel{
+            // Config
+            .dLayers = 3,
+            .dVocab = uint(vocab.size() + 2),
+            .dModel = 128,
+            .dMLP = 512,
+            .dAttentionHead = 64,
+            .dAttentionQ = 2,
+            .dAttentionKV = 2,
+            .dSequenceMax = 1024,
+            .normEpsilon = 1e-5f,
+            .ropeAngularFrequency = ropeAngularFrequency(64),
+            .tiedEmbeddings = true,
+            .crossAttentionLayers = {},
+            // Parameters
+            .embedTokens = {},
+            .layers = {},
+            .finalNorm = {},
+            .predictTokens = {},
+            // Vocab
+            .tokenizer = Tokenizer(std::regex("_[0-9]+"), {}, std::vector<std::string>(vocab)),
+            .beginOfTextID = uint(vocab.size()),
+            .endOfTextID = uint(vocab.size() + 1),
+        },
+        .visionModel = {},
         // Metadata
         .source = "test",
         .created = "",
         .alignment = DefaultAlignment,
-        // Config
-        .dLayers = 3,
-        .dVocab = uint(vocab.size() + 2),
-        .dModel = 128,
-        .dMLP = 512,
-        .dAttentionHead = 64,
-        .dAttentionQ = 2,
-        .dAttentionKV = 2,
-        .dSequenceMax = 1024,
-        .normEpsilon = 1e-5f,
-        .ropeAngularFrequency = ropeAngularFrequency(64),
-        // Parameters
-        .embedTokens = {},
-        .layers = {},
-        .finalNorm = {},
-        // Vocab
-        .tokenizer = Tokenizer(std::regex("_[0-9]+"), {}, std::vector<std::string>(vocab)),
-        .beginOfTextID = uint(vocab.size()),
-        .endOfTextID = uint(vocab.size() + 1),
-        // Data
         ._data = Buffer(0),
     };
 
     // Create buffer
-    auto totalHeads = m.dAttentionKV * m.dAttentionQ;
-    auto nParameters = m.dVocab * m.dModel                                                // embed
-                       + m.dLayers * (m.dModel                                            // norm
-                                      + 2 * m.dModel * totalHeads * m.dAttentionHead      // q+o
-                                      + 2 * m.dModel * m.dAttentionKV * m.dAttentionHead  // k+v
-                                      + m.dModel                                          // norm
-                                      + 3 * m.dModel * m.dMLP                             // mlp
-                                      )                                                   //
-                       + m.dModel;                                                        // norm
+    auto& tm = m.textModel;
+    auto totalHeads = tm.dAttentionKV * tm.dAttentionQ;
+    auto nParameters = tm.dVocab * tm.dModel                                             // embed
+                       + tm.dLayers * (tm.dModel                                         // norm
+                                       + 2 * tm.dModel * totalHeads * tm.dAttentionHead  // q+o
+                                       + 2 * tm.dModel * tm.dAttentionKV * tm.dAttentionHead  // k+v
+                                       + tm.dModel                // norm
+                                       + 3 * tm.dModel * tm.dMLP  // mlp
+                                       )                          //
+                       + tm.dModel;                               // norm
     m._data = Buffer(sizeof(bf16) * nParameters);
     auto buffer = reinterpret_cast<bf16*>(m._data.get());
     std::default_random_engine rng(12345u);
@@ -100,24 +106,25 @@ TEST_CASE("squash::TextGenerator", "[squash]") {
         ptr += prod(shape);
         return t;
     };
-    m.embedTokens = allocate({m.dVocab, m.dModel});
-    for (auto n = 0u; n < m.dLayers; ++n) {
-        m.layers.push_back(
+    tm.embedTokens = allocate({tm.dVocab, tm.dModel});
+    tm.predictTokens = tm.embedTokens;
+    for (auto n = 0u; n < tm.dLayers; ++n) {
+        tm.layers.push_back(
             {{
-                 .norm = allocate({m.dModel}),                                      //
-                 .query = allocate({totalHeads * m.dAttentionHead, m.dModel}),      //
-                 .key = allocate({m.dAttentionKV * m.dAttentionHead, m.dModel}),    //
-                 .value = allocate({m.dAttentionKV * m.dAttentionHead, m.dModel}),  //
-                 .output = allocate({m.dModel, totalHeads * m.dAttentionHead}),     //
+                 .norm = allocate({tm.dModel}),                                        //
+                 .query = allocate({totalHeads * tm.dAttentionHead, tm.dModel}),       //
+                 .key = allocate({tm.dAttentionKV * tm.dAttentionHead, tm.dModel}),    //
+                 .value = allocate({tm.dAttentionKV * tm.dAttentionHead, tm.dModel}),  //
+                 .output = allocate({tm.dModel, totalHeads * tm.dAttentionHead}),      //
              },
              {
-                 .norm = allocate({m.dModel}),          //
-                 .up = allocate({m.dMLP, m.dModel}),    //
-                 .gate = allocate({m.dMLP, m.dModel}),  //
-                 .down = allocate({m.dModel, m.dMLP}),  //
+                 .norm = allocate({tm.dModel}),           //
+                 .up = allocate({tm.dMLP, tm.dModel}),    //
+                 .gate = allocate({tm.dMLP, tm.dModel}),  //
+                 .down = allocate({tm.dModel, tm.dMLP}),  //
              }});
     }
-    m.finalNorm = allocate({m.dModel});
+    tm.finalNorm = allocate({tm.dModel});
     if (ptr - buffer != nParameters) {
         throw std::logic_error("Wrong number of parameters");
     }
@@ -133,9 +140,5 @@ TEST_CASE("squash::TextGenerator", "[squash]") {
         text += generator.generate();
     }
     REQUIRE(generator.generate() == "");
-#ifdef ANDROID
     REQUIRE(text == "_10_20_30_147_30_147_30_147_30");
-#else
-    REQUIRE(text == "_10_20_30_166_90_83_90_83_90");
-#endif  // !ANDROID
 }
