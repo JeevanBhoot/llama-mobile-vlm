@@ -9,6 +9,14 @@ void copy(const float* src, uint n, float* dest) {
     std::copy_n(src, n, dest);
 }
 
+void copyStrided(const float* src, uint n, uint d, uint sSrc, uint sDest, float* dest) {
+    for (uint i = 0; i < n; ++i) {
+        for (uint j = 0; j < d; ++j) {
+            dest[i * sDest + j] = src[i * sSrc + j];
+        }
+    }
+}
+
 void addInPlace(float* __restrict__ x, const float* __restrict__ y, const uint n) {
     for (auto i = 0u; i < n; ++i) {
         x[i] += y[i];
@@ -180,6 +188,12 @@ uint sample(const float* logits,
     }
     return std::get<1>(
         *std::max_element(logitsAndIndices.begin(), logitsAndIndices.begin() + topKandTopP));
+}
+
+void castFloat(const bf16* in, float* out, uint n) {
+    for (uint i = 0; i < n; ++i) {
+        out[i] = bf16ToFloat(in[i]);
+    }
 }
 
 }  // namespace squash::ops

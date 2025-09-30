@@ -10,6 +10,8 @@ namespace squash {
 
 namespace {
 
+// Tensors
+
 template <class T>
 Tensor allocateTensor(std::vector<uint>&& shape) {
     auto buffer = Buffer(sizeof(T) * prod(shape));
@@ -48,6 +50,14 @@ TensorV sliceLeading(const TensorV& tensor, const std::vector<uint>& indices) {
         data, {tensor.shape.begin() + static_cast<ptrdiff_t>(indices.size()), tensor.shape.end()}};
 }
 
+TensorV unsqueeze(const TensorV& tensor, const std::vector<uint>& indices) {
+    auto shape = tensor.shape;
+    for (auto i : indices) {
+        shape.insert(shape.begin() + i, 1u);
+    }
+    return TensorV{tensor.data, shape};
+}
+
 const bf16* getBf16(const TensorV& tensor) {
     return std::get<tensor_data::Flat<bf16>>(tensor.data).data;
 }
@@ -64,6 +74,58 @@ Tensor embeddingLookup(const TensorV& weight, const std::vector<uint>& tokens) {
     auto out = allocateTensor<float>({uint(tokens.size()), weight.shape[1]});
     ops::gather(getBf16(weight), tokens.data(), uint(tokens.size()), weight.shape[1],
                 getFloat(out));
+    return out;
+}
+
+Tensor castFloat(const TensorV& x) {
+    auto out = allocateTensor<float>({x.shape.begin(), x.shape.end()});
+    ops::castFloat(getBf16(x), getFloat(out), prod(out.shape));
+    return out;
+}
+
+Tensor concat(const std::vector<TensorV>& tensors, uint dim) {
+    // Compute summary dimensions
+    auto dConcat = 0u;
+    for (auto i = 0u; i < tensors.size(); ++i) {
+        if ([&] {
+                if (tensors[i].shape.size() != tensors[0].shape.size()) {
+                    return true;
+                }
+                for (auto j = 0u; j < tensors[0].shape.size(); ++j) {
+                    if (j != dim && tensors[i].shape[j] != tensors[0].shape[j]) {
+                        return true;
+                    }
+                }
+                return false;
+            }()) {
+            std::ostringstream msg;
+            msg << "concat: bad shape at index " << i << ", expected shape "
+                << dump(tensors[i].shape) << " to match the first tensor, "
+                << dump(tensors[0].shape) << ", except at concatenation dimension " << i;
+            throw std::invalid_argument(msg.str());
+        }
+        dConcat += tensors[i].shape[dim];
+    }
+    auto dLeading = 1u;
+    for (auto i = 0u; i < dim; ++i) {
+        dLeading *= tensors[0].shape[i];
+    }
+    auto dTrailing = 1u;
+    for (auto i = dim + 1; i < tensors[0].shape.size(); ++i) {
+        dTrailing *= tensors[0].shape[i];
+    }
+
+    // Allocate result & concatenate via strided-copy
+    auto shape = tensors[0].shape;
+    shape[dim] = dConcat;
+    auto out = allocateTensor<float>(std::move(shape));
+    auto dimIndex = 0u;
+    for (auto& t : tensors) {
+        auto dChunk = dTrailing * t.shape[dim];
+        ops::copyStrided(getFloat(t), dLeading, dChunk, dChunk, dTrailing * dConcat,
+                         getFloat(out) + dimIndex * dTrailing);
+        dimIndex += t.shape[dim];
+    }
     return out;
 }
 
@@ -192,10 +254,9 @@ void forwardImage(Generator& g, const TensorV& image) {
     auto x = projection(
         reshape(model.patchEmbedding, {model.dModel, 3 * model.dPatch * model.dPatch}), image);
 
-    if (false) {  // TODO: cast to float or mixed-precision addInPlace
-        // Lookup {aspectRatioID = 0, tileIndex = 0}
-        addInPlace(x, sliceLeading(model.positionalEmbedding, {0, 0}));
-    }
+    // Lookup {aspectRatioID = 0, tileIndex = 0}
+    addInPlace(x, castFloat(sliceLeading(model.positionalEmbedding, {0, 0})));
+    x = concat({unsqueeze(castFloat(sliceLeading(model.classEmbedding, {0, 0})), {0}), x}, 0);
 
     DUMPSQ(x);
     DUMPSQ(model.positionalEmbedding);
