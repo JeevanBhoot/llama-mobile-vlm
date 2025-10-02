@@ -20,8 +20,11 @@ void selfAttentionInPlace(float* queryOut,
                           uint dSkv,  // sequence length (key-value)
                           uint dHq,   // heads (query)
                           uint dHkv,  // heads (key-value)
-                          uint dim);  // head dimension
+                          uint dim,   // head dimension
+                          bool causal);
+
 void swiGluInPlace(float* x, const float* gate, uint n);
+void geluInPlace(float* x, uint n);
 uint sample(const float* logits,
             uint n,
             float temperature,
@@ -33,8 +36,16 @@ uint sample(const float* logits,
 
 void gather(const bf16* weight, const uint* indices, uint nIndices, uint dim, float* out);
 void rmsNorm(const bf16* weight, const float* x, uint batch, uint dim, float epsilon, float* out);
+void layerNorm(const bf16* weight,
+               const bf16* bias,
+               const float* x,
+               uint batch,
+               uint dim,
+               float epsilon,
+               float* out);
 // lhs {dM, dK}, rhs {dN, dK}, out {dM, dN}
 void matmulT(const float* lhs, const bf16* rhs, uint dM, uint dK, uint dN, float* out);
+void broadcastAddInPlace(float* x, const bf16* y, uint n, uint d);
 
 // conversion
 

@@ -181,6 +181,26 @@ VisionModel loadVisionModel(const json& header,
                             const Buffer& buffer) {
     TensorLoader model{header, alignment, buffer, "vision_model"};
     auto& c = metadata.at("config").at("vision");
+    auto dLayers0 = c.at("d_layers0").template get<uint>();
+    std::vector<VisionModel::Layer> layers0;
+    for (auto n = 0u; n < dLayers0; ++n) {
+        auto layer = model["layers0." + std::to_string(n)];
+        auto attn = layer["attn"];
+        auto mlp = layer["mlp"];
+        layers0.push_back(
+            {{
+                 .norm = {.weight = attn("norm.weight"), .bias = attn("norm.bias")},
+                 .query = attn("q_proj.weight"),
+                 .key = attn("k_proj.weight"),
+                 .value = attn("v_proj.weight"),
+                 .output = attn("o_proj.weight"),
+             },
+             {
+                 .norm = {.weight = mlp("norm.weight"), .bias = mlp("norm.bias")},
+                 .up = {.weight = mlp("up_proj.weight"), .bias = mlp("up_proj.bias")},
+                 .down = {.weight = mlp("down_proj.weight"), .bias = mlp("down_proj.bias")},
+             }});
+    }
     return VisionModel{
         // Config
         .imageMean = c.at("image_mean").template get<std::vector<float>>(),
@@ -200,6 +220,9 @@ VisionModel loadVisionModel(const json& header,
         .patchEmbedding = model("patch_embedding.weight"),
         .positionalEmbedding = model("positional_embedding.weight"),
         .classEmbedding = model("class_embedding.weight"),
+        .layerNormPre = {.weight = model("layernorm_pre.weight"),
+                         .bias = model("layernorm_pre.bias")},
+        .layers0 = layers0,
     };
 }
 

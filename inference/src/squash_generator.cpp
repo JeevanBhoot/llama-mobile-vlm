@@ -133,9 +133,25 @@ void addInPlace(TensorV& x, const TensorV& y) {
     ops::addInPlace(getFloat(x), getFloat(y), prod(x.shape));
 }
 
+void broadcastAddInPlace(TensorV& x, const TensorV& y) {
+    if (y.shape.size() != 1 || y.shape[0] != x.shape.back()) {
+        std::ostringstream err;
+        err << "broadcastAddInPlace bad shapes " << dump(x.shape) << ", " << dump(y.shape);
+        throw std::invalid_argument(err.str());
+    }
+    ops::broadcastAddInPlace(getFloat(x), getBf16(y), prod(x.shape) / y.shape[0], y.shape[0]);
+}
+
 Tensor rmsNorm(const TensorV& weight, const TensorV& x, float epsilon) {
     auto out = allocateTensor<float>({x.shape.begin(), x.shape.end()});
     ops::rmsNorm(getBf16(weight), getFloat(x), x.shape[0], x.shape[1], epsilon, getFloat(out));
+    return out;
+}
+
+Tensor layerNorm(const TensorV& weight, const TensorV& bias, const TensorV& x, float epsilon) {
+    auto out = allocateTensor<float>({x.shape.begin(), x.shape.end()});
+    ops::layerNorm(getBf16(weight), getBf16(bias), getFloat(x), x.shape[0], x.shape[1], epsilon,
+                   getFloat(out));
     return out;
 }
 
@@ -166,7 +182,7 @@ Tensor attention(const TextModel& model,
     ops::selfAttentionInPlace(getFloat(query), getFloat(cache.key), getFloat(cache.value),
                               /*dSq*/ query.shape[0], /*dSkv*/ key.shape[0] + tokenCount,
                               /*dHq*/ model.dAttentionQ, /*dHkv*/ model.dAttentionKV,
-                              /*dim*/ model.dAttentionHead);
+                              /*dim*/ model.dAttentionHead, /*causal*/ true);
     return projection(layer.output, query);
 }
 
@@ -176,6 +192,30 @@ Tensor mlp(const TextModel& model, const TextModel::MLPLayer& layer, const Tenso
     auto gate = projection(layer.gate, z);
     ops::swiGluInPlace(getFloat(up), getFloat(gate), prod(up.shape));
     return projection(layer.down, up);
+}
+
+Tensor visionAttention(const VisionModel& model,
+                       const VisionModel::AttentionLayer& layer,
+                       const TensorV& x) {
+    auto z = layerNorm(layer.norm.weight, layer.norm.bias, x, model.normEpsilon);
+    auto query = projection(layer.query, z);
+    auto key = projection(layer.key, z);
+    auto value = projection(layer.value, z);
+    auto dS = query.shape[0];
+    ops::selfAttentionInPlace(getFloat(query), getFloat(key), getFloat(value), dS, dS, /*dHq*/ 1u,
+                              /*dHkv*/ model.dAttentionQkv, /*dim*/ model.dAttentionHead,
+                              /*causal*/ false);
+    return projection(layer.output, query);
+}
+
+Tensor visionMlp(const VisionModel& model, const VisionModel::MLPLayer layer, const TensorV& x) {
+    auto z = layerNorm(layer.norm.weight, layer.norm.bias, x, model.normEpsilon);
+    z = projection(layer.up.weight, z);
+    broadcastAddInPlace(z, layer.up.bias);
+    ops::geluInPlace(getFloat(z), prod(z.shape));
+    z = projection(layer.down.weight, z);
+    broadcastAddInPlace(z, layer.down.bias);
+    return z;
 }
 
 // High-level
@@ -238,9 +278,8 @@ void forward(Generator& g, const std::vector<uint>& tokens) {
             model.crossAttentionLayers.end()) {
             continue;  // TODO - cross attention
         }
-        auto a = attention(model, model.layers[i].attention, x, g.kvCache.dSequence,
-                           g.kvCache.entries[i]);
-        addInPlace(x, a);
+        addInPlace(x, attention(model, model.layers[i].attention, x, g.kvCache.dSequence,
+                                g.kvCache.entries[i]));
         addInPlace(x, mlp(model, model.layers[i].mlp, x));
     }
     x = rmsNorm(model.finalNorm, x, model.normEpsilon);
@@ -251,18 +290,20 @@ void forward(Generator& g, const std::vector<uint>& tokens) {
 
 void forwardImage(Generator& g, const TensorV& image) {
     auto& model = *g.model.visionModel;
+
+    // Embeddings
     auto x = projection(
         reshape(model.patchEmbedding, {model.dModel, 3 * model.dPatch * model.dPatch}), image);
-
     // Lookup {aspectRatioID = 0, tileIndex = 0}
     addInPlace(x, castFloat(sliceLeading(model.positionalEmbedding, {0, 0})));
     x = concat({unsqueeze(castFloat(sliceLeading(model.classEmbedding, {0, 0})), {0}), x}, 0);
+    x = layerNorm(model.layerNormPre.weight, model.layerNormPre.bias, x, model.normEpsilon);
 
-    DUMPSQ(x);
-    DUMPSQ(model.positionalEmbedding);
-    DUMPSQ(model.classEmbedding);
+    // Transformer stack
+    addInPlace(x, visionAttention(model, model.layers0[0].attention, x));
+    addInPlace(x, visionMlp(model, model.layers0[0].mlp, x));
 
-    std::ofstream f("wip.npy", std::ios::binary);
+    std::ofstream f("tmp/x.npy", std::ios_base::binary);
     saveNpy(f, x);
 }
 

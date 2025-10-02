@@ -112,6 +112,8 @@ def prepare_parameters(
             name = re.sub(r"\.(fc2)\.", ".down_proj.", name)
             name = re.sub(r"\.input_layernorm\.", ".attn.norm.", name)
             name = re.sub(r"\.post_attention_layernorm\.", ".mlp.norm.", name)
+            name = re.sub(r"\.transformer\.layers\.", ".layers0.", name)
+            name = re.sub(r"\.global_transformer\.layers\.", ".layers1.", name)
             assert name not in params, f"duplicate parameter {name!r}"
             params[name] = parameter
 
@@ -131,9 +133,9 @@ def prepare_parameters(
                 weight = f"{prefix}.mlp.down_proj.weight"
                 params[weight] = params[weight] * params.pop(gate).view(()).tanh()
 
-            # Merge global_transformer gates into output projections
+            # Merge global_transformer (layers1) gates into output projections
             for i in range(model.config.vision_config.num_global_layers):
-                prefix = f"vision_model.global_transformer.layers.{i}"
+                prefix = f"vision_model.layers1.{i}"
                 gate = f"{prefix}.gate_attn"
                 weight = f"{prefix}.attn.o_proj.weight"
                 params[weight] = params[weight] * params.pop(gate).view(()).tanh()

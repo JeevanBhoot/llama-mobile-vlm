@@ -67,13 +67,13 @@ void selfAttentionInPlace(float* __restrict__ queryOut,
                           const uint dSkv,
                           const uint dHq,
                           const uint dHkv,
-                          const uint dim) {
-    const auto offsetS = 1 + dSkv - dSq;
+                          const uint dim,
+                          const bool causal) {
     std::unique_ptr<float[]> scores(new float[dSkv]);
     for (auto hKv = 0u; hKv < dHkv; ++hKv) {
         for (auto sQ = 0u; sQ < dSq; ++sQ) {
             for (auto hQ = 0u; hQ < dHq; ++hQ) {
-                auto dSkv_row = sQ + offsetS;
+                auto dSkv_row = causal ? (dSkv + 1 + sQ - dSq) : dSkv;
                 // q @ k.T / sqrt(dim)
                 for (auto sKv = 0u; sKv < dSkv_row; ++sKv) {
                     float dot = 0;
@@ -101,6 +101,16 @@ void selfAttentionInPlace(float* __restrict__ queryOut,
 void swiGluInPlace(float* __restrict__ x, const float* __restrict__ gate, const uint n) {
     for (auto i = 0u; i < n; ++i) {
         x[i] *= gate[i] / (1 + std::exp(-gate[i]));
+    }
+}
+
+void geluInPlace(float* x, uint n) {
+    // As per torch's 'approximate' GELU
+    const float c0 = std::sqrtf(2.0f / M_PIf);
+    const float c1 = 0.044715f;
+    for (auto i = 0u; i < n; ++i) {
+        float z = std::tanhf(c0 * (x[i] + c1 * x[i] * x[i] * x[i]));
+        x[i] = 0.5f * x[i] * (1.0f + z);
     }
 }
 
@@ -135,6 +145,29 @@ void rmsNorm(const bf16* __restrict__ weight,
     }
 }
 
+void layerNorm(const bf16* __restrict__ weight,
+               const bf16* __restrict__ bias,
+               const float* x,
+               uint batch,
+               uint dim,
+               float epsilon,
+               float* __restrict__ out) {
+    for (auto n = 0u; n < batch; ++n) {
+        auto xn = x + n * dim;
+        float sum = 0, sumSq = 0;
+        for (auto i = 0u; i < dim; ++i) {
+            sum += xn[i];
+            sumSq += xn[i] * xn[i];
+        }
+        float mean = sum / float(dim);
+        float scale = 1 / std::sqrt(sumSq / float(dim) - mean * mean + epsilon);
+        for (auto i = 0u; i < dim; ++i) {
+            float normed = (xn[i] - mean) * scale;
+            out[n * dim + i] = normed * bf16ToFloat(weight[i]) + bf16ToFloat(bias[i]);
+        }
+    }
+}
+
 void matmulT(const float* __restrict__ lhs,
              const bf16* __restrict__ rhs,
              const uint dM,
@@ -149,6 +182,14 @@ void matmulT(const float* __restrict__ lhs,
                 dot += lhs[m * dK + k] * bf16ToFloat(rhs[n * dK + k]);
             }
             out[m * dN + n] = dot;
+        }
+    }
+}
+
+void broadcastAddInPlace(float* __restrict__ x, const bf16* __restrict__ y, uint n, uint d) {
+    for (auto i = 0u; i < n; ++i) {
+        for (auto j = 0u; j < d; ++j) {
+            x[i * d + j] += bf16ToFloat(y[j]);
         }
     }
 }

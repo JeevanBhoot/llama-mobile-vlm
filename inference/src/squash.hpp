@@ -143,6 +143,27 @@ struct TextModel {
 };
 
 struct VisionModel {
+    struct Affine {
+        TensorV weight;
+        TensorV bias;
+    };
+    struct AttentionLayer {
+        Affine norm;
+        TensorV query;
+        TensorV key;
+        TensorV value;
+        TensorV output;
+    };
+    struct MLPLayer {
+        Affine norm;
+        Affine up;
+        Affine down;
+    };
+    struct Layer {
+        AttentionLayer attention;
+        MLPLayer mlp;
+    };
+
     // Config
     std::vector<float> imageMean;
     std::vector<float> imageStd;
@@ -161,6 +182,8 @@ struct VisionModel {
     TensorV patchEmbedding;
     TensorV positionalEmbedding;
     TensorV classEmbedding;
+    Affine layerNormPre;
+    std::vector<Layer> layers0;
 };
 
 struct Model {
