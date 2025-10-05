@@ -184,6 +184,10 @@ struct VisionModel {
     TensorV classEmbedding;
     Affine layerNormPre;
     std::vector<Layer> layers0;
+    Affine layerNormPost;
+    TensorV tileEmbeddingPost;
+    std::vector<Layer> layers1;
+    Affine multiModalProjector;
 };
 
 struct Model {

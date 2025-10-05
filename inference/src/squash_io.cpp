@@ -179,28 +179,37 @@ VisionModel loadVisionModel(const json& header,
                             const json& metadata,
                             ulong alignment,
                             const Buffer& buffer) {
+    auto loadAffine = [](const TensorLoader& m) {
+        return VisionModel::Affine{.weight = m("weight"), .bias = m("bias")};
+    };
+    auto loadLayers = [loadAffine](const TensorLoader& stack, uint n) {
+        std::vector<VisionModel::Layer> layers;
+        for (auto i = 0u; i < n; ++i) {
+            auto layer = stack[std::to_string(i)];
+            auto attn = layer["attn"];
+            auto mlp = layer["mlp"];
+            layers.push_back({{
+                                  .norm = loadAffine(attn["norm"]),
+                                  .query = attn("q_proj.weight"),
+                                  .key = attn("k_proj.weight"),
+                                  .value = attn("v_proj.weight"),
+                                  .output = attn("o_proj.weight"),
+                              },
+                              {
+                                  .norm = loadAffine(mlp["norm"]),
+                                  .up = loadAffine(mlp["up_proj"]),
+                                  .down = loadAffine(mlp["down_proj"]),
+                              }});
+        }
+        return layers;
+    };
+
     TensorLoader model{header, alignment, buffer, "vision_model"};
     auto& c = metadata.at("config").at("vision");
     auto dLayers0 = c.at("d_layers0").template get<uint>();
-    std::vector<VisionModel::Layer> layers0;
-    for (auto n = 0u; n < dLayers0; ++n) {
-        auto layer = model["layers0." + std::to_string(n)];
-        auto attn = layer["attn"];
-        auto mlp = layer["mlp"];
-        layers0.push_back(
-            {{
-                 .norm = {.weight = attn("norm.weight"), .bias = attn("norm.bias")},
-                 .query = attn("q_proj.weight"),
-                 .key = attn("k_proj.weight"),
-                 .value = attn("v_proj.weight"),
-                 .output = attn("o_proj.weight"),
-             },
-             {
-                 .norm = {.weight = mlp("norm.weight"), .bias = mlp("norm.bias")},
-                 .up = {.weight = mlp("up_proj.weight"), .bias = mlp("up_proj.bias")},
-                 .down = {.weight = mlp("down_proj.weight"), .bias = mlp("down_proj.bias")},
-             }});
-    }
+    auto dLayers1 = c.at("d_layers1").template get<uint>();
+    std::vector<VisionModel::Layer> layers0 = loadLayers(model["layers0"], dLayers0);
+    std::vector<VisionModel::Layer> layers1 = loadLayers(model["layers1"], dLayers1);
     return VisionModel{
         // Config
         .imageMean = c.at("image_mean").template get<std::vector<float>>(),
@@ -220,9 +229,12 @@ VisionModel loadVisionModel(const json& header,
         .patchEmbedding = model("patch_embedding.weight"),
         .positionalEmbedding = model("positional_embedding.weight"),
         .classEmbedding = model("class_embedding.weight"),
-        .layerNormPre = {.weight = model("layernorm_pre.weight"),
-                         .bias = model("layernorm_pre.bias")},
+        .layerNormPre = loadAffine(model["layernorm_pre"]),
         .layers0 = layers0,
+        .layerNormPost = loadAffine(model["layernorm_post"]),
+        .tileEmbeddingPost = model("tile_embedding_post.weight"),
+        .layers1 = layers1,
+        .multiModalProjector = loadAffine(model["multi_modal_projector"]),
     };
 }
 

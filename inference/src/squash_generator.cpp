@@ -129,6 +129,17 @@ Tensor concat(const std::vector<TensorV>& tensors, uint dim) {
     return out;
 }
 
+Tensor tile(const TensorV& tensor, const std::vector<uint>& reps) {
+    auto shape = reps;
+    shape.insert(shape.end(), tensor.shape.begin(), tensor.shape.end());
+    auto out = allocateTensor<float>(std::move(shape));
+    auto dim = prod(tensor.shape);
+    for (auto i = 0u; i < prod(reps); ++i) {
+        ops::copy(getFloat(tensor), dim, getFloat(out) + i * dim);
+    }
+    return out;
+}
+
 void addInPlace(TensorV& x, const TensorV& y) {
     ops::addInPlace(getFloat(x), getFloat(y), prod(x.shape));
 }
@@ -288,7 +299,7 @@ void forward(Generator& g, const std::vector<uint>& tokens) {
     g.prevToken = nextToken(g, x);
 }
 
-void forwardImage(Generator& g, const TensorV& image) {
+Tensor forwardImage(Generator& g, const TensorV& image) {
     auto& model = *g.model.visionModel;
 
     // Embeddings
@@ -299,12 +310,41 @@ void forwardImage(Generator& g, const TensorV& image) {
     x = concat({unsqueeze(castFloat(sliceLeading(model.classEmbedding, {0, 0})), {0}), x}, 0);
     x = layerNorm(model.layerNormPre.weight, model.layerNormPre.bias, x, model.normEpsilon);
 
-    // Transformer stack
-    addInPlace(x, visionAttention(model, model.layers0[0].attention, x));
-    addInPlace(x, visionMlp(model, model.layers0[0].mlp, x));
+    auto out = tile(castFloat(model.multiModalProjector.bias), {x.shape[0]});
 
-    std::ofstream f("tmp/x.npy", std::ios_base::binary);
-    saveNpy(f, x);
+    // First transformer stack
+    for (auto i = 0u; i < model.dLayers0; ++i) {
+        std::cerr << "layer " << i << std::endl;
+        auto& layer = model.layers0[i];
+        addInPlace(x, visionAttention(model, layer.attention, x));
+        addInPlace(x, visionMlp(model, layer.mlp, x));
+        auto tap = std::find(model.outputTaps.begin(), model.outputTaps.end(), i);
+        if (tap != model.outputTaps.end()) {
+            addInPlace(out,
+                       projection(sliceLeading(model.multiModalProjector.weight,
+                                               {static_cast<uint>(tap - model.outputTaps.begin())}),
+                                  x));
+        }
+        if (i >= 3) break;  // TODO
+    }
+    x = layerNorm(model.layerNormPost.weight, model.layerNormPost.bias, x, model.normEpsilon);
+    // Lookup {aspectRatioID = 0, tileIndex = 0}
+    broadcastAddInPlace(x, sliceLeading(model.tileEmbeddingPost, {0, 0}));
+
+    // Second transformer stack
+    for (auto i = 0u; i < model.dLayers1; ++i) {
+        auto& layer = model.layers1[i];
+        addInPlace(x, visionAttention(model, layer.attention, x));
+        addInPlace(x, visionMlp(model, layer.mlp, x));
+        break;  // TODO
+    }
+    addInPlace(out, projection(sliceLeading(model.multiModalProjector.weight,
+                                            {static_cast<uint>(model.outputTaps.size())}),
+                               x));
+
+    std::ofstream f("tmp/out.npy", std::ios_base::binary);  // TODO
+    saveNpy(f, out);
+    return out;
 }
 
 }  // namespace

@@ -104,6 +104,11 @@ def prepare_parameters(
         # Standardise names
         for name, parameter in model.named_parameters():
             name = re.sub(r"^model\.vision_model\.", "vision_model.", name)
+            name = re.sub(
+                r"^model\.multi_modal_projector\.",
+                "vision_model.multi_modal_projector.",
+                name,
+            )
             name = re.sub(r"^model\.language_model\.", "text_model.", name)
             name = re.sub(r"^model\.", "text_model.", name)
             name = re.sub(r"^lm_head\.weight$", "text_model.lm_head.weight", name)
@@ -178,7 +183,22 @@ def prepare_parameters(
                 1, (n_tiles, -1)
             )
             gate = params.pop(f"{prefix}.gate").view(()).tanh()
-            params[f"{prefix}.weight"] = weight * gate
+            params[f"vision_model.tile_embedding_post.weight"] = weight * gate
+
+            # Permute the multi_modal_projector input dimensions.
+            # In the original weights, the first block of 1280 elements is the final
+            # hidden state of `layers1`, but after this, the "tapped" hidden states
+            # are interleaved. This is bothersome to implement, so instead we make things
+            # explicit with a (n_taps + 1, d_out, d_in) tensor.
+            proj = params["vision_model.multi_modal_projector.weight"]
+            hidden_size = model.config.vision_config.hidden_size
+            params["vision_model.multi_modal_projector.weight"] = torch.cat(
+                [
+                    proj[:, hidden_size:].unflatten(1, (hidden_size, -1)).movedim(2, 0),
+                    proj[None, :, :hidden_size],
+                ],
+                axis=0,
+            )
 
         return params
 
