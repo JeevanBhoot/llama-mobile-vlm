@@ -7,16 +7,6 @@ namespace squash {
 
 /// Common ///
 
-inline float bf16ToFloat(bf16 value) {
-    union {
-        float f;
-        int16_t i[2];
-    } u;
-    u.i[0] = 0;
-    u.i[1] = value;
-    return u.f;
-}
-
 inline uint prod(const std::vector<uint>& x) {
     return std::accumulate(x.begin(), x.end(), 1u, std::multiplies<uint>());
 }

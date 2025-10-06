@@ -1,7 +1,7 @@
 #pragma once
 
 #include <random>
-#include "squash.hpp"
+#include "common.hpp"
 
 namespace squash::ops {
 

@@ -10,19 +10,15 @@
 #include <variant>
 #include <vector>
 
+#include "lib/common.hpp"
 #include "lib/tokenizer.hpp"
 
 namespace squash {
 
 /// Common ///
 
-using uint = uint32_t;
-using ulong = uint64_t;
-using bf16 = int16_t;
-
 constexpr ulong DefaultAlignment = 32u;
 
-float bf16ToFloat(bf16 value);
 uint prod(const std::vector<uint>&);
 
 struct Timer {
