@@ -92,7 +92,7 @@ TEST_CASE("squash::TextGenerator", "[squash]") {
     auto buffer = reinterpret_cast<bf16*>(m._data.get());
     std::default_random_engine rng(12345u);
     for (auto i = 0u; i < nParameters; ++i) {
-        buffer[i] = convertTruncate<bf16>(std::normal_distribution<float>(0, 0.02f)(rng));
+        buffer[i] = floatToBf16(std::normal_distribution<float>(0, 0.02f)(rng));
     }
 
     // Create tensor views

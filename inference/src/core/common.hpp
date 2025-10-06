@@ -9,6 +9,7 @@ using uint = uint32_t;
 using ulong = uint64_t;
 
 float bf16ToFloat(bf16 value);
+bf16 floatToBf16(float value);
 
 }  // namespace squash
 
@@ -16,6 +17,7 @@ float bf16ToFloat(bf16 value);
 // Impl
 
 namespace squash {
+
 inline float bf16ToFloat(bf16 value) {
     union {
         float f;
@@ -25,4 +27,12 @@ inline float bf16ToFloat(bf16 value) {
     u.i[1] = value;
     return u.f;
 }
+
+inline bf16 floatToBf16(float value) {
+    // Round to nearest, ties to even
+    uint32_t u = reinterpret_cast<uint32_t&>(value);
+    u += 0x7FFFu + ((u >> 16) & 1u);
+    return static_cast<bf16>(u >> 16);
+}
+
 }  // namespace squash

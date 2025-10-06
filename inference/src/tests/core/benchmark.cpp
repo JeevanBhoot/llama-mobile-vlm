@@ -9,7 +9,7 @@ using random_engine = std::default_random_engine;
 template <class T>
 Buffer zeros(uint size) {
     Buffer data(size * sizeof(T));
-    std::fill_n(data.get<T>(), size, convertTruncate<T>(0.0f));
+    std::fill_n(data.get<T>(), size, cast<T>(0.0f));
     return data;
 }
 
@@ -17,7 +17,7 @@ template <class T>
 Buffer randn(uint size, float stddev, random_engine& rng) {
     Buffer data(size * sizeof(T));
     auto dist = std::normal_distribution<float>(0, stddev);
-    std::generate_n(data.get<T>(), size, [&] { return convertTruncate<T>(dist(rng)); });
+    std::generate_n(data.get<T>(), size, [&] { return cast<T>(dist(rng)); });
     return data;
 }
 
