@@ -347,7 +347,6 @@ Tensor forwardImage(Generator& g, const TensorV& image) {
 
     // First transformer stack
     for (auto i = 0u; i < model.dLayers0; ++i) {
-        std::cerr << "layer " << i << std::endl;
         auto& layer = model.layers0[i];
         addInPlace(x, visionAttention(model, layer.attention, x));
         addInPlace(x, visionMlp(model, layer.mlp, x));
@@ -356,7 +355,6 @@ Tensor forwardImage(Generator& g, const TensorV& image) {
             auto idx = static_cast<uint>(tap - model.outputTaps.begin());
             addInPlace(out, projection(sliceLeading(model.multiModalProjector.weight, {idx}), x));
         }
-        // if (i >= 3) break;  // TODO
     }
     x = layerNorm(model.layerNormPost.weight, model.layerNormPost.bias, x, model.normEpsilon);
     // Lookup {aspectRatioID = 0, tileIndex = 0}
@@ -367,14 +365,10 @@ Tensor forwardImage(Generator& g, const TensorV& image) {
         auto& layer = model.layers1[i];
         addInPlace(x, visionAttention(model, layer.attention, x));
         addInPlace(x, visionMlp(model, layer.mlp, x));
-        // break;  // TODO
     }
     addInPlace(out, projection(sliceLeading(model.multiModalProjector.weight,
                                             {static_cast<uint>(model.outputTaps.size())}),
                                x));
-
-    std::ofstream f("tmp/out.npy", std::ios_base::binary);  // TODO
-    saveNpy(f, out);
     return out;
 }
 
