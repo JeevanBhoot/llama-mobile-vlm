@@ -7,39 +7,24 @@
 
 namespace squash {
 
-namespace {
-constexpr ulong MaxPrint = 8u;
-
-float toFloat(float v) {
-    return v;
+void selectOmpNumThreads() {
+    auto nthreads = std::thread::hardware_concurrency();
+#if defined(ANDROID) && defined(__aarch64__)
+    // Assume BIG.little on Android/ARM, e.g. 9-core = 5 threads
+    nthreads = uint(std::ceil(double(nthreads) / 2));
+#endif
+    omp_set_num_threads(int(nthreads));
 }
 
-float toFloat(bf16 v) {
-    return bf16ToFloat(v);
+/// Timer ///
+
+Timer::Timer() : start(clock::now()) {}
+
+double Timer::elapsed() const {
+    return std::chrono::duration_cast<std::chrono::duration<double>>(clock::now() - start).count();
 }
 
-template <class T>
-void printFlatTensorData(std::ostream& out, const tensor_data::Flat<T>& data, ulong nElements) {
-    if (nElements <= MaxPrint) {
-        for (auto i = 0u; i < nElements; ++i) {
-            if (i) out << ", ";
-            out << toFloat(data.data[i]);
-        }
-    } else {
-        for (auto i = 0u; i < MaxPrint / 2; ++i) {
-            if (i) out << ", ";
-            out << toFloat(data.data[i]);
-        }
-        out << " ... ";
-        auto start2 = nElements - MaxPrint / 2;
-        for (auto i = start2; i < nElements; ++i) {
-            if (start2 < i) out << ", ";
-            out << toFloat(data.data[i]);
-        }
-    }
-}
-
-}  // namespace
+/// Image ///
 
 Image::Image(uint height, uint width, std::vector<uint8_t>&& data_)
     : height(height), width(width), data(std::move(data_)) {
@@ -75,79 +60,6 @@ Image resizeImage(const Image& image, uint height, uint width) {
                             static_cast<int>(image.height), 0, result.data.data(), newWidth,
                             newHeight, static_cast<int>(result.width * 3), STBIR_RGB);
     return result;
-}
-
-void selectOmpNumThreads() {
-    auto nthreads = std::thread::hardware_concurrency();
-#if defined(ANDROID) && defined(__aarch64__)
-    // Assume BIG.little on Android/ARM, e.g. 9-core = 5 threads
-    nthreads = uint(std::ceil(double(nthreads) / 2));
-#endif
-    omp_set_num_threads(int(nthreads));
-}
-
-std::ostream& operator<<(std::ostream& out, const TensorV& tensor) {
-    out << "Tensor{(" << dump(tensor.shape) << "): ";
-    std::visit(
-        [&](auto&& data) {
-            auto nElements = prod(tensor.shape);
-            using T = std::decay_t<decltype(data)>;
-            if constexpr (std::is_same_v<T, tensor_data::Flat<float>> ||
-                          std::is_same_v<T, tensor_data::Flat<bf16>>) {
-                printFlatTensorData(out, data, nElements);
-            } else {
-                out << "((unknown))";
-            }
-        },
-        tensor.data);
-    return out << "}";
-}
-
-void saveNpy(std::ostream& out, const TensorV& tensor) {
-    // Magic + Version
-    std::string magic = "\x93NUMPY";
-    out.write(magic.c_str(), static_cast<std::streamsize>(magic.size()));
-    out.put(1);  // version.major
-    out.put(0);  // version.minor
-
-    // Header
-    std::string header = "{'descr': '<f4', 'fortran_order': False, 'shape': (";
-    for (size_t i = 0; i < tensor.shape.size(); i++) {
-        if (i) header += ", ";
-        header += std::to_string(tensor.shape[i]);
-    }
-    if (tensor.shape.size() == 1) header += ",";  // tuple syntax for 1D
-    header += "), }";
-
-    // Pad with spaces so that total_size is a multiple of 16
-    // size: magic + version + header_size (u16) + header + newline
-    size_t headerPad = 16 - ((magic.size() + 2 + 2 + header.size() + 1) % 16);
-    header.append(headerPad, ' ');
-    header.push_back('\n');
-    uint16_t headerSize = static_cast<uint16_t>(header.size());
-    out.write(reinterpret_cast<char*>(&headerSize), sizeof(headerSize));
-    out.write(header.c_str(), static_cast<std::streamsize>(header.size()));
-
-    // Data
-    auto nElement = prod(tensor.shape);
-    std::visit(
-        [&out, nElement](auto&& data) {
-            using T = std::decay_t<decltype(data)>;
-            if constexpr (std::is_same_v<T, tensor_data::Flat<float>>) {
-                out.write(reinterpret_cast<const char*>(data.data),
-                          static_cast<std::streamsize>(nElement * sizeof(float)));
-            } else if constexpr (std::is_same_v<T, tensor_data::Flat<bf16>>) {
-                std::vector<float> fData(nElement);
-                std::transform(data.data, data.data + nElement, fData.data(), bf16ToFloat);
-                out.write(reinterpret_cast<const char*>(fData.data()),
-                          static_cast<std::streamsize>(nElement * sizeof(float)));
-            } else {
-                std::ostringstream err;
-                err << "saveNpy: Unexpected TensorV.data type: " << typeid(T).name() << "\n";
-                throw std::runtime_error(err.str());
-            }
-        },
-        tensor.data);
 }
 
 }  // namespace squash

@@ -3,23 +3,17 @@
 #include <chrono>
 #include <cstdint>
 #include <iostream>
-#include <memory>
-#include <numeric>
 #include <optional>
 #include <random>
-#include <variant>
 #include <vector>
 
 #include "core/common.hpp"
+#include "core/tensor.hpp"
 #include "core/tokenizer.hpp"
 
 namespace squash {
 
 /// Common ///
-
-constexpr ulong DefaultAlignment = 32u;
-
-uint prod(const std::vector<uint>&);
 
 struct Timer {
     typedef std::chrono::high_resolution_clock clock;
@@ -52,62 +46,24 @@ Image resizeImage(const Image&, uint height, uint width);
 
 void selectOmpNumThreads();
 
-/// Tensor ///
-
-struct Buffer {
-    Buffer(ulong size, ulong alignment = DefaultAlignment);
-    Buffer(Buffer&&);
-    Buffer& operator=(Buffer&&);
-    ~Buffer();
-    void reset();
-    template <class T = char>
-    T* get() const;
-    Buffer copy(ulong size, ulong alignment = DefaultAlignment) const;
-
-   private:
-    char* _data;
-};
-
-namespace tensor_data {
-template <class T>
-struct Flat {
-    T* data;
-    Flat(T* data = nullptr) : data(data) {}
-};
-}  // namespace tensor_data
-
-// TensorV is a non-owning Tensor view
-struct TensorV {
-    using DataT = std::variant<tensor_data::Flat<bf16>, tensor_data::Flat<float>>;
-    DataT data;
-    std::vector<uint> shape;
-};
-
-struct Tensor : TensorV {
-    Buffer _data;
-};
-
-std::ostream& operator<<(std::ostream&, const TensorV&);
-void saveNpy(std::ostream&, const TensorV&);
-
 /// Model ///
 // Holds all shape and parameter data (views onto an underlying buffer)
 
 struct TextModel {
     struct AttentionLayer {
-        TensorV norm;
-        TensorV query;
-        TensorV key;
-        TensorV value;
-        TensorV output;
-        std::optional<TensorV> query_norm;
-        std::optional<TensorV> key_norm;
+        tensor::TensorV norm;
+        tensor::TensorV query;
+        tensor::TensorV key;
+        tensor::TensorV value;
+        tensor::TensorV output;
+        std::optional<tensor::TensorV> query_norm;
+        std::optional<tensor::TensorV> key_norm;
     };
     struct MLPLayer {
-        TensorV norm;
-        TensorV up;
-        TensorV gate;
-        TensorV down;
+        tensor::TensorV norm;
+        tensor::TensorV up;
+        tensor::TensorV gate;
+        tensor::TensorV down;
     };
     struct Layer {
         AttentionLayer attention;
@@ -129,10 +85,10 @@ struct TextModel {
     std::vector<uint> crossAttentionLayers;
 
     // Parameters
-    TensorV embedTokens;
+    tensor::TensorV embedTokens;
     std::vector<Layer> layers;
-    TensorV finalNorm;
-    TensorV predictTokens;
+    tensor::TensorV finalNorm;
+    tensor::TensorV predictTokens;
 
     // Vocab
     Tokenizer tokenizer;
@@ -143,15 +99,15 @@ struct TextModel {
 
 struct VisionModel {
     struct Affine {
-        TensorV weight;
-        TensorV bias;
+        tensor::TensorV weight;
+        tensor::TensorV bias;
     };
     struct AttentionLayer {
         Affine norm;
-        TensorV query;
-        TensorV key;
-        TensorV value;
-        TensorV output;
+        tensor::TensorV query;
+        tensor::TensorV key;
+        tensor::TensorV value;
+        tensor::TensorV output;
     };
     struct MLPLayer {
         Affine norm;
@@ -178,13 +134,13 @@ struct VisionModel {
     std::vector<uint> outputTaps;
 
     // Parameters
-    TensorV patchEmbedding;
-    TensorV positionalEmbedding;
-    TensorV classEmbedding;
+    tensor::TensorV patchEmbedding;
+    tensor::TensorV positionalEmbedding;
+    tensor::TensorV classEmbedding;
     Affine layerNormPre;
     std::vector<Layer> layers0;
     Affine layerNormPost;
-    TensorV tileEmbeddingPost;
+    tensor::TensorV tileEmbeddingPost;
     std::vector<Layer> layers1;
     Affine multiModalProjector;
 };
@@ -197,7 +153,7 @@ struct Model {
     std::string source;
     std::string created;
     ulong alignment;
-    Buffer _data;
+    tensor::Buffer _data;
 };
 
 Model loadSquashedTensors(std::istream&);
@@ -212,8 +168,8 @@ std::string regexUnicodeToModifiedECMA(const std::string&);
 struct Generator {
     struct KVCache {
         struct Entry {
-            Tensor key;
-            Tensor value;
+            tensor::Tensor key;
+            tensor::Tensor value;
         };
         std::vector<Entry> entries;
         uint dSequence;
@@ -250,4 +206,25 @@ struct Generator {
 
 }  // namespace squash
 
-#include "squash_impl.ipp"
+///////////////////////////////////////////////////////////////////////////////
+// Impl
+
+#define DUMPSQ(obj) std::cerr << __FILE__ << ":" << __LINE__ << " " << obj << std::endl;
+
+namespace squash {
+
+template <class T>
+Dump<T> dump(const T& sequence) {
+    return {sequence};
+}
+
+template <class T>
+std::ostream& operator<<(std::ostream& out, const Dump<T>& x) {
+    for (auto i = 0u; i < x.sequence.size(); ++i) {
+        if (i) out << ", ";
+        out << x.sequence[i];
+    }
+    return out;
+}
+
+}  // namespace squash

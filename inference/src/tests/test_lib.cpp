@@ -73,8 +73,8 @@ TEST_CASE("squash::TextGenerator", "[squash]") {
         // Metadata
         .source = "test",
         .created = "",
-        .alignment = DefaultAlignment,
-        ._data = Buffer(0),
+        .alignment = tensor::DefaultAlignment,
+        ._data = tensor::Buffer(0),
     };
 
     // Create buffer
@@ -88,7 +88,7 @@ TEST_CASE("squash::TextGenerator", "[squash]") {
                                        + 3 * tm.dModel * tm.dMLP  // mlp
                                        )                          //
                        + tm.dModel;                               // norm
-    m._data = Buffer(sizeof(bf16) * nParameters);
+    m._data = tensor::Buffer(sizeof(bf16) * nParameters);
     auto buffer = reinterpret_cast<bf16*>(m._data.get());
     std::default_random_engine rng(12345u);
     for (auto i = 0u; i < nParameters; ++i) {
@@ -97,9 +97,9 @@ TEST_CASE("squash::TextGenerator", "[squash]") {
 
     // Create tensor views
     auto ptr = buffer;
-    auto allocate = [&](const std::vector<uint>& shape) {
-        auto t = TensorV{ptr, shape};
-        ptr += prod(shape);
+    auto allocate = [&](const tensor::Shape& shape) {
+        auto t = tensor::TensorV{ptr, shape};
+        ptr += tensor::prod(shape);
         return t;
     };
     tm.embedTokens = allocate({tm.dVocab, tm.dModel});

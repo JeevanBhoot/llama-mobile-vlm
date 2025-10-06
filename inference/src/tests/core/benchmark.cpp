@@ -7,15 +7,15 @@ namespace {
 using random_engine = std::default_random_engine;
 
 template <class T>
-Buffer zeros(uint size) {
-    Buffer data(size * sizeof(T));
+tensor::Buffer zeros(uint size) {
+    tensor::Buffer data(size * sizeof(T));
     std::fill_n(data.get<T>(), size, cast<T>(0.0f));
     return data;
 }
 
 template <class T>
-Buffer randn(uint size, float stddev, random_engine& rng) {
-    Buffer data(size * sizeof(T));
+tensor::Buffer randn(uint size, float stddev, random_engine& rng) {
+    tensor::Buffer data(size * sizeof(T));
     auto dist = std::normal_distribution<float>(0, stddev);
     std::generate_n(data.get<T>(), size, [&] { return cast<T>(dist(rng)); });
     return data;
@@ -89,8 +89,8 @@ TEMPLATE_TEST_CASE("benchmark-ops-MLP", "[squash][benchmark]", bf16) {
     benchmarking::Benchmark benchmark;
     for (auto rep = 0u; rep < 10u; ++rep) {
         auto timer = benchmark.record();
-        Buffer up(batchSize * dFFN * sizeof(float));
-        Buffer gate(batchSize * dFFN * sizeof(float));
+        tensor::Buffer up(batchSize * dFFN * sizeof(float));
+        tensor::Buffer gate(batchSize * dFFN * sizeof(float));
         auto outputs = zeros<float>(batchSize * dModel);
         ops::matmulT(inputs.get<float>(), wUp.template get<TestType>(), batchSize, dModel, dFFN,
                      up.get<float>());

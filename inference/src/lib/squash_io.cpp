@@ -86,14 +86,14 @@ Tokenizer loadTokenizer(const json& j) {
 struct TensorLoader {
     const json& header;
     ulong alignment;
-    const Buffer& buffer;
+    const tensor::Buffer& buffer;
     std::string prefix;
 
     std::string fullName(const std::string& name) const {
         return prefix.empty() ? name : (prefix + "." + name);
     }
 
-    std::optional<TensorV> get(const std::string& name) const {
+    std::optional<tensor::TensorV> get(const std::string& name) const {
         if (header.contains(fullName(name))) {
             return std::make_optional((*this)(name));
         }
@@ -106,7 +106,7 @@ struct TensorLoader {
     }
 
     // Load the given named tensor (full name "{prefix}.{name}")
-    TensorV operator()(const std::string& name) const {
+    tensor::TensorV operator()(const std::string& name) const {
         auto fullName = this->fullName(name);
         auto& entry = header.at(fullName);
         auto dtype = entry.at("dtype").template get<std::string>();
@@ -121,8 +121,8 @@ struct TensorLoader {
             err << "Tensor " << fullName << " is misaligned, offset = " << offset;
             throw std::runtime_error(err.str());
         }
-        return TensorV{
-            tensor_data::Flat(reinterpret_cast<bf16*>(buffer.get() + offset)),
+        return {
+            tensor::_data::Flat(reinterpret_cast<bf16*>(buffer.get() + offset)),
             entry.at("shape").template get<std::vector<uint>>(),
         };
     }
@@ -131,7 +131,7 @@ struct TensorLoader {
 TextModel loadTextModel(const json& header,
                         const json& metadata,
                         ulong alignment,
-                        const Buffer& buffer) {
+                        const tensor::Buffer& buffer) {
     TensorLoader model{header, alignment, buffer, "text_model"};
     auto& c = metadata.at("config").at("text");
     auto& v = metadata.at("vocab");
@@ -193,7 +193,7 @@ TextModel loadTextModel(const json& header,
 VisionModel loadVisionModel(const json& header,
                             const json& metadata,
                             ulong alignment,
-                            const Buffer& buffer) {
+                            const tensor::Buffer& buffer) {
     auto loadAffine = [](const TensorLoader& m) {
         return VisionModel::Affine{.weight = m("weight"), .bias = m("bias")};
     };
@@ -290,7 +290,7 @@ Model loadSquashedTensors(std::istream& in) {
             std::max(bufferLength, align(x.at("data_offsets")[1].template get<ulong>(), alignment));
     }
     checkRAM(bufferLength);
-    Buffer _data(bufferLength, alignment);
+    tensor::Buffer _data(bufferLength, alignment);
     for (auto i = ulong(0); i < bufferLength; i += BufferChunkSize) {
         in.read(_data.get() + i,
                 static_cast<std::streamsize>(std::min(i + BufferChunkSize, bufferLength) - i));

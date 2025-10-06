@@ -6,6 +6,8 @@
 #include <iostream>
 #include <sstream>
 
+using namespace squash::tensor;
+
 namespace squash {
 
 namespace {
@@ -15,7 +17,7 @@ namespace {
 template <class T>
 Tensor allocateTensor(std::vector<uint>&& shape) {
     auto buffer = Buffer(sizeof(T) * prod(shape));
-    return Tensor{{.data = tensor_data::Flat<float>(reinterpret_cast<float*>(buffer.get())),
+    return Tensor{{.data = _data::Flat<float>(reinterpret_cast<float*>(buffer.get())),
                    .shape = std::move(shape)},
                   std::move(buffer)};
 }
@@ -63,15 +65,15 @@ TensorV unsqueeze(const TensorV& tensor, const std::vector<uint>& indices) {
 }
 
 const bf16* getBf16(const TensorV& tensor) {
-    return std::get<tensor_data::Flat<bf16>>(tensor.data).data;
+    return std::get<_data::Flat<bf16>>(tensor.data).data;
 }
 
 const float* getFloat(const TensorV& tensor) {
-    return std::get<tensor_data::Flat<float>>(tensor.data).data;
+    return std::get<_data::Flat<float>>(tensor.data).data;
 }
 
 float* getFloat(TensorV& tensor) {
-    return std::get<tensor_data::Flat<float>>(tensor.data).data;
+    return std::get<_data::Flat<float>>(tensor.data).data;
 }
 
 Tensor embeddingLookup(const TensorV& weight, const std::vector<uint>& tokens) {
