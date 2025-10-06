@@ -63,12 +63,13 @@ def get_vocab_dict(tokenizer: transformers.PreTrainedTokenizerFast) -> dict[str,
     pre_split, pre_byte = data["pre_tokenizer"]["pretokenizers"]
     pre_regex = pre_split["pattern"]["Regex"]
     assert pre_byte["type"] == "ByteLevel"
-    (begin_of_text_id,) = (
-        t["id"] for t in data["added_tokens"] if t["content"] == "<|begin_of_text|>"
-    )
-    (end_of_text_id,) = (
-        t["id"] for t in data["added_tokens"] if t["content"] == "<|end_of_text|>"
-    )
+    ids = {}
+    for name, token in dict(
+        begin_of_text_id="<|begin_of_text|>",
+        end_of_text_id="<|end_of_text|>",
+        image_id="<|image|>",
+    ).items():
+        (ids[name],) = (t["id"] for t in data["added_tokens"] if t["content"] == token)
 
     # Concatenate merges to single strings & de-duplicate
     merge_set = set([])
@@ -85,13 +86,7 @@ def get_vocab_dict(tokenizer: transformers.PreTrainedTokenizerFast) -> dict[str,
         vocab[id] = token
     assert all(token is not None for token in vocab)
 
-    return dict(
-        begin_of_text_id=begin_of_text_id,
-        end_of_text_id=end_of_text_id,
-        pre_tokenizer=pre_regex,
-        merges=merges,
-        vocab=vocab,
-    )
+    return dict(**ids, pre_tokenizer=pre_regex, merges=merges, vocab=vocab)
 
 
 def prepare_parameters(

@@ -29,6 +29,10 @@ TensorV reshape(const TensorV& tensor, const std::vector<uint>& shape) {
     return {tensor.data, shape};
 }
 
+Tensor reshape(Tensor&& tensor, const std::vector<uint>& shape) {
+    return {reshape(tensor, shape), std::move(tensor._data)};
+}
+
 std::vector<uint> strides(const TensorV& tensor) {
     std::vector<uint> strides(tensor.shape.size(), 1u);
     for (auto i = strides.size() - 1; i != 0; --i) {
@@ -147,13 +151,18 @@ void addInPlace(TensorV& x, const TensorV& y) {
 void broadcastAddInPlace(TensorV& x, const TensorV& y) {
     if (y.shape.size() != 1 || y.shape[0] != x.shape.back()) {
         std::ostringstream err;
-        err << "broadcastAddInPlace bad shapes " << dump(x.shape) << ", " << dump(y.shape);
+        err << "broadcastAddInPlace bad shapes " << dump(x.shape) << " and " << dump(y.shape);
         throw std::invalid_argument(err.str());
     }
     ops::broadcastAddInPlace(getFloat(x), getBf16(y), prod(x.shape) / y.shape[0], y.shape[0]);
 }
 
 Tensor rmsNorm(const TensorV& weight, const TensorV& x, float epsilon) {
+    if (weight.shape.size() != 1 || weight.shape[0] != x.shape.back()) {
+        std::ostringstream err;
+        err << "rmsNorm bad shapes " << dump(weight.shape) << " and " << dump(x.shape);
+        throw std::invalid_argument(err.str());
+    }
     auto out = allocateTensor<float>({x.shape.begin(), x.shape.end()});
     ops::rmsNorm(getBf16(weight), getFloat(x), x.shape[0], x.shape[1], epsilon, getFloat(out));
     return out;
@@ -178,6 +187,9 @@ Tensor attention(const TextModel& model,
                  const TensorV& x,
                  uint tokenCount,
                  Generator::KVCache::Entry& cache) {
+    if (layer.query_norm || layer.key_norm) {
+        throw std::invalid_argument("attention() does not support query_norm or key_norm");
+    }
     auto z = rmsNorm(layer.norm, x, model.normEpsilon);
     auto query = projection(layer.query, z);
     auto key = projection(layer.key, z);
@@ -190,10 +202,25 @@ Tensor attention(const TextModel& model,
     ops::copy(getFloat(key), prod(key.shape), getFloat(cache.key) + tokenCount * key.shape[1]);
     ops::copy(getFloat(value), prod(value.shape),
               getFloat(cache.value) + tokenCount * key.shape[1]);
-    ops::selfAttentionInPlace(getFloat(query), getFloat(cache.key), getFloat(cache.value),
-                              /*dSq*/ query.shape[0], /*dSkv*/ key.shape[0] + tokenCount,
-                              /*dHq*/ model.dAttentionQ, /*dHkv*/ model.dAttentionKV,
-                              /*dim*/ model.dAttentionHead, /*causal*/ true);
+    ops::attentionInPlace(getFloat(query), getFloat(cache.key), getFloat(cache.value),
+                          /*dSq*/ query.shape[0], /*dSkv*/ key.shape[0] + tokenCount,
+                          /*dHq*/ model.dAttentionQ, /*dHkv*/ model.dAttentionKV,
+                          /*dim*/ model.dAttentionHead, /*causal*/ true);
+    return projection(layer.output, query);
+}
+
+Tensor crossAttention(const TextModel& model,
+                      const TextModel::AttentionLayer& layer,
+                      const TensorV& x,
+                      Generator::KVCache::Entry& cache) {
+    auto z = rmsNorm(layer.norm, x, model.normEpsilon);
+    auto query = reshape(projection(layer.query, z),
+                         {x.shape[0], model.dAttentionKV, model.dAttentionQ, model.dAttentionHead});
+    query = rmsNorm(*layer.query_norm, query, model.normEpsilon);
+    ops::attentionInPlace(getFloat(query), getFloat(cache.key), getFloat(cache.value),
+                          /*dSq*/ query.shape[0], /*dSkv*/ cache.key.shape[0],
+                          /*dHq*/ model.dAttentionQ, /*dHkv*/ model.dAttentionKV,
+                          /*dim*/ model.dAttentionHead, /*causal*/ false);
     return projection(layer.output, query);
 }
 
@@ -213,9 +240,9 @@ Tensor visionAttention(const VisionModel& model,
     auto key = projection(layer.key, z);
     auto value = projection(layer.value, z);
     auto dS = query.shape[0];
-    ops::selfAttentionInPlace(getFloat(query), getFloat(key), getFloat(value), dS, dS, /*dHq*/ 1u,
-                              /*dHkv*/ model.dAttentionQkv, /*dim*/ model.dAttentionHead,
-                              /*causal*/ false);
+    ops::attentionInPlace(getFloat(query), getFloat(key), getFloat(value), dS, dS, /*dHq*/ 1u,
+                          /*dHkv*/ model.dAttentionQkv, /*dim*/ model.dAttentionHead,
+                          /*causal*/ false);
     return projection(layer.output, query);
 }
 
@@ -285,12 +312,18 @@ void forward(Generator& g, const std::vector<uint>& tokens) {
     auto& model = g.model.textModel;
     auto x = embeddingLookup(model.embedTokens, tokens);
     for (auto i = 0u; i < model.dLayers; ++i) {
-        if (std::find(model.crossAttentionLayers.begin(), model.crossAttentionLayers.end(), i) !=
-            model.crossAttentionLayers.end()) {
-            continue;  // TODO - cross attention
+        auto xattn =
+            std::find(model.crossAttentionLayers.begin(), model.crossAttentionLayers.end(), i);
+        if (xattn != model.crossAttentionLayers.end()) {
+            auto xi = static_cast<size_t>(xattn - model.crossAttentionLayers.begin());
+            if (g.crossAttentionCache) {
+                addInPlace(x, crossAttention(model, model.layers[i].attention, x,
+                                             g.crossAttentionCache->entries[xi]));
+            }
+        } else {
+            addInPlace(x, attention(model, model.layers[i].attention, x, g.kvCache.dSequence,
+                                    g.kvCache.entries[i]));
         }
-        addInPlace(x, attention(model, model.layers[i].attention, x, g.kvCache.dSequence,
-                                g.kvCache.entries[i]));
         addInPlace(x, mlp(model, model.layers[i].mlp, x));
     }
     x = rmsNorm(model.finalNorm, x, model.normEpsilon);
@@ -320,12 +353,10 @@ Tensor forwardImage(Generator& g, const TensorV& image) {
         addInPlace(x, visionMlp(model, layer.mlp, x));
         auto tap = std::find(model.outputTaps.begin(), model.outputTaps.end(), i);
         if (tap != model.outputTaps.end()) {
-            addInPlace(out,
-                       projection(sliceLeading(model.multiModalProjector.weight,
-                                               {static_cast<uint>(tap - model.outputTaps.begin())}),
-                                  x));
+            auto idx = static_cast<uint>(tap - model.outputTaps.begin());
+            addInPlace(out, projection(sliceLeading(model.multiModalProjector.weight, {idx}), x));
         }
-        if (i >= 3) break;  // TODO
+        // if (i >= 3) break;  // TODO
     }
     x = layerNorm(model.layerNormPost.weight, model.layerNormPost.bias, x, model.normEpsilon);
     // Lookup {aspectRatioID = 0, tileIndex = 0}
@@ -336,7 +367,7 @@ Tensor forwardImage(Generator& g, const TensorV& image) {
         auto& layer = model.layers1[i];
         addInPlace(x, visionAttention(model, layer.attention, x));
         addInPlace(x, visionMlp(model, layer.mlp, x));
-        break;  // TODO
+        // break;  // TODO
     }
     addInPlace(out, projection(sliceLeading(model.multiModalProjector.weight,
                                             {static_cast<uint>(model.outputTaps.size())}),
@@ -345,6 +376,21 @@ Tensor forwardImage(Generator& g, const TensorV& image) {
     std::ofstream f("tmp/out.npy", std::ios_base::binary);  // TODO
     saveNpy(f, out);
     return out;
+}
+
+Generator::KVCache prepareCrossAttentionCache(const TextModel& model, const TensorV& imageOut) {
+    auto kvShape = std::vector<uint>{imageOut.shape[0], model.dAttentionKV, model.dAttentionHead};
+    Generator::KVCache cache;
+    cache.dSequence = cache.dSequenceMax = imageOut.shape[0];
+    cache.entries.reserve(model.crossAttentionLayers.size());
+    for (auto i : model.crossAttentionLayers) {
+        const auto& layer = model.layers[i];
+        auto key = reshape(projection(layer.attention.key, imageOut), kvShape);
+        key = rmsNorm(*layer.attention.key_norm, key, model.normEpsilon);
+        auto value = reshape(projection(layer.attention.value, imageOut), kvShape);
+        cache.entries.push_back({std::move(key), std::move(value)});
+    }
+    return cache;
 }
 
 }  // namespace
@@ -378,12 +424,20 @@ std::vector<std::string> Generator::prefill(const std::string& prefix,
             err << "Passed an image to " << model.source << ", which does not support vision input";
             throw std::runtime_error(err.str());
         }
-        forwardImage(*this, preprocess(*model.visionModel, *image));
+        auto imageOut = forwardImage(*this, preprocess(*model.visionModel, *image));
+        crossAttentionCache = prepareCrossAttentionCache(model.textModel, imageOut);
+    } else {
+        crossAttentionCache.reset();
     }
 
     // Handle text
-    auto tokens = model.textModel.tokenizer.encode(prefix);
-    tokens.insert(tokens.begin(), model.textModel.beginOfTextID);
+    std::vector<uint> tokens = {model.textModel.beginOfTextID};
+    if (image) {
+        tokens.push_back(model.textModel.imageID);
+    }
+    auto nSpecial = tokens.size();
+    auto encoded = model.textModel.tokenizer.encode(prefix);
+    tokens.insert(tokens.end(), encoded.begin(), encoded.end());
     resetCache(*this, uint(tokens.size() + options.maxGeneratedTokens));
     forward(*this, tokens);
 
@@ -393,7 +447,8 @@ std::vector<std::string> Generator::prefill(const std::string& prefix,
     }
     std::vector<std::string> stringTokens;
     stringTokens.reserve(tokens.size() - 1);
-    std::transform(tokens.begin() + 1, tokens.end(), std::back_inserter(stringTokens),
+    std::transform(tokens.begin() + static_cast<long>(nSpecial), tokens.end(),
+                   std::back_inserter(stringTokens),
                    [&](uint t) { return model.textModel.tokenizer.decode({t}); });
     return stringTokens;
 }

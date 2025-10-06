@@ -60,15 +60,15 @@ void softmaxInPlace(float* __restrict__ x, const uint batch, const uint dim) {
     }
 }
 
-void selfAttentionInPlace(float* __restrict__ queryOut,
-                          const float* __restrict__ key,
-                          const float* __restrict__ value,
-                          const uint dSq,
-                          const uint dSkv,
-                          const uint dHq,
-                          const uint dHkv,
-                          const uint dim,
-                          const bool causal) {
+void attentionInPlace(float* __restrict__ queryOut,
+                      const float* __restrict__ key,
+                      const float* __restrict__ value,
+                      const uint dSq,
+                      const uint dSkv,
+                      const uint dHq,
+                      const uint dHkv,
+                      const uint dim,
+                      const bool causal) {
     std::unique_ptr<float[]> scores(new float[dSkv]);
     for (auto hKv = 0u; hKv < dHkv; ++hKv) {
         for (auto sQ = 0u; sQ < dSq; ++sQ) {

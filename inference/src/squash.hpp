@@ -104,6 +104,8 @@ struct TextModel {
         TensorV key;
         TensorV value;
         TensorV output;
+        std::optional<TensorV> query_norm;
+        std::optional<TensorV> key_norm;
     };
     struct MLPLayer {
         TensorV norm;
@@ -140,6 +142,7 @@ struct TextModel {
     Tokenizer tokenizer;
     uint beginOfTextID;
     uint endOfTextID;
+    uint imageID;
 };
 
 struct VisionModel {
@@ -220,9 +223,11 @@ struct Generator {
         uint dSequence;
         uint dSequenceMax;
     };
+
     struct Options {
         uint maxGeneratedTokens;
         std::optional<uint> seed;
+
         // Sample according to logits, with temperature (0 = greedy), and
         // additional shaping - only sample the top min(topK, n_topP) tokens
         float temperature;
@@ -231,9 +236,11 @@ struct Generator {
 
         static Options greedy(uint maxGeneratedTokens);
     };
+
     Model& model;
     std::default_random_engine rng;
     KVCache kvCache;
+    std::optional<KVCache> crossAttentionCache;
     Options options;
     uint prevToken;
 

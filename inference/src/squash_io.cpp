@@ -89,15 +89,25 @@ struct TensorLoader {
     const Buffer& buffer;
     std::string prefix;
 
+    std::string fullName(const std::string& name) const {
+        return prefix.empty() ? name : (prefix + "." + name);
+    }
+
+    std::optional<TensorV> get(const std::string& name) const {
+        if (header.contains(fullName(name))) {
+            return std::make_optional((*this)(name));
+        }
+        return std::nullopt;
+    }
+
     // Create a scoped TensorLoader with `name` appended to the `prefix`
     TensorLoader operator[](const std::string& name) const {
-        return TensorLoader{header, alignment, buffer,
-                            prefix.empty() ? name : (prefix + "." + name)};
+        return TensorLoader{header, alignment, buffer, this->fullName(name)};
     }
 
     // Load the given named tensor (full name "{prefix}.{name}")
     TensorV operator()(const std::string& name) const {
-        auto fullName = prefix.empty() ? name : (prefix + "." + name);
+        auto fullName = this->fullName(name);
         auto& entry = header.at(fullName);
         auto dtype = entry.at("dtype").template get<std::string>();
         if (dtype != "BF16") {
@@ -138,6 +148,8 @@ TextModel loadTextModel(const json& header,
                  .key = attn("k_proj.weight"),
                  .value = attn("v_proj.weight"),
                  .output = attn("o_proj.weight"),
+                 .query_norm = attn.get("q_norm.weight"),
+                 .key_norm = attn.get("k_norm.weight"),
              },
              {
                  .norm = mlp("norm.weight"),
@@ -172,6 +184,7 @@ TextModel loadTextModel(const json& header,
         .tokenizer = loadTokenizer(v),
         .beginOfTextID = v.at("begin_of_text_id").template get<uint>(),
         .endOfTextID = v.at("end_of_text_id").template get<uint>(),
+        .imageID = v.at("image_id").template get<uint>(),
     };
 }
 
