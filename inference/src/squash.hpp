@@ -142,7 +142,7 @@ struct TextModel {
     Tokenizer tokenizer;
     uint beginOfTextID;
     uint endOfTextID;
-    uint imageID;
+    std::optional<uint> imageID;
 };
 
 struct VisionModel {

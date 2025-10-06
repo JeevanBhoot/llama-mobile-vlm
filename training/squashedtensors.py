@@ -63,13 +63,14 @@ def get_vocab_dict(tokenizer: transformers.PreTrainedTokenizerFast) -> dict[str,
     pre_split, pre_byte = data["pre_tokenizer"]["pretokenizers"]
     pre_regex = pre_split["pattern"]["Regex"]
     assert pre_byte["type"] == "ByteLevel"
-    ids = {}
-    for name, token in dict(
-        begin_of_text_id="<|begin_of_text|>",
-        end_of_text_id="<|end_of_text|>",
-        image_id="<|image|>",
-    ).items():
-        (ids[name],) = (t["id"] for t in data["added_tokens"] if t["content"] == token)
+
+    def _special_token_id(token: str, required: bool = True) -> int:
+        matches = [t["id"] for t in data["added_tokens"] if t["content"] == token]
+        if len(matches) > 1:
+            raise ValueError(f"Multiple token IDs for token {token!r}")
+        if required and not matches:
+            raise ValueError(f"Special token {token!r} not found")
+        return matches[0] if matches else None
 
     # Concatenate merges to single strings & de-duplicate
     merge_set = set([])
@@ -86,7 +87,14 @@ def get_vocab_dict(tokenizer: transformers.PreTrainedTokenizerFast) -> dict[str,
         vocab[id] = token
     assert all(token is not None for token in vocab)
 
-    return dict(**ids, pre_tokenizer=pre_regex, merges=merges, vocab=vocab)
+    return dict(
+        begin_of_text_id=_special_token_id("<|begin_of_text|>"),
+        end_of_text_id=_special_token_id("<|end_of_text|>"),
+        image_id=_special_token_id("<|image|>", required=False),
+        pre_tokenizer=pre_regex,
+        merges=merges,
+        vocab=vocab,
+    )
 
 
 def prepare_parameters(

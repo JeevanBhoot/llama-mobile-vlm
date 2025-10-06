@@ -72,6 +72,7 @@ TEST_CASE("squash::TextGenerator", "[squash]") {
             .tokenizer = Tokenizer(std::regex("_[0-9]+"), {}, std::vector<std::string>(vocab)),
             .beginOfTextID = uint(vocab.size()),
             .endOfTextID = uint(vocab.size() + 1),
+            .imageID = uint(vocab.size() + 2),
         },
         .visionModel = {},
         // Metadata
@@ -111,17 +112,19 @@ TEST_CASE("squash::TextGenerator", "[squash]") {
     for (auto n = 0u; n < tm.dLayers; ++n) {
         tm.layers.push_back(
             {{
-                 .norm = allocate({tm.dModel}),                                        //
-                 .query = allocate({totalHeads * tm.dAttentionHead, tm.dModel}),       //
-                 .key = allocate({tm.dAttentionKV * tm.dAttentionHead, tm.dModel}),    //
-                 .value = allocate({tm.dAttentionKV * tm.dAttentionHead, tm.dModel}),  //
-                 .output = allocate({tm.dModel, totalHeads * tm.dAttentionHead}),      //
+                 .norm = allocate({tm.dModel}),
+                 .query = allocate({totalHeads * tm.dAttentionHead, tm.dModel}),
+                 .key = allocate({tm.dAttentionKV * tm.dAttentionHead, tm.dModel}),
+                 .value = allocate({tm.dAttentionKV * tm.dAttentionHead, tm.dModel}),
+                 .output = allocate({tm.dModel, totalHeads * tm.dAttentionHead}),
+                 .query_norm = {},
+                 .key_norm = {},
              },
              {
-                 .norm = allocate({tm.dModel}),           //
-                 .up = allocate({tm.dMLP, tm.dModel}),    //
-                 .gate = allocate({tm.dMLP, tm.dModel}),  //
-                 .down = allocate({tm.dModel, tm.dMLP}),  //
+                 .norm = allocate({tm.dModel}),
+                 .up = allocate({tm.dMLP, tm.dModel}),
+                 .gate = allocate({tm.dMLP, tm.dModel}),
+                 .down = allocate({tm.dModel, tm.dMLP}),
              }});
     }
     tm.finalNorm = allocate({tm.dModel});

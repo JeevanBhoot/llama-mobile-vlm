@@ -427,7 +427,7 @@ std::vector<std::string> Generator::prefill(const std::string& prefix,
     // Handle text
     std::vector<uint> tokens = {model.textModel.beginOfTextID};
     if (image) {
-        tokens.push_back(model.textModel.imageID);
+        tokens.push_back(*model.textModel.imageID);
     }
     auto nSpecial = tokens.size();
     auto encoded = model.textModel.tokenizer.encode(prefix);

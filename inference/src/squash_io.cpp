@@ -184,7 +184,9 @@ TextModel loadTextModel(const json& header,
         .tokenizer = loadTokenizer(v),
         .beginOfTextID = v.at("begin_of_text_id").template get<uint>(),
         .endOfTextID = v.at("end_of_text_id").template get<uint>(),
-        .imageID = v.at("image_id").template get<uint>(),
+        .imageID = v.contains("image_id") && !v.at("image_id").is_null()
+                       ? std::optional<uint>(v.at("image_id").template get<uint>())
+                       : std::nullopt,
     };
 }
 
