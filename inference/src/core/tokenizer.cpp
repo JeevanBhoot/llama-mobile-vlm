@@ -4,8 +4,6 @@
 #include <sstream>
 #include <unordered_map>
 
-#include "squash.hpp"
-
 namespace squash {
 
 namespace impl {

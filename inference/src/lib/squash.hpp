@@ -10,8 +10,8 @@
 #include <variant>
 #include <vector>
 
-#include "lib/common.hpp"
-#include "lib/tokenizer.hpp"
+#include "core/common.hpp"
+#include "core/tokenizer.hpp"
 
 namespace squash {
 

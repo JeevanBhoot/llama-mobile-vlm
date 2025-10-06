@@ -1,6 +1,6 @@
-#include "squash.hpp"
-#include "tests.hpp"
-#include "lib/tokenizer.hpp"
+#include "core/tokenizer.hpp"
+#include "lib/squash.hpp"
+#include "tests/tests.hpp"
 
 using namespace squash;
 

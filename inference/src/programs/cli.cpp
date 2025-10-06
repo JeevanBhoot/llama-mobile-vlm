@@ -1,7 +1,7 @@
 #include <cxxopts.hpp>
 #include <fstream>
 #include <iostream>
-#include "squash.hpp"
+#include "lib/squash.hpp"
 
 int main(int argc, char** argv) {
     cxxopts::Options options("cli", "Text generation CLI");

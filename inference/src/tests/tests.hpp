@@ -1,7 +1,7 @@
 #pragma once
 
 #include <catch_amalgamated.hpp>
-#include "squash.hpp"
+#include "lib/squash.hpp"
 
 namespace squash {
 

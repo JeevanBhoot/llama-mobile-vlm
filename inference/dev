@@ -116,9 +116,9 @@ def _generate_build_ninja(w: Any, platform: str) -> None:
     flags += ["-fopenmp"]
 
     root_to_files = {}  # [root] -> (src, obj, {variable: value})
-    for root in ["", "lib", "tests", "programs"]:
+    for root in ["core", "lib", "tests", "programs"]:
         root_to_files[root] = []
-        for cpp in (s.relative_to(SRC) for s in (SRC / root).glob("*.cpp")):
+        for cpp in (s.relative_to(SRC) for s in (SRC / root).glob("**/*.cpp")):
             root_to_files[root] += [
                 (f"$src/{cpp}", f"$obj/{cpp.with_suffix('.o')}", {})
             ]
@@ -174,7 +174,7 @@ def _generate_build_ninja(w: Any, platform: str) -> None:
         w.build(
             f"{Path(obj).stem}",
             "linkexe",
-            [obj] + [obj for _, obj, _ in root_to_files[""] + root_to_files["lib"]],
+            [obj] + [obj for _, obj, _ in root_to_files["lib"] + root_to_files["core"]],
         )
     w.build(
         "tests",
@@ -189,7 +189,7 @@ def _generate_build_ninja(w: Any, platform: str) -> None:
     w.build(
         "libsquashed-llama.so",
         "linkso",
-        [obj for _, obj, _ in root_to_files[""] + root_to_files["lib"]],
+        [obj for _, obj, _ in root_to_files["lib"] + root_to_files["core"]],
     )
 
 
