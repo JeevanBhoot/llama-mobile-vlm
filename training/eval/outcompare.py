@@ -33,6 +33,7 @@ def evaluate(
     char_limit: int,
     batch_size: int,
     max_new_tokens: int = 128,
+    disable_progress: bool = False,
 ) -> Iterable[dict[str, Any]]:
     assert _check_dataset_configs(
         dataset._configs
@@ -50,6 +51,7 @@ def evaluate(
         batches(dataset.get_datums(), batch_size, drop_last=True),
         desc="Evaluating char distance",
         total=n_batches,
+        disable=disable_progress,
     ):
         imgs = [[x.image] for x in batch]
         prompts = [x.prompt for x in batch]

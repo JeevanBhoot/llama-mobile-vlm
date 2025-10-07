@@ -241,10 +241,11 @@ def run_downstream(
     tasks: list[Task],
     local_batch_size: int = 16,
 ) -> Optional[dict[str, Any]]:
-    rank, world_size = 0, 1
     if dist.is_initialized():
         rank = dist.get_rank()
         world_size = dist.get_world_size()
+    else:
+        rank, world_size = 0, 1
 
     results = {}
     for task in tasks:
@@ -252,7 +253,15 @@ def run_downstream(
             data = vqa.VQA.data(limit=task.n_examples).shard(
                 num_shards=world_size, index=rank
             )
-            out = list(vqa.evaluate(model, processor, data, local_batch_size))
+            out = list(
+                vqa.evaluate(
+                    model,
+                    processor,
+                    data,
+                    local_batch_size,
+                    disable_progress=bool(rank),
+                )
+            )
             acc = torch.tensor([x["accuracy"] for x in out]).mean()
             dist.all_reduce(acc, dist.ReduceOp.AVG)
             results["vqa"] = dict(accuracy=acc)
@@ -466,15 +475,6 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                 gc.collect()
                 torch.cuda.empty_cache()
 
-            if settings.save_checkpoint:
-                _log("save checkpoint")
-                path = None
-                if rank == 0:
-                    path = CHECKPOINT_PATH.format(
-                        name=run.name if settings.wandb else settings.run_name
-                    )
-                save_params_to_s3(params, path)
-
             if settings.downstream_tasks:
                 _log("downstream tasks")
                 eval_model = (
@@ -490,6 +490,15 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                 )
                 if settings.wandb and rank == 0:
                     run.summary["downstream"] = results
+
+            if settings.save_checkpoint:
+                _log("save checkpoint")
+                path = None
+                if rank == 0:
+                    path = CHECKPOINT_PATH.format(
+                        name=run.name if settings.wandb else settings.run_name
+                    )
+                save_params_to_s3(params, path)
 
     except Exception as e:
         error_type = type(e).__name__

@@ -185,11 +185,15 @@ def evaluate(
     batch_size: int,
     max_new_tokens: int = 25,
     system_template: str = LLAMA_PROMPT_TEMPLATES["instruct"],
+    disable_progress: bool = False,
 ) -> Iterable[dict]:
     n_batches = len(data) // batch_size
 
     for batch in tqdm(
-        data.iter(batch_size), desc="Evaluating VQA task", total=n_batches
+        data.iter(batch_size),
+        desc="Evaluating VQA task",
+        total=n_batches,
+        disable=disable_progress,
     ):
         imgs = [[img] for img in batch["image"]]
         prompts = [system_template.format(prompt=prompt) for prompt in batch["prompt"]]
