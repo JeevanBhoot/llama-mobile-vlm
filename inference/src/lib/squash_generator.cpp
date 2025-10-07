@@ -59,8 +59,8 @@ Tensor mlp(const TextModel& model, const TextModel::MLPLayer& layer, const Tenso
     auto z = rmsNorm(layer.norm, x, model.normEpsilon);
     auto up = projection(layer.up, z);
     auto gate = projection(layer.gate, z);
-    swiGluInPlace(up, gate);
-    return projection(layer.down, up);
+    z = swiGlu(std::move(up), gate);
+    return projection(layer.down, z);
 }
 
 Tensor visionAttention(const VisionModel& model,
@@ -80,10 +80,10 @@ Tensor visionAttention(const VisionModel& model,
 Tensor visionMlp(const VisionModel& model, const VisionModel::MLPLayer layer, const TensorV& x) {
     auto z = layerNorm(layer.norm.weight, layer.norm.bias, x, model.normEpsilon);
     z = projection(layer.up.weight, z);
-    broadcastAddInPlace(z, layer.up.bias);
-    geluInPlace(z);
+    z = broadcastAdd(std::move(z), layer.up.bias);
+    z = gelu(std::move(z));
     z = projection(layer.down.weight, z);
-    broadcastAddInPlace(z, layer.down.bias);
+    z = broadcastAdd(std::move(z), layer.down.bias);
     return z;
 }
 
@@ -146,14 +146,14 @@ void forward(Generator& g, const std::vector<uint>& tokens) {
         if (xattn != model.crossAttentionLayers.end()) {
             auto xi = static_cast<size_t>(xattn - model.crossAttentionLayers.begin());
             if (g.crossAttentionCache) {
-                addInPlace(x, crossAttention(model, model.layers[i].attention, x,
-                                             g.crossAttentionCache->entries[xi]));
+                x = add(std::move(x), crossAttention(model, model.layers[i].attention, x,
+                                                     g.crossAttentionCache->entries[xi]));
             }
         } else {
-            addInPlace(x, attention(model, model.layers[i].attention, x, g.kvCache.dSequence,
-                                    g.kvCache.entries[i]));
+            x = add(std::move(x), attention(model, model.layers[i].attention, x,
+                                            g.kvCache.dSequence, g.kvCache.entries[i]));
         }
-        addInPlace(x, mlp(model, model.layers[i].mlp, x));
+        x = add(std::move(x), mlp(model, model.layers[i].mlp, x));
     }
     x = rmsNorm(model.finalNorm, x, model.normEpsilon);
     x = projection(model.predictTokens, x);
@@ -168,7 +168,7 @@ Tensor forwardImage(Generator& g, const TensorV& image) {
     auto x = projection(
         reshape(model.patchEmbedding, {model.dModel, 3 * model.dPatch * model.dPatch}), image);
     // Lookup {aspectRatioID = 0, tileIndex = 0}
-    addInPlace(x, castFloat(sliceLeading(model.positionalEmbedding, {0, 0})));
+    x = add(std::move(x), castFloat(sliceLeading(model.positionalEmbedding, {0, 0})));
     x = concat({unsqueeze(castFloat(sliceLeading(model.classEmbedding, {0, 0})), {0}), x}, 0);
     x = layerNorm(model.layerNormPre.weight, model.layerNormPre.bias, x, model.normEpsilon);
 
@@ -177,27 +177,28 @@ Tensor forwardImage(Generator& g, const TensorV& image) {
     // First transformer stack
     for (auto i = 0u; i < model.dLayers0; ++i) {
         auto& layer = model.layers0[i];
-        addInPlace(x, visionAttention(model, layer.attention, x));
-        addInPlace(x, visionMlp(model, layer.mlp, x));
+        x = add(std::move(x), visionAttention(model, layer.attention, x));
+        x = add(std::move(x), visionMlp(model, layer.mlp, x));
         auto tap = std::find(model.outputTaps.begin(), model.outputTaps.end(), i);
         if (tap != model.outputTaps.end()) {
             auto idx = static_cast<uint>(tap - model.outputTaps.begin());
-            addInPlace(out, projection(sliceLeading(model.multiModalProjector.weight, {idx}), x));
+            out = add(std::move(out),
+                      projection(sliceLeading(model.multiModalProjector.weight, {idx}), x));
         }
     }
     x = layerNorm(model.layerNormPost.weight, model.layerNormPost.bias, x, model.normEpsilon);
     // Lookup {aspectRatioID = 0, tileIndex = 0}
-    broadcastAddInPlace(x, sliceLeading(model.tileEmbeddingPost, {0, 0}));
+    x = broadcastAdd(std::move(x), sliceLeading(model.tileEmbeddingPost, {0, 0}));
 
     // Second transformer stack
     for (auto i = 0u; i < model.dLayers1; ++i) {
         auto& layer = model.layers1[i];
-        addInPlace(x, visionAttention(model, layer.attention, x));
-        addInPlace(x, visionMlp(model, layer.mlp, x));
+        x = add(std::move(x), visionAttention(model, layer.attention, x));
+        x = add(std::move(x), visionMlp(model, layer.mlp, x));
     }
-    addInPlace(out, projection(sliceLeading(model.multiModalProjector.weight,
-                                            {static_cast<uint>(model.outputTaps.size())}),
-                               x));
+    out = add(std::move(out), projection(sliceLeading(model.multiModalProjector.weight,
+                                                      {static_cast<uint>(model.outputTaps.size())}),
+                                         x));
     return out;
 }
 

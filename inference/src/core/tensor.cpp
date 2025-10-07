@@ -296,25 +296,40 @@ Tensor tile(const TensorV& tensor, const std::vector<uint>& reps) {
     return out;
 }
 
-void addInPlace(TensorV& x, const TensorV& y) {
+Tensor add(Tensor&& x, const TensorV& y) {
+    if (x.shape != y.shape) {
+        std::ostringstream err;
+        err << "add: shapes don't match, x.shape: " << x.shape << " and y.shape: " << y.shape;
+        throw std::invalid_argument(err.str());
+    }
     ops::addInPlace(getFloat(x), getFloat(y), prod(x.shape));
+    return std::move(x);
 }
 
-void broadcastAddInPlace(TensorV& x, const TensorV& y) {
+Tensor broadcastAdd(Tensor&& x, const TensorV& y) {
     if (y.shape.size() != 1 || y.shape[0] != x.shape.back()) {
         std::ostringstream err;
-        err << "broadcastAddInPlace bad shapes " << x.shape << " and " << y.shape;
+        err << "broadcastAdd: bad shapes " << x.shape << " and " << y.shape;
         throw std::invalid_argument(err.str());
     }
     ops::broadcastAddInPlace(getFloat(x), getBf16(y), prod(x.shape) / y.shape[0], y.shape[0]);
+    return std::move(x);
 }
 
-void geluInPlace(TensorV& tensor) {
+Tensor gelu(Tensor&& tensor) {
     ops::geluInPlace(getFloat(tensor), prod(tensor.shape));
+    return std::move(tensor);
 }
 
-void swiGluInPlace(TensorV& upOut, const TensorV& gate) {
-    ops::swiGluInPlace(getFloat(upOut), getFloat(gate), prod(upOut.shape));
+Tensor swiGlu(Tensor&& up, const TensorV& gate) {
+    if (up.shape != gate.shape) {
+        std::ostringstream err;
+        err << "swiGlu: shapes don't match, up.shape: " << up.shape
+            << " and gate.shape: " << gate.shape;
+        throw std::invalid_argument(err.str());
+    }
+    ops::swiGluInPlace(getFloat(up), getFloat(gate), prod(up.shape));
+    return std::move(up);
 }
 
 Tensor rmsNorm(const TensorV& weight, const TensorV& x, float epsilon) {

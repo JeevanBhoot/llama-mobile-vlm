@@ -38,7 +38,7 @@ std::vector<float> ropeAngularFrequency(uint dHead) {
 TEST_CASE("squash::TextGenerator", "[squash]") {
     // Create vocab
     std::vector<std::string> vocab;
-    for (auto i = 0u; i < 256 - 2; ++i) {
+    for (auto i = 0u; i < 256; ++i) {
         std::ostringstream token;
         token << "_" << i;
         vocab.push_back(token.str());
@@ -47,7 +47,7 @@ TEST_CASE("squash::TextGenerator", "[squash]") {
         .textModel{
             // Config
             .dLayers = 3,
-            .dVocab = uint(vocab.size() + 2),
+            .dVocab = uint(vocab.size() + 3),
             .dModel = 128,
             .dMLP = 512,
             .dAttentionHead = 64,
@@ -138,5 +138,5 @@ TEST_CASE("squash::TextGenerator", "[squash]") {
         text += generator.generate();
     }
     REQUIRE(generator.generate() == "");
-    REQUIRE(text == "_10_20_30_147_30_147_30_147_30");
+    REQUIRE(text == "_10_20_30_43_30_43_30_43_30");
 }

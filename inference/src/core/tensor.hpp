@@ -74,10 +74,10 @@ Tensor embeddingLookup(const TensorV& weight, const std::vector<uint>& tokens);
 Tensor concat(const std::vector<TensorV>& tensors, uint dim);
 Tensor tile(const TensorV& tensor, const std::vector<uint>& reps);
 
-void addInPlace(TensorV& x, const TensorV& y);
-void broadcastAddInPlace(TensorV& x, const TensorV& y);
-void geluInPlace(TensorV& tensor);
-void swiGluInPlace(TensorV& upOut, const TensorV& gate);
+Tensor add(Tensor&& x, const TensorV& y);
+Tensor broadcastAdd(Tensor&& x, const TensorV& y);
+Tensor gelu(Tensor&& tensor);
+Tensor swiGlu(Tensor&& up, const TensorV& gate);
 
 Tensor rmsNorm(const TensorV& weight, const TensorV& x, float epsilon);
 Tensor layerNorm(const TensorV& weight, const TensorV& bias, const TensorV& x, float epsilon);
