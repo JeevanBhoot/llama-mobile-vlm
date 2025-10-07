@@ -9,7 +9,7 @@ from typing import Callable, Iterable, Iterator, Optional, TypeVar
 import safetensors.torch
 import torch
 import weight_formats.quantisation_training as QT
-from torch import nn
+from torch import nn, Tensor
 from transformers import MllamaVisionModel, PreTrainedTokenizerBase
 
 T = TypeVar("T")
@@ -122,13 +122,10 @@ def check_s3_access() -> None:
     )
 
 
-def save_quantised_model_to_s3(
-    model: nn.Module, s3_path: str | None, dtype: torch.dtype
-) -> None:
-    """Save a model to a .safetensors file and sync to S3.
-
-    s3_path -- the path to save the object to in S3; should be s3://bucket/key...
-               (this can be `None` for `rank != 0` when using distributed training)
+def get_unsharded_quantised_params(
+    model: nn.Module, dtype: torch.dtype
+) -> dict[str, Tensor]:
+    """Save model parameters and quantisation metadata on CPU.
 
     Note that this requires enough free host memory to hold the whole model.
     """
@@ -142,10 +139,18 @@ def save_quantised_model_to_s3(
             if isinstance(tensor, torch.distributed.tensor.DTensor):
                 tensor = tensor.full_tensor()
             unsharded_tensors[key] = tensor.cpu()
-        if not torch.distributed.is_initialized() or (
-            torch.distributed.get_rank() == 0
-        ):
-            assert s3_path is not None
-            with tempfile.NamedTemporaryFile() as f:
-                safetensors.torch.save_file(unsharded_tensors, f.name)
-                subprocess.check_call(["aws", "s3", "cp", f.name, s3_path])
+    return unsharded_tensors
+
+
+def save_params_to_s3(params: dict[str, Tensor], s3_path: str | None) -> None:
+    """Save model parameters to a .safetensors file and sync to S3.
+
+    s3_path -- the path to save the object to in S3; should be s3://bucket/key...
+               (this can be `None` for `rank != 0` when using distributed training)
+    """
+
+    if not torch.distributed.is_initialized() or (torch.distributed.get_rank() == 0):
+        assert s3_path is not None
+        with tempfile.NamedTemporaryFile() as f:
+            safetensors.torch.save_file(params, f.name)
+            subprocess.check_call(["aws", "s3", "cp", f.name, s3_path])

@@ -325,16 +325,23 @@ class Datum:
     out: str
 
 
+def load_config(path: str | Path) -> dict[str, Any]:
+    path = Path(path)
+    config_path = path / "config.json"
+    with open(config_path) as f:
+        return json.loads(f.read())
+
+
 class Dataset:
     def __init__(
         self, paths: list[str], n_examples: list[Optional[int]], seed: int = 563673
     ):
         data_to_concat: list[datasets.Dataset] = []
+        self._configs = []
         for path, n in zip(paths, n_examples):
             path = Path(path)
-            config_path = path / "config.json"
-            with open(config_path) as f:
-                config = json.loads(f.read())
+            config = load_config(path)
+            self._configs.append(config)
 
             data = (
                 IMAGE_DATASETS[config["dataset_name"]](split=config["split"])
@@ -359,6 +366,9 @@ class Dataset:
             data_to_concat.append(data.select(range(n)))
 
         self.data = datasets.concatenate_datasets(data_to_concat).shuffle(seed)
+
+    def __len__(self):
+        return len(self.data)
 
     # TODO: This function is unnecessary now!
     def get_datums(self) -> Iterable[Datum]:

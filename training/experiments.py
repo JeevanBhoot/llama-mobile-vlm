@@ -8,7 +8,7 @@ import wandb
 import weight_formats.quantisation as Q
 import weight_formats.quantisation_training as QT
 
-from eval import outcompare, vqa
+from eval import vqa
 
 WANDB_PROJECT = "llama-mobile"
 
@@ -18,12 +18,6 @@ class Task:
     name: str
     n_examples: Optional[int]
     metrics: list[str]
-
-    @classmethod
-    def outcompare(
-        cls, n_examples: Optional[int] = None, metrics=outcompare.METRICS
-    ) -> "Task":
-        return cls(name="outcompare", n_examples=n_examples, metrics=metrics)
 
     @classmethod
     def vqa(cls, n_examples: int = 1000) -> "Task":
@@ -64,15 +58,10 @@ def run_experiment(xp: Experiment) -> Results:
             notes=notes,
         )
 
-    # TODO: Move this to utility.py as its also done in eval.outcompare
     dtype = dict(cpu=torch.float32, cuda=torch.bfloat16)[xp.execution.device]
     if "Llama" in xp.model and "Vision" in xp.model:
         model = transformers.MllamaForConditionalGeneration.from_pretrained(
             xp.model, torch_dtype=dtype, device_map=xp.execution.device
-        )
-    elif "paligemma" in model:
-        model = transformers.PaliGemmaForConditionalGeneration.from_pretrained(
-            model, torch_dtype=dtype, device_map=xp.execution.device
         )
     else:
         raise ValueError("Unsupported model")
@@ -95,18 +84,7 @@ def run_experiment(xp: Experiment) -> Results:
 
     t0 = time.time()
     if xp.task.name == "outcompare":
-        dataset = outcompare.EvalDataset.load(
-            f"data/{xp.model.replace('google/', '').replace('meta-llama/', '').lower()}.pt"
-        )
-        out.update(
-            outcompare.evaluate(
-                model,
-                dataset,
-                xp.execution.batch_size,
-                limit=xp.task.n_examples,
-                metrics=xp.task.metrics,
-            )
-        )
+        raise NotImplementedError
     elif xp.task.name == "vqa":
         results = list(
             vqa.evaluate(

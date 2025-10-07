@@ -3,10 +3,10 @@ from typing import Any
 
 import torch
 import transformers
+from datasets import Dataset
 from PIL import Image
 
 from eval import vqa
-from datasets import Dataset
 
 
 def test_vqa() -> None:
@@ -36,8 +36,10 @@ def test_process_text() -> None:
 
 def test_evaluate_prediction() -> None:
     answers = ["Three musketeers", "3 Musketeers"] + ["4 swordsmen"] * 8
-    out = "  The three MUSKETEERS! <|eot_id|>"
-    assert vqa.evaluate_prediction(out, answers) == 2 / 3
+    out = "  The three MUSKETEERS! 4 swordsmen <|eot_id|>"
+    results = vqa.evaluate_prediction(out, answers)
+    assert results == dict(accuracy=2 / 3, accuracy_easy=1.0)
+    # assert vqa.evaluate_prediction(out, answers) == 2 / 3
 
 
 def test_evaluate() -> None:
@@ -71,8 +73,8 @@ def test_evaluate() -> None:
     ]
     data = Dataset.from_list(rows)
     expected = (
-        dict(id=i, output=" bicycle", accuracy=[0.0, 1 / 3, 2 / 3, 1.0][i])
-        for i in range(4)
+        dict(id=i, output=" bicycle", accuracy=acc, accuracy_easy=acc)
+        for i, acc in enumerate([0.0, 1 / 3, 2 / 3, 1.0])
     )
     for o, expected_o in zip(
         vqa.evaluate(model, processor, data, batch_size=1), expected

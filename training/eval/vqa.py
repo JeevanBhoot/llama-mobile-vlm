@@ -2,6 +2,7 @@
 Evaluate Visual Question Answering tasks
 """
 
+import subprocess
 from typing import Iterable, Optional
 
 import datasets
@@ -10,13 +11,11 @@ import torch
 from tqdm import tqdm
 from transformers import MllamaForConditionalGeneration, MllamaProcessor
 
-import subprocess
-
 from utility import (
     LLAMA_PROMPT_TEMPLATES,
-    set_padding_side_left,
     LOCAL_DATA_PATH,
     S3_DATA_PATH,
+    set_padding_side_left,
 )
 
 
@@ -36,7 +35,7 @@ class VQA:
         cls,
         split: str = "validation",
         limit: Optional[int] = 4096,
-        shuffle_seed: Optional[int] = None,
+        shuffle_seed: Optional[int] = 625464,
         load_from_s3: bool = True,
     ) -> datasets.Dataset:
         cols = ["question_id", "image_id", "question", "image", "answers"]
@@ -50,8 +49,8 @@ class VQA:
         else:
             ds = datasets.load_dataset("lmms-lab/VQAv2", split=split)
 
-        # NOTE: Previous default was seed = 625464
         ds = ds.select_columns(cols)
+        # NOTE: Images re-appear consequtive questions, best to shuffle
         if shuffle_seed:
             ds = ds.shuffle(shuffle_seed)
 
@@ -163,12 +162,20 @@ def process_text(text: str) -> str:
 
 
 # Accuracy = min{n_matches / 3, 1} (taken from instructions)
-def evaluate_prediction(out: str, answers: list[str]) -> float:
+def evaluate_prediction(out: str, answers: list[str]) -> dict[str, float]:
     out_norm = process_text(out)
     answers_norm = [process_text(answer) for answer in answers]
     n_matches = sum([out_norm.startswith(answer) for answer in answers_norm if answer])
-    acc = min(n_matches / 3, 1.0)
-    return acc
+    n_matches_easy = sum(
+        [
+            bool(re.search(rf"\b{re.escape(answer)}\b", out_norm))
+            for answer in answers_norm
+            if answer
+        ]
+    )
+    return dict(
+        accuracy=min(n_matches / 3, 1.0), accuracy_easy=min(n_matches_easy / 3, 1.0)
+    )
 
 
 def evaluate(
@@ -213,8 +220,4 @@ def evaluate(
             out = processor.decode(out_ids)
             answers = [x["answer"] for x in answers]
 
-            yield dict(
-                id=id,
-                output=out,
-                accuracy=evaluate_prediction(out, answers),
-            )
+            yield dict(id=id, output=out, **evaluate_prediction(out, answers))

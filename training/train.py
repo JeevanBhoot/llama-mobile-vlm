@@ -27,8 +27,9 @@ from utility import (
     LOCAL_DATA_PATH,
     check_s3_access,
     distributed_batches,
+    get_unsharded_quantised_params,
     record_memory,
-    save_quantised_model_to_s3,
+    save_params_to_s3,
 )
 
 WANDB_PROJECT = "llama-mobile"
@@ -102,6 +103,12 @@ class QuantisationSettings:
 
 
 @dataclass
+class Task:
+    name: str
+    n_examples: int
+
+
+@dataclass
 class Settings:
     run_name: str
     model_name: str
@@ -110,7 +117,7 @@ class Settings:
     training: TrainingSettings
     execution: ExecutionSettings
     wandb: bool
-    run_downstream: bool
+    downstream_tasks: list[Task] | None
     memory_profile: bool
     save_checkpoint: bool
 
@@ -124,8 +131,11 @@ class Settings:
                     DataShard("imagenet-train-generation/870805", None),
                     DataShard("imagenet-train-generation/98cf95", None),
                 ],
-                validation=None,
-            ),  # TODO add validation
+                validation=[
+                    DataShard("coco-validation-generation/9ba9e8", 128),
+                    DataShard("coco-validation-generation/76bcc0", 512),
+                ],
+            ),
             quantisation=QuantisationSettings(
                 fmt=Q.LinearScalingFormat(
                     Q.parse("E0M2"),
@@ -142,7 +152,7 @@ class Settings:
             ),
             execution=ExecutionSettings(),
             wandb=True,
-            run_downstream=False,
+            downstream_tasks=[Task("vqa", 1024)],
             memory_profile=False,
             save_checkpoint=False,
         )
@@ -228,7 +238,7 @@ def run_validation(
 def run_downstream(
     model: MllamaForConditionalGeneration,
     processor: MllamaProcessor,
-    tasks: list[str],
+    tasks: list[Task],
     local_batch_size: int = 16,
 ) -> Optional[dict[str, Any]]:
     rank, world_size = 0, 1
@@ -238,16 +248,17 @@ def run_downstream(
 
     results = {}
     for task in tasks:
-        if task == "vqa":
-            # TODO: Get limit from settings
-            n_examples = 1024
-            data = vqa.VQA.data(limit=n_examples).shard(
+        if task.name == "vqa":
+            data = vqa.VQA.data(limit=task.n_examples).shard(
                 num_shards=world_size, index=rank
             )
             out = list(vqa.evaluate(model, processor, data, local_batch_size))
             acc = torch.tensor([x["accuracy"] for x in out]).mean()
             dist.all_reduce(acc, dist.ReduceOp.AVG)
-            results["vqa"] = dict(accuracy=acc, n_examples=n_examples)
+            results["vqa"] = dict(accuracy=acc)
+        else:
+            # TODO: Reasonable default data mix for outcompare
+            raise NotImplementedError
 
     if rank == 0:
         return results
@@ -446,10 +457,14 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
             gc.collect()
             torch.cuda.empty_cache()
 
-            if settings.run_downstream:
-                results = run_downstream(student, processor, tasks=["vqa"])
-                if settings.wandb and rank == 0:
-                    run.summary["downstream"] = results
+            # Unshard model in either case
+            if settings.downstream_tasks or settings.save_checkpoint:
+                params = get_unsharded_quantised_params(
+                    student, dtype=getattr(torch, settings.execution.compute_dtype)
+                )
+                del student
+                gc.collect()
+                torch.cuda.empty_cache()
 
             if settings.save_checkpoint:
                 _log("save checkpoint")
@@ -458,11 +473,23 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                     path = CHECKPOINT_PATH.format(
                         name=run.name if settings.wandb else settings.run_name
                     )
-                save_quantised_model_to_s3(
-                    student,
-                    path,
-                    dtype=getattr(torch, settings.execution.compute_dtype),
+                save_params_to_s3(params, path)
+
+            if settings.downstream_tasks:
+                _log("downstream tasks")
+                eval_model = (
+                    transformers.MllamaForConditionalGeneration.from_pretrained(
+                        settings.model_name,
+                        torch_dtype=settings.execution.compute_dtype,
+                        device_map=device,
+                    )
                 )
+                QT.load_convert(eval_model, params)
+                results = run_downstream(
+                    eval_model, processor, tasks=settings.downstream_tasks
+                )
+                if settings.wandb and rank == 0:
+                    run.summary["downstream"] = results
 
     except Exception as e:
         error_type = type(e).__name__
