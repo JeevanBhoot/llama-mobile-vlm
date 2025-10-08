@@ -309,8 +309,6 @@ TEST_CASE("smallLLM", "[lib]") {
 
 TEST_CASE("smallVLM", "[lib]") {
     auto config = TestModelConfig::smallVLM();
-    config.vision->dLayers0 = 0;
-    config.vision->dLayers1 = 0;
     auto model = createTestModel(config);
 
     auto dImage = model.visionModel->dImage;
@@ -321,5 +319,5 @@ TEST_CASE("smallVLM", "[lib]") {
     }
 
     // Empirical match - sensitive to seed
-    REQUIRE(generate(model, "_10_20_30", std::move(image), 5) == "_10_20_30_7_363_7_363_7_363");
+    REQUIRE(generate(model, "_10_20_30", std::move(image), 5) == "_10_20_30_7_363_253_363_7_363");
 }

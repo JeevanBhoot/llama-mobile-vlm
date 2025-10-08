@@ -220,11 +220,12 @@ Dump<T> dump(const T& sequence) {
 
 template <class T>
 std::ostream& operator<<(std::ostream& out, const Dump<T>& x) {
+    out << "{";
     for (auto i = 0u; i < x.sequence.size(); ++i) {
         if (i) out << ", ";
         out << x.sequence[i];
     }
-    return out;
+    return out << "}";
 }
 
 }  // namespace squash

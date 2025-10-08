@@ -172,7 +172,7 @@ void saveNpy(const std::string& path, const TensorV& tensor) {
 
 // Operations
 
-TensorV reshape(const TensorV& tensor, const std::vector<uint>& shape) {
+TensorV reshape(const TensorV& tensor, const Shape& shape) {
     if (prod(tensor.shape) != prod(shape)) {
         std::ostringstream msg;
         msg << "Cannot reshape " << tensor.shape << " to " << shape;
@@ -181,7 +181,7 @@ TensorV reshape(const TensorV& tensor, const std::vector<uint>& shape) {
     return {tensor.data, shape};
 }
 
-Tensor reshape(Tensor&& tensor, const std::vector<uint>& shape) {
+Tensor reshape(Tensor&& tensor, const Shape& shape) {
     return {reshape(tensor, shape), std::move(tensor._data)};
 }
 
@@ -193,10 +193,16 @@ std::vector<uint> strides(const TensorV& tensor) {
     return strides;
 }
 
-TensorV sliceLeading(const TensorV& tensor, const std::vector<uint>& indices) {
-    auto stride = strides(tensor);
+TensorV indexLeading(const TensorV& tensor, const std::vector<uint>& indices) {
     auto offset = 0u;
+    auto stride = strides(tensor);
     for (auto i = 0u; i < indices.size(); ++i) {
+        if (indices[i] >= tensor.shape[i]) {
+            std::ostringstream err;
+            err << "indexLeading: bad index " << indices[i] << " for dimension " << i << " of size "
+                << tensor.shape[i];
+            throw std::invalid_argument(err.str());
+        }
         offset += stride[i] * indices[i];
     }
     auto data = std::visit(
@@ -204,6 +210,22 @@ TensorV sliceLeading(const TensorV& tensor, const std::vector<uint>& indices) {
         tensor.data);
     return TensorV{
         data, {tensor.shape.begin() + static_cast<ptrdiff_t>(indices.size()), tensor.shape.end()}};
+}
+
+TensorV slice0(const TensorV& tensor, uint start, uint end) {
+    if (tensor.shape.size() == 0 || start > end || end > tensor.shape[0]) {
+        std::ostringstream err;
+        err << "slice0: bad indices start: " << start << ", end: " << end << " for shape "
+            << tensor.shape;
+        throw std::invalid_argument(err.str());
+    }
+    auto offset = start * (prod(tensor.shape) / tensor.shape[0]);
+    auto data = std::visit(
+        [offset](auto& d) { return TensorV::DataT(std::decay_t<decltype(d)>(d.data + offset)); },
+        tensor.data);
+    auto shape = tensor.shape;
+    shape[0] = end - start;
+    return TensorV{data, shape};
 }
 
 TensorV unsqueeze(const TensorV& tensor, const std::vector<uint>& indices) {
@@ -324,8 +346,7 @@ Tensor gelu(Tensor&& tensor) {
 Tensor swiGlu(Tensor&& up, const TensorV& gate) {
     if (up.shape != gate.shape) {
         std::ostringstream err;
-        err << "swiGlu: shapes don't match, up.shape: " << up.shape
-            << " and gate.shape: " << gate.shape;
+        err << "swiGlu: bad shapes up: " << up.shape << ", gate: " << gate.shape;
         throw std::invalid_argument(err.str());
     }
     ops::swiGluInPlace(getFloat(up), getFloat(gate), prod(up.shape));
@@ -335,26 +356,57 @@ Tensor swiGlu(Tensor&& up, const TensorV& gate) {
 Tensor rmsNorm(const TensorV& weight, const TensorV& x, float epsilon) {
     if (weight.shape.size() != 1 || weight.shape[0] != x.shape.back()) {
         std::ostringstream err;
-        err << "rmsNorm bad shapes " << weight.shape << " and " << x.shape;
+        err << "rmsNorm: bad shapes weight: " << weight.shape << ", x: " << x.shape;
         throw std::invalid_argument(err.str());
     }
     auto out = empty<float>({x.shape.begin(), x.shape.end()});
-    ops::rmsNorm(getBf16(weight), getFloat(x), x.shape[0], x.shape[1], epsilon, getFloat(out));
+    ops::rmsNorm(getBf16(weight), getFloat(x), prod(x.shape) / x.shape.back(), x.shape.back(),
+                 epsilon, getFloat(out));
     return out;
 }
 
 Tensor layerNorm(const TensorV& weight, const TensorV& bias, const TensorV& x, float epsilon) {
+    if (weight.shape.size() != 1 || weight.shape[0] != x.shape.back() ||
+        bias.shape != weight.shape) {
+        std::ostringstream err;
+        err << "layerNorm: bad shapes weight: " << weight.shape << ", bias: " << bias.shape
+            << ", x: " << x.shape;
+        throw std::invalid_argument(err.str());
+    }
     auto out = empty<float>({x.shape.begin(), x.shape.end()});
-    ops::layerNorm(getBf16(weight), getBf16(bias), getFloat(x), x.shape[0], x.shape[1], epsilon,
-                   getFloat(out));
+    ops::layerNorm(getBf16(weight), getBf16(bias), getFloat(x), prod(x.shape) / x.shape.back(),
+                   x.shape.back(), epsilon, getFloat(out));
     return out;
 }
 
 Tensor projection(const TensorV& weight, const TensorV& x) {
+    if (weight.shape.size() != 2 || x.shape.size() != 2 || weight.shape[1] != x.shape[1]) {
+        std::ostringstream err;
+        err << "projection: bad shapes " << weight.shape << " and " << x.shape
+            << ", expected (dOut, dIn) and (batch, dIn)";
+        throw std::invalid_argument(err.str());
+    }
     auto out = empty<float>({x.shape[0], weight.shape[0]});
     ops::matmulT(getFloat(x), getBf16(weight), x.shape[0], x.shape[1], weight.shape[0],
                  getFloat(out));
     return out;
+}
+
+Tensor attention(Tensor&& query, const TensorV& key, const TensorV& value, bool causal) {
+    // query,out :: (dSq, dHkv, dHq, dim)
+    // key,value :: (dSkv, dHkv, dim)
+    if (query.shape.size() != 4 || key.shape.size() != 3 || (query.shape[1] != key.shape[1]) ||
+        (query.shape[3] != key.shape[2]) || key.shape != value.shape) {
+        std::ostringstream err;
+        err << "attention: bad shapes, query: " << query.shape << ", key: " << key.shape
+            << ", value: " << value.shape
+            << "; expected query: (dSq, dHkv, dHq, dim) and key,value: (dSkv, dHkv, dim)";
+        throw std::invalid_argument(err.str());
+    }
+    ops::attentionInPlace(getFloat(query), getFloat(key), getFloat(value), /*dSq*/ query.shape[0],
+                          /*dSkv*/ key.shape[0], /*dHq*/ query.shape[2],
+                          /*dHkv*/ query.shape[1], /*dim*/ query.shape[3], causal);
+    return std::move(query);
 }
 
 uint sample(const TensorV& logits,

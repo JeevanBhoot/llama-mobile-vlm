@@ -60,13 +60,14 @@ const bf16* getBf16(const TensorV& tensor);  // TODO - remove from API?
 const float* getFloat(const TensorV& tensor);
 float* getFloat(TensorV& tensor);
 
-Tensor empty(std::vector<uint>&& shape);
+Tensor empty(Shape&& shape);
 
-TensorV reshape(const TensorV& tensor, const std::vector<uint>& shape);
-Tensor reshape(Tensor&& tensor, const std::vector<uint>& shape);
+TensorV reshape(const TensorV& tensor, const Shape& shape);
+Tensor reshape(Tensor&& tensor, const Shape& shape);
 Shape strides(const TensorV& tensor);
 
-TensorV sliceLeading(const TensorV& tensor, const std::vector<uint>& indices);
+TensorV indexLeading(const TensorV& tensor, const std::vector<uint>& indices);
+TensorV slice0(const TensorV& tensor, uint start, uint end);
 TensorV unsqueeze(const TensorV& tensor, const std::vector<uint>& indices);
 
 Tensor castFloat(const TensorV& x);
@@ -82,6 +83,9 @@ Tensor swiGlu(Tensor&& up, const TensorV& gate);
 Tensor rmsNorm(const TensorV& weight, const TensorV& x, float epsilon);
 Tensor layerNorm(const TensorV& weight, const TensorV& bias, const TensorV& x, float epsilon);
 Tensor projection(const TensorV& weight, const TensorV& x);
+// query,out :: (dSq, dHkv, dHq, dim)
+// key,value :: (dSkv, dHkv, dim)
+Tensor attention(Tensor&& query, const TensorV& key, const TensorV& value, bool causal);
 
 uint sample(const TensorV& logits,
             float temperature,
@@ -102,7 +106,7 @@ inline T* Buffer::get() const {
 }
 
 template <class T>
-Tensor empty(std::vector<uint>&& shape) {
+Tensor empty(Shape&& shape) {
     auto buffer = Buffer(sizeof(T) * prod(shape));
     return Tensor{{.data = _data::Flat<float>(reinterpret_cast<float*>(buffer.get())),
                    .shape = std::move(shape)},

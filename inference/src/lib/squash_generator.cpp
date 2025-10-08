@@ -22,7 +22,8 @@ Tensor attention(const TextModel& model,
         throw std::invalid_argument("attention() does not support query_norm or key_norm");
     }
     auto z = rmsNorm(layer.norm, x, model.normEpsilon);
-    auto query = projection(layer.query, z);
+    auto query = reshape(projection(layer.query, z),
+                         {x.shape[0], model.dAttentionKV, model.dAttentionQ, model.dAttentionHead});
     auto key = projection(layer.key, z);
     auto value = projection(layer.value, z);
     ops::rotateInPlace(getFloat(query), model.ropeAngularFrequency.data(), tokenCount,
@@ -32,12 +33,12 @@ Tensor attention(const TextModel& model,
                        model.dAttentionKV, model.dAttentionHead);
     ops::copy(getFloat(key), prod(key.shape), getFloat(cache.key) + tokenCount * key.shape[1]);
     ops::copy(getFloat(value), prod(value.shape),
-              getFloat(cache.value) + tokenCount * key.shape[1]);
-    ops::attentionInPlace(getFloat(query), getFloat(cache.key), getFloat(cache.value),
-                          /*dSq*/ query.shape[0], /*dSkv*/ key.shape[0] + tokenCount,
-                          /*dHq*/ model.dAttentionQ, /*dHkv*/ model.dAttentionKV,
-                          /*dim*/ model.dAttentionHead, /*causal*/ true);
-    return projection(layer.output, query);
+              getFloat(cache.value) + tokenCount * value.shape[1]);
+    auto sKV = key.shape[0] + tokenCount;
+    auto mix = reshape(attention(std::move(query), slice0(cache.key, 0, sKV),
+                                 slice0(cache.value, 0, sKV), /*causal*/ true),
+                       {x.shape[0], model.dAttentionKV * model.dAttentionQ * model.dAttentionHead});
+    return projection(layer.output, mix);
 }
 
 Tensor crossAttention(const TextModel& model,
@@ -48,11 +49,9 @@ Tensor crossAttention(const TextModel& model,
     auto query = reshape(projection(layer.query, z),
                          {x.shape[0], model.dAttentionKV, model.dAttentionQ, model.dAttentionHead});
     query = rmsNorm(*layer.query_norm, query, model.normEpsilon);
-    ops::attentionInPlace(getFloat(query), getFloat(cache.key), getFloat(cache.value),
-                          /*dSq*/ query.shape[0], /*dSkv*/ cache.key.shape[0],
-                          /*dHq*/ model.dAttentionQ, /*dHkv*/ model.dAttentionKV,
-                          /*dim*/ model.dAttentionHead, /*causal*/ false);
-    return projection(layer.output, query);
+    auto mix = reshape(attention(std::move(query), cache.key, cache.value, /*causal*/ false),
+                       {x.shape[0], model.dAttentionKV * model.dAttentionQ * model.dAttentionHead});
+    return projection(layer.output, mix);
 }
 
 Tensor mlp(const TextModel& model, const TextModel::MLPLayer& layer, const TensorV& x) {
@@ -67,14 +66,14 @@ Tensor visionAttention(const VisionModel& model,
                        const VisionModel::AttentionLayer& layer,
                        const TensorV& x) {
     auto z = layerNorm(layer.norm.weight, layer.norm.bias, x, model.normEpsilon);
-    auto query = projection(layer.query, z);
-    auto key = projection(layer.key, z);
-    auto value = projection(layer.value, z);
-    auto dS = query.shape[0];
-    ops::attentionInPlace(getFloat(query), getFloat(key), getFloat(value), dS, dS, /*dHq*/ 1u,
-                          /*dHkv*/ model.dAttentionQkv, /*dim*/ model.dAttentionHead,
-                          /*causal*/ false);
-    return projection(layer.output, query);
+    auto query = reshape(projection(layer.query, z),  //
+                         {x.shape[0], model.dAttentionQkv, 1, model.dAttentionHead});
+    auto key = reshape(projection(layer.key, z),  //
+                       {x.shape[0], model.dAttentionQkv, model.dAttentionHead});
+    auto value = reshape(projection(layer.value, z), key.shape);
+    auto mix = reshape(attention(std::move(query), key, value, /*causal*/ false),
+                       {x.shape[0], model.dAttentionQkv * model.dAttentionHead});
+    return projection(layer.output, mix);
 }
 
 Tensor visionMlp(const VisionModel& model, const VisionModel::MLPLayer layer, const TensorV& x) {
@@ -116,7 +115,7 @@ Tensor preprocess(const VisionModel& model, const Image& image) {
 }
 
 uint nextToken(Generator& g, const TensorV& logits) {
-    return sample(sliceLeading(logits, {logits.shape[0] - 1}), g.options.temperature,
+    return sample(indexLeading(logits, {logits.shape[0] - 1}), g.options.temperature,
                   g.options.topK, g.options.topP, g.rng);
 }
 
@@ -168,8 +167,8 @@ Tensor forwardImage(Generator& g, const TensorV& image) {
     auto x = projection(
         reshape(model.patchEmbedding, {model.dModel, 3 * model.dPatch * model.dPatch}), image);
     // Lookup {aspectRatioID = 0, tileIndex = 0}
-    x = add(std::move(x), castFloat(sliceLeading(model.positionalEmbedding, {0, 0})));
-    x = concat({unsqueeze(castFloat(sliceLeading(model.classEmbedding, {0, 0})), {0}), x}, 0);
+    x = add(std::move(x), castFloat(indexLeading(model.positionalEmbedding, {0, 0})));
+    x = concat({unsqueeze(castFloat(indexLeading(model.classEmbedding, {0, 0})), {0}), x}, 0);
     x = layerNorm(model.layerNormPre.weight, model.layerNormPre.bias, x, model.normEpsilon);
 
     auto out = tile(castFloat(model.multiModalProjector.bias), {x.shape[0]});
@@ -183,12 +182,12 @@ Tensor forwardImage(Generator& g, const TensorV& image) {
         if (tap != model.outputTaps.end()) {
             auto idx = static_cast<uint>(tap - model.outputTaps.begin());
             out = add(std::move(out),
-                      projection(sliceLeading(model.multiModalProjector.weight, {idx}), x));
+                      projection(indexLeading(model.multiModalProjector.weight, {idx}), x));
         }
     }
     x = layerNorm(model.layerNormPost.weight, model.layerNormPost.bias, x, model.normEpsilon);
     // Lookup {aspectRatioID = 0, tileIndex = 0}
-    x = broadcastAdd(std::move(x), sliceLeading(model.tileEmbeddingPost, {0, 0}));
+    x = broadcastAdd(std::move(x), indexLeading(model.tileEmbeddingPost, {0, 0}));
 
     // Second transformer stack
     for (auto i = 0u; i < model.dLayers1; ++i) {
@@ -196,7 +195,7 @@ Tensor forwardImage(Generator& g, const TensorV& image) {
         x = add(std::move(x), visionAttention(model, layer.attention, x));
         x = add(std::move(x), visionMlp(model, layer.mlp, x));
     }
-    out = add(std::move(out), projection(sliceLeading(model.multiModalProjector.weight,
+    out = add(std::move(out), projection(indexLeading(model.multiModalProjector.weight,
                                                       {static_cast<uint>(model.outputTaps.size())}),
                                          x));
     return out;
