@@ -54,12 +54,12 @@ std::ostream& operator<<(std::ostream&, const TensorV&);
 void saveNpy(std::ostream&, const TensorV&);
 void saveNpy(const std::string& path, const TensorV&);
 
+bf16* getBf16(const TensorV& tensor);
+float* getFloat(const TensorV& tensor);
+
 // Tensor operations
 
-const bf16* getBf16(const TensorV& tensor);  // TODO - remove from API?
-const float* getFloat(const TensorV& tensor);
-float* getFloat(TensorV& tensor);
-
+template <class T>
 Tensor empty(Shape&& shape);
 
 TensorV reshape(const TensorV& tensor, const Shape& shape);
@@ -70,6 +70,7 @@ TensorV indexLeading(const TensorV& tensor, const std::vector<uint>& indices);
 TensorV slice0(const TensorV& tensor, uint start, uint end);
 TensorV unsqueeze(const TensorV& tensor, const std::vector<uint>& indices);
 
+void assign(const TensorV& tensor, const TensorV& src);
 Tensor castFloat(const TensorV& x);
 Tensor embeddingLookup(const TensorV& weight, const std::vector<uint>& tokens);
 Tensor concat(const std::vector<TensorV>& tensors, uint dim);
@@ -83,6 +84,9 @@ Tensor swiGlu(Tensor&& up, const TensorV& gate);
 Tensor rmsNorm(const TensorV& weight, const TensorV& x, float epsilon);
 Tensor layerNorm(const TensorV& weight, const TensorV& bias, const TensorV& x, float epsilon);
 Tensor projection(const TensorV& weight, const TensorV& x);
+// tensor :: (dS, ..., dim)
+// freq   :: (dim/2)
+Tensor rotate(Tensor&& tensor, const std::vector<float>& freq, uint offset);
 // query,out :: (dSq, dHkv, dHq, dim)
 // key,value :: (dSkv, dHkv, dim)
 Tensor attention(Tensor&& query, const TensorV& key, const TensorV& value, bool causal);

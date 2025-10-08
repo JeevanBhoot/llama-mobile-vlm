@@ -236,15 +236,11 @@ TensorV unsqueeze(const TensorV& tensor, const std::vector<uint>& indices) {
     return TensorV{tensor.data, shape};
 }
 
-const bf16* getBf16(const TensorV& tensor) {
+bf16* getBf16(const TensorV& tensor) {
     return std::get<_data::Flat<bf16>>(tensor.data).data;
 }
 
-const float* getFloat(const TensorV& tensor) {
-    return std::get<_data::Flat<float>>(tensor.data).data;
-}
-
-float* getFloat(TensorV& tensor) {
+float* getFloat(const TensorV& tensor) {
     return std::get<_data::Flat<float>>(tensor.data).data;
 }
 
@@ -253,6 +249,16 @@ Tensor embeddingLookup(const TensorV& weight, const std::vector<uint>& tokens) {
     ops::gather(getBf16(weight), tokens.data(), uint(tokens.size()), weight.shape[1],
                 getFloat(out));
     return out;
+}
+
+void assign(const TensorV& tensor, const TensorV& src) {
+    if (tensor.shape != src.shape) {
+        std::ostringstream err;
+        err << "assign: shapes don't match, tensor.shape: " << tensor.shape
+            << ", src.shape: " << src.shape;
+        throw std::invalid_argument(err.str());
+    }
+    ops::copy(getFloat(src), prod(src.shape), getFloat(tensor));
 }
 
 Tensor castFloat(const TensorV& x) {
@@ -390,6 +396,19 @@ Tensor projection(const TensorV& weight, const TensorV& x) {
     ops::matmulT(getFloat(x), getBf16(weight), x.shape[0], x.shape[1], weight.shape[0],
                  getFloat(out));
     return out;
+}
+
+Tensor rotate(Tensor&& tensor, const std::vector<float>& freq, uint offset) {
+    if (tensor.shape.size() < 2 || tensor.shape.back() != freq.size() * 2) {
+        std::ostringstream err;
+        err << "rotate: bad shape: " << tensor.shape << " or freq.size " << freq.size()
+            << ", expected shape: (dS, ..., dim) and freq.size: (dim/2)";
+        throw std::invalid_argument(err.str());
+    }
+    auto dH = prod(tensor.shape) / (tensor.shape[0] * tensor.shape.back());
+    ops::rotateInPlace(getFloat(tensor), freq.data(), offset, /*dS*/ tensor.shape[0],
+                       /*dH*/ dH, /*dim*/ tensor.shape.back());
+    return std::move(tensor);
 }
 
 Tensor attention(Tensor&& query, const TensorV& key, const TensorV& value, bool causal) {

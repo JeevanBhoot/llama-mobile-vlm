@@ -1,4 +1,3 @@
-#include "core/ops.hpp"
 #include "squash.hpp"
 
 #include <algorithm>
@@ -21,20 +20,19 @@ Tensor attention(const TextModel& model,
     if (layer.query_norm || layer.key_norm) {
         throw std::invalid_argument("attention() does not support query_norm or key_norm");
     }
+    auto sKV = tokenCount + x.shape[0];
+
     auto z = rmsNorm(layer.norm, x, model.normEpsilon);
-    auto query = reshape(projection(layer.query, z),
+    auto query = reshape(projection(layer.query, z),  //
                          {x.shape[0], model.dAttentionKV, model.dAttentionQ, model.dAttentionHead});
-    auto key = projection(layer.key, z);
-    auto value = projection(layer.value, z);
-    ops::rotateInPlace(getFloat(query), model.ropeAngularFrequency.data(), tokenCount,
-                       query.shape[0], model.dAttentionKV * model.dAttentionQ,
-                       model.dAttentionHead);
-    ops::rotateInPlace(getFloat(key), model.ropeAngularFrequency.data(), tokenCount, key.shape[0],
-                       model.dAttentionKV, model.dAttentionHead);
-    ops::copy(getFloat(key), prod(key.shape), getFloat(cache.key) + tokenCount * key.shape[1]);
-    ops::copy(getFloat(value), prod(value.shape),
-              getFloat(cache.value) + tokenCount * value.shape[1]);
-    auto sKV = key.shape[0] + tokenCount;
+    auto key = reshape(projection(layer.key, z),  //
+                       {x.shape[0], model.dAttentionKV, model.dAttentionHead});
+    auto value = reshape(projection(layer.value, z), key.shape);
+    query = rotate(std::move(query), model.ropeAngularFrequency, tokenCount);
+    key = rotate(std::move(key), model.ropeAngularFrequency, tokenCount);
+    assign(slice0(cache.key, tokenCount, sKV), key);
+    assign(slice0(cache.value, tokenCount, sKV), value);
+
     auto mix = reshape(attention(std::move(query), slice0(cache.key, 0, sKV),
                                  slice0(cache.value, 0, sKV), /*causal*/ true),
                        {x.shape[0], model.dAttentionKV * model.dAttentionQ * model.dAttentionHead});
@@ -46,7 +44,7 @@ Tensor crossAttention(const TextModel& model,
                       const TensorV& x,
                       Generator::KVCache::Entry& cache) {
     auto z = rmsNorm(layer.norm, x, model.normEpsilon);
-    auto query = reshape(projection(layer.query, z),
+    auto query = reshape(projection(layer.query, z),  //
                          {x.shape[0], model.dAttentionKV, model.dAttentionQ, model.dAttentionHead});
     query = rmsNorm(*layer.query_norm, query, model.normEpsilon);
     auto mix = reshape(attention(std::move(query), cache.key, cache.value, /*causal*/ false),
