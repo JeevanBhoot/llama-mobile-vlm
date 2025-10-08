@@ -95,7 +95,7 @@ Tensor preprocess(const VisionModel& model, const Image& image) {
     const auto dPatch = model.dPatch;
 
     auto result = empty<float>({nPatch * nPatch, dChannel * dPatch * dPatch});
-    auto ptr = getFloat(result);
+    auto ptr = data<float>(result);
     const auto nStride = dChannel * dPatch * dPatch;
     const auto cStride = dPatch * dPatch;
     for (auto n = 0u; n < nPatch * nPatch; ++n) {

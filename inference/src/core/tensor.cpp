@@ -236,21 +236,6 @@ TensorV unsqueeze(const TensorV& tensor, const std::vector<uint>& indices) {
     return TensorV{tensor.data, shape};
 }
 
-bf16* getBf16(const TensorV& tensor) {
-    return std::get<_data::Flat<bf16>>(tensor.data).data;
-}
-
-float* getFloat(const TensorV& tensor) {
-    return std::get<_data::Flat<float>>(tensor.data).data;
-}
-
-Tensor embeddingLookup(const TensorV& weight, const std::vector<uint>& tokens) {
-    auto out = empty<float>({uint(tokens.size()), weight.shape[1]});
-    ops::gather(getBf16(weight), tokens.data(), uint(tokens.size()), weight.shape[1],
-                getFloat(out));
-    return out;
-}
-
 void assign(const TensorV& tensor, const TensorV& src) {
     if (tensor.shape != src.shape) {
         std::ostringstream err;
@@ -258,12 +243,12 @@ void assign(const TensorV& tensor, const TensorV& src) {
             << ", src.shape: " << src.shape;
         throw std::invalid_argument(err.str());
     }
-    ops::copy(getFloat(src), prod(src.shape), getFloat(tensor));
+    ops::copy(data<float>(src), prod(src.shape), data<float>(tensor));
 }
 
 Tensor castFloat(const TensorV& x) {
     auto out = empty<float>({x.shape.begin(), x.shape.end()});
-    ops::castFloat(getBf16(x), getFloat(out), prod(out.shape));
+    ops::castFloat(data<bf16>(x), data<float>(out), prod(out.shape));
     return out;
 }
 
@@ -306,8 +291,8 @@ Tensor concat(const std::vector<TensorV>& tensors, uint dim) {
     auto dimIndex = 0u;
     for (auto& t : tensors) {
         auto dChunk = dTrailing * t.shape[dim];
-        ops::copyStrided(getFloat(t), dLeading, dChunk, dChunk, dTrailing * dConcat,
-                         getFloat(out) + dimIndex * dTrailing);
+        ops::copyStrided(data<float>(t), dLeading, dChunk, dChunk, dTrailing * dConcat,
+                         data<float>(out) + dimIndex * dTrailing);
         dimIndex += t.shape[dim];
     }
     return out;
@@ -319,7 +304,7 @@ Tensor tile(const TensorV& tensor, const std::vector<uint>& reps) {
     auto out = empty<float>(std::move(shape));
     auto dim = prod(tensor.shape);
     for (auto i = 0u; i < prod(reps); ++i) {
-        ops::copy(getFloat(tensor), dim, getFloat(out) + i * dim);
+        ops::copy(data<float>(tensor), dim, data<float>(out) + i * dim);
     }
     return out;
 }
@@ -330,7 +315,7 @@ Tensor add(Tensor&& x, const TensorV& y) {
         err << "add: shapes don't match, x.shape: " << x.shape << " and y.shape: " << y.shape;
         throw std::invalid_argument(err.str());
     }
-    ops::addInPlace(getFloat(x), getFloat(y), prod(x.shape));
+    ops::addInPlace(data<float>(x), data<float>(y), prod(x.shape));
     return std::move(x);
 }
 
@@ -340,12 +325,12 @@ Tensor broadcastAdd(Tensor&& x, const TensorV& y) {
         err << "broadcastAdd: bad shapes " << x.shape << " and " << y.shape;
         throw std::invalid_argument(err.str());
     }
-    ops::broadcastAddInPlace(getFloat(x), getBf16(y), prod(x.shape) / y.shape[0], y.shape[0]);
+    ops::broadcastAddInPlace(data<float>(x), data<bf16>(y), prod(x.shape) / y.shape[0], y.shape[0]);
     return std::move(x);
 }
 
 Tensor gelu(Tensor&& tensor) {
-    ops::geluInPlace(getFloat(tensor), prod(tensor.shape));
+    ops::geluInPlace(data<float>(tensor), prod(tensor.shape));
     return std::move(tensor);
 }
 
@@ -355,7 +340,7 @@ Tensor swiGlu(Tensor&& up, const TensorV& gate) {
         err << "swiGlu: bad shapes up: " << up.shape << ", gate: " << gate.shape;
         throw std::invalid_argument(err.str());
     }
-    ops::swiGluInPlace(getFloat(up), getFloat(gate), prod(up.shape));
+    ops::swiGluInPlace(data<float>(up), data<float>(gate), prod(up.shape));
     return std::move(up);
 }
 
@@ -366,8 +351,8 @@ Tensor rmsNorm(const TensorV& weight, const TensorV& x, float epsilon) {
         throw std::invalid_argument(err.str());
     }
     auto out = empty<float>({x.shape.begin(), x.shape.end()});
-    ops::rmsNorm(getBf16(weight), getFloat(x), prod(x.shape) / x.shape.back(), x.shape.back(),
-                 epsilon, getFloat(out));
+    ops::rmsNorm(data<bf16>(weight), data<float>(x), prod(x.shape) / x.shape.back(), x.shape.back(),
+                 epsilon, data<float>(out));
     return out;
 }
 
@@ -380,8 +365,20 @@ Tensor layerNorm(const TensorV& weight, const TensorV& bias, const TensorV& x, f
         throw std::invalid_argument(err.str());
     }
     auto out = empty<float>({x.shape.begin(), x.shape.end()});
-    ops::layerNorm(getBf16(weight), getBf16(bias), getFloat(x), prod(x.shape) / x.shape.back(),
-                   x.shape.back(), epsilon, getFloat(out));
+    ops::layerNorm(data<bf16>(weight), data<bf16>(bias), data<float>(x),
+                   prod(x.shape) / x.shape.back(), x.shape.back(), epsilon, data<float>(out));
+    return out;
+}
+
+Tensor embeddingLookup(const TensorV& weight, const std::vector<uint>& tokens) {
+    if (weight.shape.size() != 2) {
+        std::ostringstream err;
+        err << "embeddingLookup: expected 2D weight, weight.shape: " << weight.shape;
+        throw std::invalid_argument(err.str());
+    }
+    auto out = empty<float>({uint(tokens.size()), weight.shape[1]});
+    ops::gather(data<bf16>(weight), tokens.data(), uint(tokens.size()), weight.shape[1],
+                data<float>(out));
     return out;
 }
 
@@ -393,8 +390,8 @@ Tensor projection(const TensorV& weight, const TensorV& x) {
         throw std::invalid_argument(err.str());
     }
     auto out = empty<float>({x.shape[0], weight.shape[0]});
-    ops::matmulT(getFloat(x), getBf16(weight), x.shape[0], x.shape[1], weight.shape[0],
-                 getFloat(out));
+    ops::matmulT(data<float>(x), data<bf16>(weight), x.shape[0], x.shape[1], weight.shape[0],
+                 data<float>(out));
     return out;
 }
 
@@ -406,7 +403,7 @@ Tensor rotate(Tensor&& tensor, const std::vector<float>& freq, uint offset) {
         throw std::invalid_argument(err.str());
     }
     auto dH = prod(tensor.shape) / (tensor.shape[0] * tensor.shape.back());
-    ops::rotateInPlace(getFloat(tensor), freq.data(), offset, /*dS*/ tensor.shape[0],
+    ops::rotateInPlace(data<float>(tensor), freq.data(), offset, /*dS*/ tensor.shape[0],
                        /*dH*/ dH, /*dim*/ tensor.shape.back());
     return std::move(tensor);
 }
@@ -422,7 +419,8 @@ Tensor attention(Tensor&& query, const TensorV& key, const TensorV& value, bool 
             << "; expected query: (dSq, dHkv, dHq, dim) and key,value: (dSkv, dHkv, dim)";
         throw std::invalid_argument(err.str());
     }
-    ops::attentionInPlace(getFloat(query), getFloat(key), getFloat(value), /*dSq*/ query.shape[0],
+    ops::attentionInPlace(data<float>(query), data<float>(key), data<float>(value),
+                          /*dSq*/ query.shape[0],
                           /*dSkv*/ key.shape[0], /*dHq*/ query.shape[2],
                           /*dHkv*/ query.shape[1], /*dim*/ query.shape[3], causal);
     return std::move(query);
@@ -435,10 +433,10 @@ uint sample(const TensorV& logits,
             std::default_random_engine& rng) {
     if (logits.shape.size() != 1) {
         std::ostringstream err;
-        err << "sample: expected 1D logits, got shape " << logits.shape;
+        err << "sample: expected logits to be 1D, logits.shape: " << logits.shape;
         throw std::invalid_argument(err.str());
     }
-    return ops::sample(getFloat(logits), logits.shape[0], temperature, topK, topP, rng);
+    return ops::sample(data<float>(logits), logits.shape[0], temperature, topK, topP, rng);
 }
 
 }  // namespace squash::tensor
