@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from matplotlib.pylab import indices
 import torch
 from torch import Tensor
 
@@ -15,21 +16,25 @@ class TestFile:
         self.buffer_list = []
         self.tests = []
 
-    def store(self, t: Tensor) -> dict[str, Any]:
-        if t.dtype != torch.float32:
-            raise ValueError(f"Unsupported dtype: {t.dtype}, must be torch.float32")
-        try:
-            return dict(type="tensor", shape=t.shape, offset=self.offset)
-        finally:
-            self.offset += t.numel() * 4
-            self.buffer_list.append(t.flatten())
+    def store(self, t: Tensor | list) -> dict[str, Any]:
+        if isinstance(t, list):
+            return dict(type="list", data=t)
+        if isinstance(t, Tensor):
+            if t.dtype != torch.float32:
+                raise ValueError(f"Unsupported dtype: {t.dtype}, must be torch.float32")
+            try:
+                return dict(type="tensor", shape=t.shape, offset=self.offset)
+            finally:
+                self.offset += t.numel() * 4
+                self.buffer_list.append(t.flatten())
+        raise ValueError(f"Unsupported type: {type(t)}")
 
-    def add(self, op: str, name: str, **tensors: Tensor) -> None:
+    def add(self, op: str, name: str, **data: Tensor | list) -> None:
         self.tests.append(
             dict(
                 op=op,
                 name=name,
-                data={k: self.store(v) for k, v in tensors.items()},
+                data={k: self.store(v) for k, v in data.items()},
             )
         )
 
@@ -44,21 +49,42 @@ class TestFile:
             f.write(payload_bytes)
 
 
-def generate_tests(tests: TestFile) -> None:
-    torch.manual_seed(0x5BA87BB13DF4F97)
-    weight = torch.randn(32, 48) / (48**0.5)
-    x = torch.randn(7, 48)
-    output = x @ weight.T
-    tests.add("projection", "small", weight=weight, x=x, output=output)
+class Tests:
+    @staticmethod
+    def projection(tests: TestFile) -> None:
+        torch.manual_seed(0x5BA87BB13DF4F97)
+        weight = torch.randn(32, 48) / (48**0.5)
+        x = torch.randn(7, 48)
+        output = x @ weight.T
+        tests.add("projection", "small", weight=weight, x=x, output=output)
 
-    torch.manual_seed(0x796C93DFEDE7751A)
-    weight = torch.randn(137, 79) / (79**0.5)
-    x = torch.randn(37, 79)
-    output = x @ weight.T
-    tests.add("projection", "prime", weight=weight, x=x, output=output)
+        torch.manual_seed(0x796C93DFEDE7751A)
+        weight = torch.randn(137, 79) / (79**0.5)
+        x = torch.randn(37, 79)
+        output = x @ weight.T
+        tests.add("projection", "prime", weight=weight, x=x, output=output)
+
+    @staticmethod
+    def embeddingLookup(tests: TestFile) -> None:
+        torch.manual_seed(0xA8B6B8AEF045B5CE)
+        weight = torch.randn(91, 32)
+        tokens = [10, 64, 0, 1, 90]
+        output = weight[torch.tensor(tokens)]
+        tests.add(
+            "embeddingLookup",
+            "basic",
+            weight=weight,
+            tokens=tokens,
+            output=output,
+        )
+
+    @classmethod
+    def generate(cls, tests: TestFile) -> None:
+        cls.projection(tests)
+        cls.embeddingLookup(tests)
 
 
 if __name__ == "__main__":
     tests = TestFile()
-    generate_tests(tests)
+    Tests.generate(tests)
     tests.save(Path(sys.argv[1]))

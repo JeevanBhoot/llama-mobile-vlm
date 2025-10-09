@@ -25,6 +25,12 @@ struct TestCase {
             .shape = info.at("shape").template get<Shape>(),
         };
     }
+
+    std::vector<uint> indices(const std::string& name) const {
+        auto info = data.at(name);
+        REQUIRE(info.at("type").template get<std::string>() == "list");
+        return info.at("data").template get<std::vector<uint>>();
+    }
 };
 
 void assertTensorApproxEquals(const TensorV& actual,
@@ -80,6 +86,10 @@ void assertTensorApproxEquals(const TensorV& actual,
 void runTest(const TestCase& test) {
     if (test.op == "projection") {
         auto output = projection(castBf16(test.tensor("weight")), test.tensor("x"));
+        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
+
+    } else if (test.op == "embeddingLookup") {
+        auto output = embeddingLookup(castBf16(test.tensor("weight")), test.indices("tokens"));
         REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
 
     } else {
