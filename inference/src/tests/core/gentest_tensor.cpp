@@ -26,10 +26,18 @@ struct TestCase {
         };
     }
 
-    std::vector<uint> indices(const std::string& name) const {
+    template <typename T>
+    T scalar(const std::string& name) const {
+        auto info = data.at(name);
+        REQUIRE(info.at("type").template get<std::string>() == "scalar");
+        return info.at("data").template get<T>();
+    }
+
+    template <typename T>
+    std::vector<T> list(const std::string& name) const {
         auto info = data.at(name);
         REQUIRE(info.at("type").template get<std::string>() == "list");
-        return info.at("data").template get<std::vector<uint>>();
+        return info.at("data").template get<std::vector<T>>();
     }
 };
 
@@ -89,7 +97,12 @@ void runTest(const TestCase& test) {
         REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
 
     } else if (test.op == "embeddingLookup") {
-        auto output = embeddingLookup(castBf16(test.tensor("weight")), test.indices("tokens"));
+        auto output = embeddingLookup(castBf16(test.tensor("weight")), test.list<uint>("tokens"));
+        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
+
+    } else if (test.op == "rotate") {
+        auto output = rotate(clone(test.tensor("input")), test.list<float>("freq"),
+                             test.scalar<uint>("offset"));
         REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
 
     } else {

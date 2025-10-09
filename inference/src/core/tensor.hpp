@@ -70,6 +70,7 @@ TensorV indexLeading(const TensorV& tensor, const std::vector<uint>& indices);
 TensorV slice0(const TensorV& tensor, uint start, uint end);
 TensorV unsqueeze(const TensorV& tensor, const std::vector<uint>& indices);
 
+Tensor clone(const TensorV& tensor);
 void assign(const TensorV& tensor, const TensorV& src);
 Tensor castFloat(const TensorV& x);
 Tensor castBf16(const TensorV& x);

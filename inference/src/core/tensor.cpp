@@ -236,6 +236,12 @@ TensorV unsqueeze(const TensorV& tensor, const std::vector<uint>& indices) {
     return TensorV{tensor.data, shape};
 }
 
+Tensor clone(const TensorV& tensor) {
+    auto out = empty<float>({tensor.shape.begin(), tensor.shape.end()});
+    ops::copy(data<float>(tensor), prod(tensor.shape), data<float>(out));
+    return out;
+}
+
 void assign(const TensorV& tensor, const TensorV& src) {
     if (tensor.shape != src.shape) {
         std::ostringstream err;

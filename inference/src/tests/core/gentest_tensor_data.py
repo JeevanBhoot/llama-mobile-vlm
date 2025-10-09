@@ -16,7 +16,9 @@ class TestFile:
         self.buffer_list = []
         self.tests = []
 
-    def store(self, t: Tensor | list) -> dict[str, Any]:
+    def store(self, t: int | float | list | Tensor) -> dict[str, Any]:
+        if isinstance(t, (int, float)):
+            return dict(type="scalar", data=t)
         if isinstance(t, list):
             return dict(type="list", data=t)
         if isinstance(t, Tensor):
@@ -29,7 +31,7 @@ class TestFile:
                 self.buffer_list.append(t.flatten())
         raise ValueError(f"Unsupported type: {type(t)}")
 
-    def add(self, op: str, name: str, **data: Tensor | list) -> None:
+    def add(self, op: str, name: str, **data: int | float | list | Tensor) -> None:
         self.tests.append(
             dict(
                 op=op,
@@ -49,7 +51,22 @@ class TestFile:
             f.write(payload_bytes)
 
 
+def _rotate(z: Tensor, angle: Tensor) -> Tensor:
+    zx, zy = z.unflatten(-1, (2, -1)).movedim(-2, 0)
+    while angle.ndim < z.ndim:
+        angle.unsqueeze_(1)
+    return torch.cat(
+        [zx * angle.cos() - zy * angle.sin(), zy * angle.cos() + zx * angle.sin()], -1
+    )
+
+
 class Tests:
+    @classmethod
+    def all(cls, tests: TestFile) -> None:
+        cls.projection(tests)
+        cls.embeddingLookup(tests)
+        cls.rotate(tests)
+
     @staticmethod
     def projection(tests: TestFile) -> None:
         torch.manual_seed(0x5BA87BB13DF4F97)
@@ -78,13 +95,25 @@ class Tests:
             output=output,
         )
 
-    @classmethod
-    def generate(cls, tests: TestFile) -> None:
-        cls.projection(tests)
-        cls.embeddingLookup(tests)
+    @staticmethod
+    def rotate(tests: TestFile) -> None:
+        torch.manual_seed(0x5E62430FA002CCF6)
+        input = torch.randn(100, 2, 7, 32)
+        offset = 11
+        freq = 1000 ** torch.arange(0, 32, 2).div(32).neg()
+        angle = torch.arange(offset, input.shape[0] + offset)[:, None] * freq
+        output = _rotate(input, angle)
+        tests.add(
+            "rotate",
+            "basic",
+            input=input,
+            freq=freq.tolist(),
+            offset=offset,
+            output=output,
+        )
 
 
 if __name__ == "__main__":
     tests = TestFile()
-    Tests.generate(tests)
+    Tests.all(tests)
     tests.save(Path(sys.argv[1]))
