@@ -72,6 +72,7 @@ TensorV unsqueeze(const TensorV& tensor, const std::vector<uint>& indices);
 
 void assign(const TensorV& tensor, const TensorV& src);
 Tensor castFloat(const TensorV& x);
+Tensor castBf16(const TensorV& x);
 Tensor concat(const std::vector<TensorV>& tensors, uint dim);
 Tensor tile(const TensorV& tensor, const std::vector<uint>& reps);
 
@@ -117,8 +118,10 @@ inline T* Buffer::get() const {
 template <class T>
 Tensor empty(Shape&& shape) {
     auto buffer = Buffer(sizeof(T) * prod(shape));
-    return Tensor{{.data = _data::Flat<float>(reinterpret_cast<float*>(buffer.get())),
-                   .shape = std::move(shape)},
+    return Tensor{{
+                      .data = _data::Flat<T>(reinterpret_cast<T*>(buffer.get())),
+                      .shape = std::move(shape),
+                  },
                   std::move(buffer)};
 }
 

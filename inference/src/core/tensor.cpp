@@ -252,6 +252,12 @@ Tensor castFloat(const TensorV& x) {
     return out;
 }
 
+Tensor castBf16(const TensorV& x) {
+    auto out = empty<bf16>({x.shape.begin(), x.shape.end()});
+    ops::castBf16(data<float>(x), data<bf16>(out), prod(out.shape));
+    return out;
+}
+
 Tensor concat(const std::vector<TensorV>& tensors, uint dim) {
     // Compute summary dimensions
     auto dConcat = 0u;

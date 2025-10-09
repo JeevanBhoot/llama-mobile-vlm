@@ -11,35 +11,57 @@ from typing import Any, Callable, Iterable, List, TypeVar
 T = TypeVar("T")
 
 
-def _run(command: Iterable[Any]) -> None:
+def _run(command: Iterable[Any], env: dict[str, str] = {}) -> None:
     """Run a command, terminating on failure."""
     cmd = [str(arg) for arg in command if arg is not None]
     print("$ " + " ".join(cmd), file=sys.stderr)
     environ = os.environ.copy()
     environ["PYTHONPATH"] = f"{os.getcwd()}:{environ.get('PYTHONPATH', '')}"
+    environ.update(env)
     exit_code = subprocess.call(cmd, env=environ)
     if exit_code:
         sys.exit(exit_code)
 
 
-def _run_on_device(command: Iterable[Any]) -> None:
+def _push_to_device(src: Path) -> Path:
+    """Push a file to an attached Android device"""
+    dest = Path(f"/data/local/tmp/{src.name}")
+    _run(["adb", "push", str(src), str(dest)])
+    return dest
+
+
+def _run_on_device(command: Iterable[Any], env: dict[str, str]) -> None:
     """Run on an attached Android device"""
     program, *args = command
-    _run(["adb", "push", program, f"/data/local/tmp/{Path(program).name}"])
+    program = _push_to_device(Path(program))
     args_str = " ".join(str(arg) for arg in args if arg is not None)
     _run(
         [
             "adb",
             "shell",
-            "cd /data/local/tmp && env LD_LIBRARY_PATH=/data/local/tmp"
-            f" ./{Path(program).name} {args_str}",
-        ]
+            f"cd {program.parent} && env LD_LIBRARY_PATH={program.parent}"
+            f" ./{program.name} {args_str}",
+        ],
+        env=env,
     )
 
 
-def _run_under_gdb(command: Iterable[Any]) -> None:
+def _run_under_gdb(command: Iterable[Any], env: dict[str, str]) -> None:
     """Run under GDB (on host)"""
-    _run(["gdb", "-ex", "run", "--args", *command])
+    _run(["gdb", "-ex", "run", "--args", *command], env=env)
+
+
+def _run_target(
+    command: Iterable[Any], env: dict[str, str], platform: str, gdb: bool
+) -> None:
+    """Run the command on the given platform, optionally under gdb"""
+    if platform == "android":
+        assert not gdb, "gdb not supported on android"
+        _run_on_device(command, env)
+    elif gdb:
+        _run_under_gdb(command, env)
+    else:
+        _run(command, env)
 
 
 def cli(*args: Any, **kwargs: Any) -> Callable[[T], T]:
@@ -162,6 +184,11 @@ def _generate_build_ninja(w: Any, platform: str) -> None:
         command="$cxx $in $linkflags -shared -o $out $libs",
         description="LINKSO $out",
     )
+    w.rule(
+        "runpy",
+        command="python3 $in $out",
+        description="PYTHON $in",
+    )
     w.newline()
 
     # Objects
@@ -192,6 +219,9 @@ def _generate_build_ninja(w: Any, platform: str) -> None:
         [obj for _, obj, _ in root_to_files["lib"] + root_to_files["core"]],
     )
 
+    # Test data
+    w.build("testdata.bin", "runpy", "$src/tests/core/gentest_tensor_data.py")
+
 
 @cli("targets", nargs="*", help="build targets")
 def build(platforms: List[str], targets: List[str]) -> None:
@@ -218,7 +248,17 @@ def build(platforms: List[str], targets: List[str]) -> None:
 @cli("--gdb", action="store_true", help="run under gdb")
 def tests(platforms: List[str], gdb: bool, args: List[str]) -> None:
     """run unit tests"""
-    run(platforms=platforms, program="tests", gdb=gdb, args=args)
+    build(platforms=platforms, targets=["tests", "testdata.bin"])
+    for platform in platforms:
+        testdata = BUILD / platform / "testdata.bin"
+        if platform == "android":
+            testdata = _push_to_device(testdata)
+        _run_target(
+            [BUILD / platform / "tests", *args],
+            env=dict(TESTDATA=str(testdata)),
+            platform=platform,
+            gdb=gdb,
+        )
 
 
 @cli("program", help="program to run (see src/programs)")
@@ -228,13 +268,9 @@ def run(platforms: List[str], program: str, gdb: bool, args: List[str]) -> None:
     """build and run the given program"""
     build(platforms=platforms, targets=[program])
     for platform in platforms:
-        if platform == "android":
-            runner = _run_on_device
-        elif gdb:
-            runner = _run_under_gdb
-        else:
-            runner = _run
-        runner([BUILD / platform / program, *args])
+        _run_target(
+            [BUILD / platform / program, *args], env={}, platform=platform, gdb=gdb
+        )
 
 
 def _main() -> None:

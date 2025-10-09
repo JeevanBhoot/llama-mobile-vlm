@@ -50,5 +50,6 @@ void broadcastAddInPlace(float* x, const bf16* y, uint n, uint d);
 // conversion
 
 void castFloat(const bf16* in, float* out, uint n);
+void castBf16(const float* in, bf16* out, uint n);
 
 }  // namespace squash::ops

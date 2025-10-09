@@ -237,4 +237,10 @@ void castFloat(const bf16* in, float* out, uint n) {
     }
 }
 
+void castBf16(const float* in, bf16* out, uint n) {
+    for (uint i = 0; i < n; ++i) {
+        out[i] = floatToBf16(in[i]);
+    }
+}
+
 }  // namespace squash::ops
