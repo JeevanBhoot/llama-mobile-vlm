@@ -1,25 +1,60 @@
-#include "core/ops.hpp"
 #include "tests/tests.hpp"
 
-using namespace squash;
+using namespace squash::tensor;
 namespace M = Catch::Matchers;
 
-TEST_CASE("squash::ops::sample") {
+TEST_CASE("squash::tensor::general") {
+    // create()
+    auto x = create(std::vector<float>({1, 2, 3, 4, 5, 6}));
+    REQUIRE(x.shape == Shape({6}));
+    REQUIRE(data<float>(x)[5] == 6);
+
+    // reshape()
+    x = reshape(std::move(x), {3, 2});
+    REQUIRE(x.shape == Shape({3, 2}));
+
+    // unsqueeze()
+    REQUIRE(unsqueeze(x, {0}).shape == Shape({1, 3, 2}));
+    REQUIRE(unsqueeze(x, {1, 1}).shape == Shape({3, 1, 1, 2}));
+    REQUIRE(unsqueeze(x, {1, 2}).shape == Shape({3, 1, 1, 2}));
+    REQUIRE(unsqueeze(x, {2, 1}).shape == Shape({3, 1, 2, 1}));
+
+    // Helper function
+    auto _t = [](const std::vector<float>& v, const Shape& shape) {
+        return reshape(create(v), shape);
+    };
+
+    // indexLeading()
+    REQUIRE_TENSOR_APPROX_EQUALS(indexLeading(x, {1}), _t({3, 4}, {2}), 0.0);
+
+    // slice0()
+    REQUIRE_TENSOR_APPROX_EQUALS(slice0(x, 1, 3), _t({3, 4, 5, 6}, {2, 2}), 0.0);
+
+    // clone(), assign()
+    auto y = clone(x);
+    REQUIRE_TENSOR_APPROX_EQUALS(y, x, 0.0);
+    assign(indexLeading(y, {0}), _t({10, 20}, {2}));
+    assign(indexLeading(y, {2}), _t({500, 600}, {2}));
+    REQUIRE_TENSOR_APPROX_EQUALS(y, _t({10, 20, 3, 4, 500, 600}, {3, 2}), 0.0);
+    REQUIRE_TENSOR_APPROX_EQUALS(x, _t({1, 2, 3, 4, 5, 6}, {3, 2}), 0.0);
+}
+
+TEST_CASE("squash::tensor::sample") {
     std::vector<float> ps({0.25f, 0.125f, 0.5f, 0.125f});
-    std::vector<float> logits;
-    std::transform(ps.begin(), ps.end(), std::back_inserter(logits),
+    std::vector<float> logitsData;
+    std::transform(ps.begin(), ps.end(), std::back_inserter(logitsData),
                    [](float v) { return 10 + std::log(v); });
+    auto logits = create(logitsData);
 
     std::default_random_engine rng(1234);
     const auto sampleN = 1000u;
     auto sampleMany = [&](float temperature, uint topK, float topP) {
         std::vector<uint> results(sampleN);
         for (auto& r : results) {
-            r = ops::sample(logits.data(), uint(logits.size()), temperature, topK, topP, rng);
+            r = sample(logits, temperature, topK, topP, rng);
         }
         return results;
     };
-    // DUMPSQ(dump(sampleMany(/*temperature*/ 1, /*topK*/ 4u, /*topP*/ 1)));
 
     // Greedy (zero temperature)
     REQUIRE_THAT(sampleMany(/*temperature*/ 0, /*topK*/ 4u, /*topP*/ 1),
@@ -38,7 +73,7 @@ TEST_CASE("squash::ops::sample") {
                  M::Contains(0u) && !M::Contains(1u) && M::Contains(2u) && !M::Contains(3u));
 
     // Full sampling
-    std::vector<uint> counts(logits.size());
+    std::vector<uint> counts(logits.shape[0]);
     for (auto i : sampleMany(/*temperature*/ 1, /*topK*/ 4u, /*topP*/ 1)) {
         counts[i]++;
     }

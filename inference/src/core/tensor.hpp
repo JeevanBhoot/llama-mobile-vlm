@@ -70,6 +70,8 @@ TensorV unsqueeze(const TensorV& tensor, const std::vector<uint>& indices);
 // Data movement and type conversion
 template <class T>
 Tensor empty(Shape&& shape);
+template <class T>
+Tensor create(const std::vector<T>& data);
 Tensor clone(const TensorV& tensor);
 void assign(const TensorV& tensor, const TensorV& src);
 Tensor castFloat(const TensorV& tensor);
@@ -130,6 +132,13 @@ Tensor empty(Shape&& shape) {
                       .shape = std::move(shape),
                   },
                   std::move(buffer)};
+}
+
+template <class T>
+Tensor create(const std::vector<T>& data_) {
+    auto t = empty<T>({static_cast<uint>(data_.size())});
+    std::copy(data_.begin(), data_.end(), data<T>(t));
+    return t;
 }
 
 }  // namespace squash::tensor
