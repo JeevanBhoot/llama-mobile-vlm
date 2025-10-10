@@ -5,9 +5,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from matplotlib.pylab import indices
 import torch
-from torch import Tensor
+from torch import Tensor, nn, tensor
+import inspect
 
 
 class TestFile:
@@ -63,9 +63,74 @@ def _rotate(z: Tensor, angle: Tensor) -> Tensor:
 class Tests:
     @classmethod
     def all(cls, tests: TestFile) -> None:
-        cls.projection(tests)
-        cls.embeddingLookup(tests)
-        cls.rotate(tests)
+        for name, method in inspect.getmembers(cls, predicate=inspect.isroutine):
+            if not (name.startswith("_") or name == "all"):
+                method(tests)
+
+    # Math/NN ops
+
+    @staticmethod
+    def add(tests: TestFile) -> None:
+        torch.manual_seed(0x1B45E6A9EFDAABBA)
+        x = torch.randn(5, 23).mul(3)
+        y = torch.randn(5, 23).mul(0.7)
+        tests.add("add", "basic", x=x, y=y, output=x + y)
+        tests.add("broadcastAdd", "basic", x=x, y=y[0], output=x + y[0])
+
+    @staticmethod
+    def nonlinearities(tests: TestFile) -> None:
+        torch.manual_seed(0x4882A4CC4699C100)
+        x = torch.randn(5, 100).mul(3)
+        gate = torch.randn(5, 100).mul(3)
+        tests.add("gelu", "basic", x=x, output=nn.functional.gelu(x))
+        tests.add(
+            "swiGlu",
+            "basic",
+            x=x,
+            gate=gate,
+            output=x.mul(nn.functional.silu(gate)),
+        )
+
+    @staticmethod
+    def norms(tests: TestFile) -> None:
+        torch.manual_seed(0xFE218FECC5B4C9C3)
+        scale = tensor([1, 0.1, 10, 3e-4, 2e5])
+        x = torch.randn(5, 480).add(-0.2) * scale[:, None]
+        weight, bias, epsilon = torch.randn(480).exp(), torch.randn(480), 1e-5
+
+        output = nn.functional.layer_norm(x, (480,), weight, bias, eps=epsilon)
+        tests.add(
+            "layerNorm",
+            "basic",
+            x=x,
+            weight=weight,
+            bias=bias,
+            epsilon=epsilon,
+            output=output,
+        )
+        output = nn.functional.rms_norm(x, (480,), weight, eps=epsilon)
+        tests.add(
+            "rmsNorm",
+            "basic",
+            x=x,
+            weight=weight,
+            epsilon=epsilon,
+            output=output,
+        )
+
+    @staticmethod
+    def embeddingLookup(tests: TestFile) -> None:
+        torch.manual_seed(0xA8B6B8AEF045B5CE)
+        weight = torch.randn(91, 32)
+        tokens = [10, 64, 0, 1, 90]
+        output = weight[tensor(tokens)]
+        tests.add(
+            "embeddingLookup",
+            "basic",
+            weight=weight,
+            tokens=tokens,
+            output=output,
+        )
 
     @staticmethod
     def projection(tests: TestFile) -> None:
@@ -80,20 +145,6 @@ class Tests:
         x = torch.randn(37, 79)
         output = x @ weight.T
         tests.add("projection", "prime", weight=weight, x=x, output=output)
-
-    @staticmethod
-    def embeddingLookup(tests: TestFile) -> None:
-        torch.manual_seed(0xA8B6B8AEF045B5CE)
-        weight = torch.randn(91, 32)
-        tokens = [10, 64, 0, 1, 90]
-        output = weight[torch.tensor(tokens)]
-        tests.add(
-            "embeddingLookup",
-            "basic",
-            weight=weight,
-            tokens=tokens,
-            output=output,
-        )
 
     @staticmethod
     def rotate(tests: TestFile) -> None:
@@ -111,6 +162,42 @@ class Tests:
             offset=offset,
             output=output,
         )
+
+    @staticmethod
+    def attention(tests: TestFile) -> None:
+        torch.manual_seed(0x918ECDBAE4B5A6B)
+        query = torch.randn(13, 3, 5, 32)
+        key = torch.randn(17, 3, 32)
+        value = torch.randn(17, 3, 32)
+        for causal in [False, True]:
+            out = (
+                nn.functional.scaled_dot_product_attention(
+                    query.movedim(0, -2).flatten(end_dim=1),
+                    key.movedim(0, -2),
+                    value.movedim(0, -2),
+                    # Note: is_causal=true doesn't match expected behaviour when
+                    # the query is shorter than the key, so use `attn_mask`.
+                    attn_mask=(
+                        torch.tril(
+                            torch.ones(13, 17, dtype=torch.bool), diagonal=17 - 13
+                        )
+                        if causal
+                        else None
+                    ),
+                    enable_gqa=True,
+                )
+                .movedim(-2, 0)
+                .unflatten(1, query.shape[1:3])
+            )
+            tests.add(
+                "attention",
+                "causal" if causal else "noncausal",
+                query=query,
+                key=key,
+                value=value,
+                output=out,
+                causal=causal,
+            )
 
 
 if __name__ == "__main__":

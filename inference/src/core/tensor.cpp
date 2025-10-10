@@ -341,19 +341,19 @@ Tensor broadcastAdd(Tensor&& x, const TensorV& y) {
     return std::move(x);
 }
 
-Tensor gelu(Tensor&& tensor) {
-    ops::geluInPlace(data<float>(tensor), prod(tensor.shape));
-    return std::move(tensor);
+Tensor gelu(Tensor&& x) {
+    ops::geluInPlace(data<float>(x), prod(x.shape));
+    return std::move(x);
 }
 
-Tensor swiGlu(Tensor&& up, const TensorV& gate) {
-    if (up.shape != gate.shape) {
+Tensor swiGlu(Tensor&& x, const TensorV& gate) {
+    if (x.shape != gate.shape) {
         std::ostringstream err;
-        err << "swiGlu: bad shapes up: " << up.shape << ", gate: " << gate.shape;
+        err << "swiGlu: bad shapes x: " << x.shape << ", gate: " << gate.shape;
         throw std::invalid_argument(err.str());
     }
-    ops::swiGluInPlace(data<float>(up), data<float>(gate), prod(up.shape));
-    return std::move(up);
+    ops::swiGluInPlace(data<float>(x), data<float>(gate), prod(x.shape));
+    return std::move(x);
 }
 
 Tensor rmsNorm(const TensorV& weight, const TensorV& x, float epsilon) {

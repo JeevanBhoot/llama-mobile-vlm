@@ -92,17 +92,50 @@ void assertTensorApproxEquals(const TensorV& actual,
     assertTensorApproxEquals(actual, expected, rmsTol, __FILE__, __LINE__)
 
 void runTest(const TestCase& test) {
-    if (test.op == "projection") {
-        auto output = projection(castBf16(test.tensor("weight")), test.tensor("x"));
+    if (false) {
+        // dummy
+    } else if (test.op == "add") {
+        auto output = add(clone(test.tensor("x")), test.tensor("y"));
+        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
+
+    } else if (test.op == "broadcastAdd") {
+        auto output = broadcastAdd(clone(test.tensor("x")), castBf16(test.tensor("y")));
+        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
+
+    } else if (test.op == "gelu") {
+        auto output = gelu(clone(test.tensor("x")));
+        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
+
+    } else if (test.op == "swiGlu") {
+        auto output = swiGlu(clone(test.tensor("x")), test.tensor("gate"));
+        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
+
+    } else if (test.op == "rmsNorm") {
+        auto output = rmsNorm(castBf16(test.tensor("weight")), test.tensor("x"),
+                              test.scalar<float>("epsilon"));
+        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
+
+    } else if (test.op == "layerNorm") {
+        auto output = layerNorm(castBf16(test.tensor("weight")), castBf16(test.tensor("bias")),
+                                test.tensor("x"), test.scalar<float>("epsilon"));
         REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
 
     } else if (test.op == "embeddingLookup") {
         auto output = embeddingLookup(castBf16(test.tensor("weight")), test.list<uint>("tokens"));
         REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
 
+    } else if (test.op == "projection") {
+        auto output = projection(castBf16(test.tensor("weight")), test.tensor("x"));
+        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
+
     } else if (test.op == "rotate") {
         auto output = rotate(clone(test.tensor("input")), test.list<float>("freq"),
                              test.scalar<uint>("offset"));
+        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
+
+    } else if (test.op == "attention") {
+        auto output = attention(clone(test.tensor("query")), test.tensor("key"),
+                                test.tensor("value"), test.scalar<bool>("causal"));
         REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
 
     } else {
