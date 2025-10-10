@@ -107,7 +107,7 @@ class Tests:
         output = tensor_.repeat(*reps, 1, 1)
         tests.add("tile", "2D", tensor=tensor_, reps=reps, output=output)
 
-    # Math/NN ops
+    # Maths/NN ops
 
     @staticmethod
     def add(tests: TestFile) -> None:

@@ -67,11 +67,17 @@ TensorV indexLeading(const TensorV& tensor, const std::vector<uint>& indices);
 TensorV slice0(const TensorV& tensor, uint start, uint end);
 TensorV unsqueeze(const TensorV& tensor, const std::vector<uint>& indices);
 
-// Data movement and type conversion
+// Creation
 template <class T>
-Tensor empty(Shape&& shape);
+Tensor empty(Shape shape);
 template <class T>
 Tensor create(const std::vector<T>& data);
+template <class T>
+Tensor zeros(Shape shape);
+template <class T>
+Tensor randn(Shape shape, std::default_random_engine& rng, float stddev);
+
+// Data movement and type conversion
 Tensor clone(const TensorV& tensor);
 void assign(const TensorV& tensor, const TensorV& src);
 Tensor castFloat(const TensorV& tensor);
@@ -79,7 +85,7 @@ Tensor castBf16(const TensorV& tensor);
 Tensor concat(const std::vector<TensorV>& tensors, uint dim);
 Tensor tile(const TensorV& tensor, const std::vector<uint>& reps);
 
-// Math/NN ops
+// Maths/NN ops
 Tensor add(Tensor&& x, const TensorV& y);
 Tensor broadcastAdd(Tensor&& x, const TensorV& y);
 Tensor gelu(Tensor&& x);
@@ -125,7 +131,7 @@ T* data(const TensorV& tensor) {
 }
 
 template <class T>
-Tensor empty(Shape&& shape) {
+Tensor empty(Shape shape) {
     auto buffer = Buffer(sizeof(T) * prod(shape));
     return Tensor{{
                       .data = _data::Flat<T>(reinterpret_cast<T*>(buffer.get())),
@@ -138,6 +144,21 @@ template <class T>
 Tensor create(const std::vector<T>& data_) {
     auto t = empty<T>({static_cast<uint>(data_.size())});
     std::copy(data_.begin(), data_.end(), data<T>(t));
+    return t;
+}
+
+template <class T>
+Tensor zeros(Shape shape) {
+    auto t = empty<T>(std::move(shape));
+    std::fill_n(data<T>(t), prod(t.shape), cast<T>(0.0f));
+    return t;
+}
+
+template <class T>
+Tensor randn(Shape shape, std::default_random_engine& rng, float stddev) {
+    auto t = empty<T>(std::move(shape));
+    auto dist = std::normal_distribution<float>(0, stddev);
+    std::generate_n(data<T>(t), prod(t.shape), [&] { return cast<T>(dist(rng)); });
     return t;
 }
 

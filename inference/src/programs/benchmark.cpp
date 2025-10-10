@@ -1,5 +1,5 @@
-#include "core/ops.hpp"
-#include "tests/tests.hpp"
+#include "core/tensor.hpp"
+#include "lib/squash.hpp"
 
 using namespace squash;
 
@@ -72,35 +72,38 @@ std::ostream& operator<<(std::ostream& out, const Measurement& m) {
 }
 
 }  // namespace benchmarking
-}  // namespace
 
-TEMPLATE_TEST_CASE("benchmark-ops-MLP", "[squash][benchmark]", bf16) {
-    selectOmpNumThreads();
+void benchmarkMlp() {
     random_engine rng(100);
     uint batchSize = 1;
     uint dModel = 2048;
     uint dFFN = 8192;
 
-    auto inputs = randn<float>(batchSize * dModel, 1, rng);
-    auto wUp = randn<TestType>(dModel * dFFN, 0.02f, rng);
-    auto wGate = wUp.copy(dModel * dFFN * sizeof(TestType));  // save RNG time
-    auto wDown = wUp.copy(dModel * dFFN * sizeof(TestType));
+    auto inputs = tensor::randn<float>({batchSize, dModel}, rng, 1.0f);
+    auto wUp = tensor::randn<bf16>({dFFN, dModel}, rng, 0.02f);
+    auto wGate = tensor::clone(wUp);  // save RNG time
+    auto wDown = tensor::reshape(tensor::clone(wUp), {dModel, dFFN});
 
     benchmarking::Benchmark benchmark;
     for (auto rep = 0u; rep < 10u; ++rep) {
         auto timer = benchmark.record();
-        tensor::Buffer up(batchSize * dFFN * sizeof(float));
-        tensor::Buffer gate(batchSize * dFFN * sizeof(float));
-        auto outputs = zeros<float>(batchSize * dModel);
-        ops::matmulT(inputs.get<float>(), wUp.template get<TestType>(), batchSize, dModel, dFFN,
-                     up.get<float>());
-        ops::matmulT(inputs.get<float>(), wGate.template get<TestType>(), batchSize, dModel, dFFN,
-                     gate.get<float>());
-        ops::swiGluInPlace(up.get<float>(), gate.get<float>(), batchSize * dFFN);
-        ops::matmulT(up.get<float>(), wDown.template get<TestType>(), batchSize, dFFN, dModel,
-                     outputs.get<float>());
+
+        auto up = tensor::projection(wUp, inputs);
+        auto gate = tensor::projection(wGate, inputs);
+        up = tensor::swiGlu(std::move(up), gate);
+        auto outputs = tensor::projection(wDown, up);
     }
+
     auto result = benchmark.result();
     auto flopCount = 2 * 3 * dModel * dFFN;
-    std::cerr << 1e3 * result << " ms  |  " << (1e-9 * flopCount) / result << " GFLOP/s\n";
+    std::cerr << "MLP (tensor): " << 1e3 * result << " ms  |  " << (1e-9 * flopCount) / result
+              << " GFLOP/s\n";
+}
+
+}  // namespace
+
+int main() {
+    selectOmpNumThreads();
+    benchmarkMlp();
+    return 0;
 }

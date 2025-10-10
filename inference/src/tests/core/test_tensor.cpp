@@ -3,11 +3,27 @@
 using namespace squash::tensor;
 namespace M = Catch::Matchers;
 
-TEST_CASE("squash::tensor::general") {
+TEST_CASE("squash::tensor::creation") {
     // create()
     auto x = create(std::vector<float>({1, 2, 3, 4, 5, 6}));
     REQUIRE(x.shape == Shape({6}));
     REQUIRE(data<float>(x)[5] == 6);
+
+    // zeros()
+    x = zeros<float>({3, 5});
+    REQUIRE(x.shape == Shape({3, 5}));
+    for (auto i = 0u; i < 15; ++i) {
+        REQUIRE(data<float>(x)[i] == 0.0f);
+    }
+
+    // randn()
+    std::default_random_engine rng(123);
+    x = randn<float>({55}, rng, 1.0f);
+    REQUIRE(x.shape == Shape({55}));
+}
+
+TEST_CASE("squash::tensor::basic") {
+    auto x = create(std::vector<float>({1, 2, 3, 4, 5, 6}));
 
     // reshape()
     x = reshape(std::move(x), {3, 2});

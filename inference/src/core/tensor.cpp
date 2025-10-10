@@ -237,9 +237,25 @@ TensorV unsqueeze(const TensorV& tensor, const std::vector<uint>& indices) {
 }
 
 Tensor clone(const TensorV& tensor) {
-    auto out = empty<float>({tensor.shape.begin(), tensor.shape.end()});
-    ops::copy(data<float>(tensor), prod(tensor.shape), data<float>(out));
-    return out;
+    return std::visit(
+        [&](auto& d) {
+            if constexpr (std::is_same_v<std::decay_t<decltype(d)>, _data::Flat<float>>) {
+                auto out = empty<float>(tensor.shape);
+                ops::copy(d.data, prod(tensor.shape), data<float>(out));
+                return out;
+
+            } else if constexpr (std::is_same_v<std::decay_t<decltype(d)>, _data::Flat<bf16>>) {
+                auto out = empty<bf16>(tensor.shape);
+                ops::copy(d.data, prod(tensor.shape), data<bf16>(out));
+                return out;
+
+            } else {
+                std::ostringstream err;
+                err << "clone: Unexpected TensorV::data type: " << typeid(d).name() << "\n";
+                throw std::runtime_error(err.str());
+            }
+        },
+        tensor.data);
 }
 
 void assign(const TensorV& tensor, const TensorV& src) {

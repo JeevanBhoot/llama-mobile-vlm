@@ -7,9 +7,6 @@
 
 namespace squash {
 
-template <class To, class From>
-To cast(From value);
-
 struct TestModelConfig {
     struct Text {
         uint dLayers;
@@ -53,19 +50,6 @@ Model createTestModel(const TestModelConfig& config);
 // Impl
 
 namespace squash {
-
-template <>
-inline float cast<float, float>(float value) {
-    return value;
-}
-template <>
-inline bf16 cast<bf16, float>(float value) {
-    return floatToBf16(value);
-}
-template <>
-inline float cast<float, bf16>(bf16 value) {
-    return bf16ToFloat(value);
-}
 
 inline void assertTensorApproxEquals(const tensor::TensorV& actual,
                                      const tensor::TensorV& expected,

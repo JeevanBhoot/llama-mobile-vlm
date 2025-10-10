@@ -11,6 +11,9 @@ using ulong = uint64_t;
 float bf16ToFloat(bf16 value);
 bf16 floatToBf16(float value);
 
+template <class To, class From>
+To cast(From value);
+
 }  // namespace squash
 
 /////////////////////////////////////////////////////////////////////////////
@@ -33,6 +36,26 @@ inline bf16 floatToBf16(float value) {
     uint32_t u = reinterpret_cast<uint32_t&>(value);
     u += 0x7FFFu + ((u >> 16) & 1u);
     return static_cast<bf16>(u >> 16);
+}
+
+template <>
+inline float cast<float, float>(float value) {
+    return value;
+}
+
+template <>
+inline bf16 cast<bf16, bf16>(bf16 value) {
+    return value;
+}
+
+template <>
+inline bf16 cast<bf16, float>(float value) {
+    return floatToBf16(value);
+}
+
+template <>
+inline float cast<float, bf16>(bf16 value) {
+    return bf16ToFloat(value);
 }
 
 }  // namespace squash

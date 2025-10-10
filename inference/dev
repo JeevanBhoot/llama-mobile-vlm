@@ -273,6 +273,15 @@ def run(platforms: List[str], program: str, gdb: bool, args: List[str]) -> None:
         )
 
 
+@cli("-i", "--incremental", action="store_true", help="disable 'clean' before build")
+def ci(platforms: List[str], incremental: bool) -> None:
+    """run all CI checks"""
+    if not incremental:
+        clean(platforms=platforms)
+    tests(platforms=platforms, gdb=False, args=[])
+    run(platforms=platforms, program="benchmark", gdb=False, args=[])
+
+
 def _main() -> None:
     # Build an argparse command line by finding globals in the current module
     # that are marked via the @cli() decorator. Each one becomes a subcommand
@@ -287,7 +296,7 @@ def _main() -> None:
         help=f"platforms to build (default: [{PLATFORMS[0]}])",
     )
     parser.set_defaults(
-        _action=lambda platforms: tests(platforms=platforms, gdb=False, args=[])
+        _action=lambda platforms: ci(platforms=platforms, incremental=True)
     )
 
     subs = parser.add_subparsers()
