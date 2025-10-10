@@ -94,6 +94,21 @@ void assertTensorApproxEquals(const TensorV& actual,
 void runTest(const TestCase& test) {
     if (false) {
         // dummy
+
+    } else if (test.op == "cast") {
+        auto xFloat = test.tensor("float");
+        auto xBf16 = test.tensor("bf16");
+        REQUIRE_TENSOR_APPROX_EQUALS(castFloat(castBf16(xBf16)), xBf16, 0.0);
+        REQUIRE_TENSOR_APPROX_EQUALS(castFloat(castBf16(xFloat)), xBf16, 0.0);
+
+    } else if (test.op == "concat2") {
+        auto output = concat({test.tensor("t0"), test.tensor("t1")}, test.scalar<uint>("dim"));
+        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
+
+    } else if (test.op == "tile") {
+        auto output = tile(test.tensor("tensor"), test.list<uint>("reps"));
+        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
+
     } else if (test.op == "add") {
         auto output = add(clone(test.tensor("x")), test.tensor("y"));
         REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
@@ -129,8 +144,8 @@ void runTest(const TestCase& test) {
         REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
 
     } else if (test.op == "rotate") {
-        auto output = rotate(clone(test.tensor("input")), test.list<float>("freq"),
-                             test.scalar<uint>("offset"));
+        auto output =
+            rotate(clone(test.tensor("x")), test.list<float>("freq"), test.scalar<uint>("offset"));
         REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
 
     } else if (test.op == "attention") {

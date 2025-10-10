@@ -67,6 +67,46 @@ class Tests:
             if not (name.startswith("_") or name == "all"):
                 method(tests)
 
+    # Data movement and type conversion
+
+    @staticmethod
+    def casts(tests: TestFile) -> None:
+        torch.manual_seed(0xD4E6F5A9B3C2D1E0)
+        x = torch.randn(7, 13)
+        tests.add("cast", "unit", float=x, bf16=x.to(torch.bfloat16).to(torch.float32))
+        finfo = torch.finfo(torch.bfloat16)
+        for name, value in dict(
+            min=finfo.min,
+            max=finfo.max,
+            small=finfo.smallest_normal,
+            small_neg=-finfo.smallest_normal,
+        ).items():
+            x = tensor(value).mul(1 + 2**-8)  # adjust so that float value != bf16 value
+            tests.add(
+                "cast", name, float=x, bf16=x.to(torch.bfloat16).to(torch.float32)
+            )
+
+    @staticmethod
+    def concat(tests: TestFile) -> None:
+        torch.manual_seed(0xF1F505CF541D67E8)
+        t0 = torch.randn(7, 13)
+        t1 = torch.randn(5, 13)
+        tests.add("concat2", "dim0", t0=t0, t1=t1, dim=0, output=torch.cat([t0, t1], 0))
+        t0 = torch.randn(7, 13)
+        t1 = torch.randn(7, 17)
+        tests.add("concat2", "dim1", t0=t0, t1=t1, dim=1, output=torch.cat([t0, t1], 1))
+
+    @staticmethod
+    def tile(tests: TestFile) -> None:
+        torch.manual_seed(0xFF6C46CE4EB71B3)
+        tensor_ = torch.randn(3, 5)
+        reps = [7]
+        output = tensor_.repeat(*reps, 1, 1)
+        tests.add("tile", "1D", tensor=tensor_, reps=reps, output=output)
+        reps = [2, 7]
+        output = tensor_.repeat(*reps, 1, 1)
+        tests.add("tile", "2D", tensor=tensor_, reps=reps, output=output)
+
     # Math/NN ops
 
     @staticmethod
@@ -149,15 +189,15 @@ class Tests:
     @staticmethod
     def rotate(tests: TestFile) -> None:
         torch.manual_seed(0x5E62430FA002CCF6)
-        input = torch.randn(100, 2, 7, 32)
+        x = torch.randn(100, 2, 7, 32)
         offset = 11
         freq = 1000 ** torch.arange(0, 32, 2).div(32).neg()
-        angle = torch.arange(offset, input.shape[0] + offset)[:, None] * freq
-        output = _rotate(input, angle)
+        angle = torch.arange(offset, x.shape[0] + offset)[:, None] * freq
+        output = _rotate(x, angle)
         tests.add(
             "rotate",
             "basic",
-            input=input,
+            x=x,
             freq=freq.tolist(),
             offset=offset,
             output=output,

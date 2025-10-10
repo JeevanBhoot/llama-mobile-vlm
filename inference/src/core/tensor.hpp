@@ -72,8 +72,8 @@ template <class T>
 Tensor empty(Shape&& shape);
 Tensor clone(const TensorV& tensor);
 void assign(const TensorV& tensor, const TensorV& src);
-Tensor castFloat(const TensorV& x);
-Tensor castBf16(const TensorV& x);
+Tensor castFloat(const TensorV& tensor);
+Tensor castBf16(const TensorV& tensor);
 Tensor concat(const std::vector<TensorV>& tensors, uint dim);
 Tensor tile(const TensorV& tensor, const std::vector<uint>& reps);
 
@@ -92,12 +92,13 @@ Tensor projection(const TensorV& weight, const TensorV& x);
 
 // tensor :: (dS, ..., dim)
 // freq   :: (dim/2)
-Tensor rotate(Tensor&& tensor, const std::vector<float>& freq, uint offset);
+Tensor rotate(Tensor&& x, const std::vector<float>& freq, uint offset);
 
 // query,out :: (dSq, dHkv, dHq, dim)
 // key,value :: (dSkv, dHkv, dim)
 Tensor attention(Tensor&& query, const TensorV& key, const TensorV& value, bool causal);
 
+// Special ops
 uint sample(const TensorV& logits,
             float temperature,
             uint topK,
