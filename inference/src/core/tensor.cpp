@@ -170,6 +170,14 @@ void saveNpy(const std::string& path, const TensorV& tensor) {
     }
 }
 
+std::vector<uint> strides(const TensorV& tensor) {
+    std::vector<uint> strides(tensor.shape.size(), 1u);
+    for (auto i = strides.size() - 1; i != 0; --i) {
+        strides[i - 1] = strides[i] * tensor.shape[i];
+    }
+    return strides;
+}
+
 // Operations
 
 TensorV reshape(const TensorV& tensor, const Shape& shape) {
@@ -183,14 +191,6 @@ TensorV reshape(const TensorV& tensor, const Shape& shape) {
 
 Tensor reshape(Tensor&& tensor, const Shape& shape) {
     return {reshape(tensor, shape), std::move(tensor._data)};
-}
-
-std::vector<uint> strides(const TensorV& tensor) {
-    std::vector<uint> strides(tensor.shape.size(), 1u);
-    for (auto i = strides.size() - 1; i != 0; --i) {
-        strides[i - 1] = strides[i] * tensor.shape[i];
-    }
-    return strides;
 }
 
 TensorV indexLeading(const TensorV& tensor, const std::vector<uint>& indices) {

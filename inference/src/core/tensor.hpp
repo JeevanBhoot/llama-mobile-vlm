@@ -43,7 +43,7 @@ struct TensorV {
     Shape shape;
 };
 
-// A self-owning tensor
+// An owning tensor
 struct Tensor : TensorV {
     Buffer _data;
 };
@@ -56,20 +56,20 @@ void saveNpy(const std::string& path, const TensorV&);
 
 template <class T>
 T* data(const TensorV& tensor);
+Shape strides(const TensorV& tensor);
 
 // Tensor operations
 
-template <class T>
-Tensor empty(Shape&& shape);
-
+// Views
 TensorV reshape(const TensorV& tensor, const Shape& shape);
 Tensor reshape(Tensor&& tensor, const Shape& shape);
-Shape strides(const TensorV& tensor);
-
 TensorV indexLeading(const TensorV& tensor, const std::vector<uint>& indices);
 TensorV slice0(const TensorV& tensor, uint start, uint end);
 TensorV unsqueeze(const TensorV& tensor, const std::vector<uint>& indices);
 
+// Data movement and type conversion
+template <class T>
+Tensor empty(Shape&& shape);
 Tensor clone(const TensorV& tensor);
 void assign(const TensorV& tensor, const TensorV& src);
 Tensor castFloat(const TensorV& x);
@@ -77,11 +77,11 @@ Tensor castBf16(const TensorV& x);
 Tensor concat(const std::vector<TensorV>& tensors, uint dim);
 Tensor tile(const TensorV& tensor, const std::vector<uint>& reps);
 
+// Math/NN ops
 Tensor add(Tensor&& x, const TensorV& y);
 Tensor broadcastAdd(Tensor&& x, const TensorV& y);
 Tensor gelu(Tensor&& tensor);
 Tensor swiGlu(Tensor&& up, const TensorV& gate);
-
 Tensor rmsNorm(const TensorV& weight, const TensorV& x, float epsilon);
 Tensor layerNorm(const TensorV& weight, const TensorV& bias, const TensorV& x, float epsilon);
 Tensor embeddingLookup(const TensorV& weight, const std::vector<uint>& tokens);
@@ -117,6 +117,11 @@ inline T* Buffer::get() const {
 }
 
 template <class T>
+T* data(const TensorV& tensor) {
+    return std::get<_data::Flat<T>>(tensor.data).data;
+}
+
+template <class T>
 Tensor empty(Shape&& shape) {
     auto buffer = Buffer(sizeof(T) * prod(shape));
     return Tensor{{
@@ -124,11 +129,6 @@ Tensor empty(Shape&& shape) {
                       .shape = std::move(shape),
                   },
                   std::move(buffer)};
-}
-
-template <class T>
-T* data(const TensorV& tensor) {
-    return std::get<_data::Flat<T>>(tensor.data).data;
 }
 
 }  // namespace squash::tensor
