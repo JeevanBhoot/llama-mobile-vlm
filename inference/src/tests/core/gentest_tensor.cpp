@@ -1,9 +1,8 @@
-#define JSON_USE_IMPLICIT_CONVERSIONS 0
-
 #include "core/tensor.hpp"
-#include "tests/tests.hpp"
+#include "tests/common.hpp"
 
 #include <fstream>
+#define JSON_USE_IMPLICIT_CONVERSIONS 0
 #include <json.hpp>
 
 using namespace squash::tensor;

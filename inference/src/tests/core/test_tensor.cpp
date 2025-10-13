@@ -1,4 +1,4 @@
-#include "tests/tests.hpp"
+#include "tests/common.hpp"
 
 using namespace squash::tensor;
 namespace M = Catch::Matchers;

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <functional>
 #include <iostream>
+#define JSON_USE_IMPLICIT_CONVERSIONS 0
 #include <json.hpp>
 #include <numeric>
 #include <string>

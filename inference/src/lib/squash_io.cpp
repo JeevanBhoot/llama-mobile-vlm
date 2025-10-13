@@ -1,7 +1,6 @@
-#define JSON_USE_IMPLICIT_CONVERSIONS 0
-
 #include <sys/sysinfo.h>
 #include <iostream>
+#define JSON_USE_IMPLICIT_CONVERSIONS 0
 #include <json.hpp>
 #include <regex>
 #include <sstream>

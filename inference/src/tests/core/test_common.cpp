@@ -1,5 +1,5 @@
 #include "core/common.hpp"
-#include "tests/tests.hpp"
+#include "tests/common.hpp"
 
 using namespace squash;
 

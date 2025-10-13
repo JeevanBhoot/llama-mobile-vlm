@@ -210,34 +210,19 @@ def _generate_build_ninja(w: Any, platform: str) -> None:
     w.newline()
 
     # Programs & shared libraries
-    for _, obj, _ in root_to_files["programs"]:
-        name = Path(obj).stem
-        w.build(
-            f"{name}",
-            "linkexe",
-            [obj]
-            + [
-                obj
-                for _, obj, _ in root_to_files["lib"]
-                + root_to_files["core"]
-                + root_to_files.get(name, [])
-            ],
-        )
-    w.build(
-        "tests",
-        "linkexe",
-        [
+    binaries = [
+        ("benchmark", "linkexe", ["core", "lib", "benchmark"]),
+        ("tests", "linkexe", ["core", "lib", "benchmark", "tests", "catch"]),
+        ("libsquashed-llama.so", "linkso", ["core", "lib"]),
+    ]
+    for name, rule, roots in binaries:
+        objs = [obj for root in roots for _, obj, _ in root_to_files[root]]
+        objs += [
             obj
-            for root, fs in root_to_files.items()
-            if root != "programs"
-            for _, obj, _ in fs
-        ],
-    )
-    w.build(
-        "libsquashed-llama.so",
-        "linkso",
-        [obj for _, obj, _ in root_to_files["lib"] + root_to_files["core"]],
-    )
+            for src, obj, _ in root_to_files["programs"]
+            if src.endswith(f"{name}.cpp")
+        ]
+        w.build(name, rule, objs)
 
     # Test data
     w.build("testdata.bin", "runpy", "$src/tests/core/gentest_tensor_data.py")

@@ -5,46 +5,8 @@
 
 #include <catch_amalgamated.hpp>
 
-namespace squash {
-
-struct TestModelConfig {
-    struct Text {
-        uint dLayers;
-        uint dVocab;
-        uint dModel;
-        uint dMLP;
-        uint dAttentionHead;
-        uint dAttentionQ;
-        uint dAttentionKV;
-        bool tiedEmbeddings;
-        std::vector<uint> crossAttentionLayers;
-    };
-    struct Vision {
-        uint dImage;
-        uint dPatch;
-        uint dLayers0;
-        uint dLayers1;
-        uint dModel;
-        uint dMlp;
-        uint dAttentionHead;
-        uint dAttentionQkv;
-        std::vector<uint> outputTaps;
-    };
-    Text text;
-    std::optional<Vision> vision;
-
-    static TestModelConfig smallLLM();
-    static TestModelConfig smallVLM();
-    static TestModelConfig llama1B_LLM();
-    static TestModelConfig llama11B_VLM();
-};
-
-Model createTestModel(const TestModelConfig& config);
-
 #define REQUIRE_TENSOR_APPROX_EQUALS(actual, expected, rmsTol) \
     squash::assertTensorApproxEquals(actual, expected, rmsTol, __FILE__, __LINE__)
-
-}  // namespace squash
 
 ///////////////////////////////////////////////////////////////////////////////
 // Impl
