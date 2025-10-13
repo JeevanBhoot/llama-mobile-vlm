@@ -8,17 +8,27 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Iterable, List, TypeVar
 
+
+###############################################################################
+# Common
+
 T = TypeVar("T")
 
 
-def _run(command: Iterable[Any], env: dict[str, str] = {}) -> None:
+def _run(
+    command: Iterable[Any], env: dict[str, str] = {}, stdout_to_stderr: bool = False
+) -> None:
     """Run a command, terminating on failure."""
     cmd = [str(arg) for arg in command if arg is not None]
     print("$ " + " ".join(cmd), file=sys.stderr)
     environ = os.environ.copy()
     environ["PYTHONPATH"] = f"{os.getcwd()}:{environ.get('PYTHONPATH', '')}"
     environ.update(env)
-    exit_code = subprocess.call(cmd, env=environ)
+    exit_code = subprocess.call(
+        cmd,
+        env=environ,
+        stdout=(sys.stderr if stdout_to_stderr else None),
+    )
     if exit_code:
         sys.exit(exit_code)
 
@@ -91,6 +101,9 @@ THIRD_PARTY_SOURCES = (
     "https://raw.githubusercontent.com/nothings/stb/2e2bef463a5b53ddf8bb788e25da6b8506314c08/stb_image_resize2.h",
 )
 
+###############################################################################
+# Commands
+
 
 @cli()
 def setup(platforms: List[str]) -> None:
@@ -138,7 +151,7 @@ def _generate_build_ninja(w: Any, platform: str) -> None:
     flags += ["-fopenmp"]
 
     root_to_files = {}  # [root] -> (src, obj, {variable: value})
-    for root in ["core", "lib", "tests", "programs"]:
+    for root in ["benchmark", "core", "lib", "programs", "tests"]:
         root_to_files[root] = []
         for cpp in (s.relative_to(SRC) for s in (SRC / root).glob("**/*.cpp")):
             root_to_files[root] += [
@@ -198,10 +211,17 @@ def _generate_build_ninja(w: Any, platform: str) -> None:
 
     # Programs & shared libraries
     for _, obj, _ in root_to_files["programs"]:
+        name = Path(obj).stem
         w.build(
-            f"{Path(obj).stem}",
+            f"{name}",
             "linkexe",
-            [obj] + [obj for _, obj, _ in root_to_files["lib"] + root_to_files["core"]],
+            [obj]
+            + [
+                obj
+                for _, obj, _ in root_to_files["lib"]
+                + root_to_files["core"]
+                + root_to_files.get(name, [])
+            ],
         )
     w.build(
         "tests",
@@ -236,7 +256,7 @@ def build(platforms: List[str], targets: List[str]) -> None:
         root.mkdir(parents=True, exist_ok=True)
         with (root / "build.ninja").open("w") as file:
             _generate_build_ninja(ninja_syntax.Writer(file), platform)
-        _run(["ninja", "-C", root, *targets])
+        _run(["ninja", "-C", root, *targets], stdout_to_stderr=True)
 
 
 @cli(
@@ -280,6 +300,10 @@ def ci(platforms: List[str], incremental: bool) -> None:
         clean(platforms=platforms)
     tests(platforms=platforms, gdb=False, args=[])
     run(platforms=platforms, program="benchmark", gdb=False, args=[])
+
+
+################################################################################
+# Driver
 
 
 def _main() -> None:
