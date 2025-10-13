@@ -1,6 +1,7 @@
 #include <cxxopts.hpp>
 #include <fstream>
 #include <iostream>
+
 #include "lib/squash.hpp"
 
 int main(int argc, char** argv) {
