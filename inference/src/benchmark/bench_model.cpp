@@ -366,11 +366,11 @@ void runModelBenchmark(const Dummy::Config& config,
     std::cerr << report << "generate " << 1 / result << " token/s\n";
 }
 
-REGISTER_BENCHMARK(textModel1B)(const benchmarking::Report& report) {
+REGISTER_BENCHMARK(text_model_1B)(const benchmarking::Report& report) {
     runModelBenchmark(Dummy::llama1B_LLM(), /*nPrompt*/ 64u, /*nGenerate*/ 64u, report);
 }
 
-REGISTER_BENCHMARK(_visionModel11B)(const benchmarking::Report& report) {
+REGISTER_BENCHMARK(_vision_model_11B)(const benchmarking::Report& report) {
     runModelBenchmark(Dummy::llama11B_VLM(), /*nPrompt*/ 64u, /*nGenerate*/ 64u, report);
 }
 

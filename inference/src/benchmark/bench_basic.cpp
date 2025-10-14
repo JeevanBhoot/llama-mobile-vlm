@@ -78,9 +78,9 @@ REGISTER_BENCHMARK(_memory_bandwidth)(const benchmarking::Report& report) {
 // Dot product
 
 template <uint M, uint K, uint N, bool TransposeB, bool FastMath>
-__attribute__((noinline)) void _dot_IMPL(const float* __restrict__ a,
-                                         const float* __restrict__ b,
-                                         float* __restrict__ out) {
+__attribute__((noinline)) void dotProductImpl(const float* __restrict__ a,
+                                              const float* __restrict__ b,
+                                              float* __restrict__ out) {
     for (auto iM = 0u; iM < M; ++iM) {
         // #pragma unroll
         for (auto iN = 0u; iN < N; ++iN) {
@@ -110,7 +110,7 @@ void runDotProduct(const benchmarking::Report& report) {
     for (auto rep = 0u; rep < outerReps; ++rep) {
         auto timer = benchmark.record();
         for (auto i = 0u; i < innerReps; ++i) {
-            _dot_IMPL<M, K, N, TransposeB, FastMath>(a.data(), b.data(), out.data());
+            dotProductImpl<M, K, N, TransposeB, FastMath>(a.data(), b.data(), out.data());
         }
     }
 
