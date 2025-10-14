@@ -130,7 +130,7 @@ class Settings:
                 train=[
                     DataShard("imagenet-train-generation/701c74", None),
                 ],
-                validation=None
+                validation=None,
             ),
             quantisation=QuantisationSettings(
                 fmt=Q.LinearScalingFormat(
@@ -258,10 +258,11 @@ def run_downstream(
                     disable_progress=bool(rank),
                 )
             )
+            results["vqa"] = {}
             for metric_name in ["accuracy", "accuracy_easy"]:
                 metric = torch.tensor([x[metric_name] for x in out]).mean()
                 dist.all_reduce(metric, dist.ReduceOp.AVG)
-                results["vqa"] = dict(k=metric)
+                results["vqa"][metric_name] = metric
         else:
             # TODO: Reasonable default data mix for outcompare
             raise NotImplementedError
