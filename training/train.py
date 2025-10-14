@@ -279,6 +279,26 @@ def load_dataset(data_shards: list[DataShard]) -> Dataset:
     return Dataset(paths, n_examples)
 
 
+def _tokenise_and_add_mask(
+    batch: list[Datum], processor: MllamaProcessor
+) -> dict[str, torch.Tensor]:
+    imgs = [[x.image] for x in batch]
+    prompts_tok = processor(imgs, [x.prompt for x in batch])["input_ids"]
+
+    # TODO: Save outputs without <bot> tokens
+    inp = processor(
+        imgs,
+        [x.out.replace("<|begin_of_text|>", "") for x in batch],
+        return_tensors="pt",
+        padding=True,
+    )
+    mask = torch.ones_like(inp["attention_mask"])
+    for i, n in enumerate([len(x) for x in prompts_tok]):
+        mask[i, :n] = 0
+    inp["prompt_mask"] = mask
+    return inp
+
+
 def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
     if settings.save_checkpoint:
         check_s3_access()
@@ -426,15 +446,12 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
 
                 t0 = time.time()
 
-                imgs = [[x.image] for x in batch]
-                texts = [x.out for x in batch]
-                inps = processor(imgs, texts, return_tensors="pt", padding=True).to(
-                    device
-                )
+                inps = _tokenise_and_add_mask(batch, processor)
+                mask = inps.pop("prompt_mask")
 
                 opt.zero_grad()
 
-                loss = _compute_kl_loss(student, teacher, inps)
+                loss = _compute_kl_loss(student, teacher, inps, mask)
 
                 loss.backward()
                 opt.step()

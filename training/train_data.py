@@ -6,7 +6,7 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable
 
 import datasets
 import torch
@@ -14,6 +14,7 @@ import torch.multiprocessing as mp
 import transformers
 from PIL.ImageFile import ImageFile
 
+from prompt_sampling import INSTRUCTIONS, PROMPTS, get_prompts
 from utility import (
     LLAMA_PROMPT_TEMPLATES,
     LOCAL_DATA_PATH,
@@ -27,8 +28,8 @@ DEFAULT_PROMPT = "Describe the image:\n"
 @dataclass
 class SamplingSettings:
     do_sample: bool
-    temperature: Optional[float]
-    top_p: Optional[float]
+    temperature: float | None
+    top_p: float | None
 
     @classmethod
     def default(cls) -> "SamplingSettings":
@@ -76,8 +77,8 @@ class ImageDataset:
 
     def data(
         self,
-        prompt: Optional[str],
-        seed: Optional[int] = None,
+        prompt_fn: Callable[[int], list[str]] | None,
+        seed: int | None = None,
         sync: bool = True,
     ) -> datasets.Dataset:
         s3_path, local_path = self._get_paths()
@@ -116,8 +117,8 @@ class ImageDataset:
             ds = ds.shuffle(seed)
 
         # Add prompt column
-        if prompt:
-            ds = ds.add_column(name="prompt", column=[prompt for _ in range(len(ds))])
+        if prompt_fn is not None:
+            ds = ds.add_column(name="prompt", column=prompt_fn(len(ds)))
 
         return ds
 
@@ -139,13 +140,40 @@ class Coco(ImageDataset):
 
 
 @dataclass
+class PromptConfig:
+    templates: list[str]
+    template_weights: list[float]
+    instructions: list[str]
+    prompts: list[str]
+    instruction_prob: float
+    seed: int
+
+    @classmethod
+    def default(cls, **kwargs: Any) -> "PromptConfig":
+        templates = [
+            LLAMA_PROMPT_TEMPLATES["simple"],
+            LLAMA_PROMPT_TEMPLATES["instruct"],
+        ]
+        default_args = dict(
+            templates=templates,
+            template_weights=[0.25, 0.75],
+            instructions=INSTRUCTIONS,
+            prompts=PROMPTS,
+            instruction_prob=0.75,
+            seed=693785,
+        )
+        default_args.update(kwargs)
+        return PromptConfig(**default_args)
+
+
+@dataclass
 class GenerationConfig:
     model_name: str
     dataset_name: str
     split: str
-    prompt: str
-    seed: Optional[int]
-    data_range: Optional[tuple[int, int]]
+    prompt_config: PromptConfig
+    seed: int | None
+    data_range: tuple[int, int] | None
     n_generated_tokens: int
     sampling_settings: SamplingSettings
 
@@ -155,10 +183,10 @@ class GenerationConfig:
             model_name="meta-llama/Llama-3.2-11B-Vision-Instruct",
             dataset_name="imagenet",
             split="train",
-            prompt=LLAMA_PROMPT_TEMPLATES["instruct"].format(prompt=DEFAULT_PROMPT),
+            prompt_config=PromptConfig.default(),
             seed=None,
             data_range=None,
-            n_generated_tokens=1024,
+            n_generated_tokens=512,
             sampling_settings=SamplingSettings.default(),
         )
         default_args.update(kwargs)
@@ -209,7 +237,9 @@ def _generate(
                 flush=True,
             )
             for idx, out_text in zip(batch["index"], processor.batch_decode(out)):
-                yield idx, out_text.replace(processor.tokenizer.pad_token, "")
+                pad_token = processor.tokenizer.special_tokens_map["pad_token"]
+                bos_token = processor.tokenizer.special_tokens_map["bos_token"]
+                yield idx, out_text.replace(pad_token, "").replace(bos_token, "")
 
 
 def _generate_worker(
@@ -228,8 +258,10 @@ def _generate_worker(
         config.model_name, torch_dtype=getattr(torch, dtype), device_map=device
     )
 
+    # NOTE: data method expects prompt_fn with only size argument
     data = IMAGE_DATASETS[config.dataset_name](split=config.split).data(
-        prompt=config.prompt, seed=config.seed
+        prompt_fn=lambda n: get_prompts(n, **asdict(config.prompt_config)),
+        seed=config.seed,
     )
     if config.data_range is not None:
         data = data.select(range(*config.data_range))
@@ -334,7 +366,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
 
 class Dataset:
     def __init__(
-        self, paths: list[str], n_examples: list[Optional[int]], seed: int = 563673
+        self, paths: list[str], n_examples: list[int | None], seed: int = 563673
     ):
         data_to_concat: list[datasets.Dataset] = []
         self._configs = []
@@ -345,7 +377,10 @@ class Dataset:
 
             data = (
                 IMAGE_DATASETS[config["dataset_name"]](split=config["split"])
-                .data(prompt=config["prompt"], seed=config["seed"])
+                .data(
+                    prompt_fn=lambda n: get_prompts(n, **config["prompt_config"]),
+                    seed=config["seed"],
+                )
                 .select(range(*config["data_range"]))
             )
 
