@@ -128,13 +128,9 @@ class Settings:
             model_name="meta-llama/Llama-3.2-11B-Vision-Instruct",
             data=DataSettings(
                 train=[
-                    DataShard("imagenet-train-generation/870805", None),
-                    DataShard("imagenet-train-generation/98cf95", None),
+                    DataShard("imagenet-train-generation/701c74", None),
                 ],
-                validation=[
-                    DataShard("coco-validation-generation/9ba9e8", 128),
-                    DataShard("coco-validation-generation/76bcc0", 512),
-                ],
+                validation=None
             ),
             quantisation=QuantisationSettings(
                 fmt=Q.LinearScalingFormat(
