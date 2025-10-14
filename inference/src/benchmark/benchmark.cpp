@@ -10,8 +10,8 @@ Benchmark::Recorder Benchmark::record() {
     return Recorder(*this);
 }
 
-Benchmark::Measurement Benchmark::result() const {
-    auto begin = times.begin() + uint(SkipFirstFraction * double(times.size()));
+Benchmark::Measurement Benchmark::result(double skipFirstFraction) const {
+    auto begin = times.begin() + uint(skipFirstFraction * double(times.size()));
     auto n = uint(std::distance(begin, times.end()));
     auto mean = std::accumulate(begin, times.end(), 0.0) / double(n);
     auto meanSq = std::accumulate(begin, times.end(), 0.0,

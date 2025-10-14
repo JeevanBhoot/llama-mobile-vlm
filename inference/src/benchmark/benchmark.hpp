@@ -26,11 +26,10 @@ struct Benchmark {
         double error;
         uint count;
     };
-    const double SkipFirstFraction = 0.25;
 
     std::vector<double> times;
     Recorder record();
-    Measurement result() const;
+    Measurement result(double skipFirstFraction = 0.25) const;
 };
 
 Benchmark::Measurement operator*(double, const Benchmark::Measurement&);
