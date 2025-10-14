@@ -262,9 +262,10 @@ def run_downstream(
                     disable_progress=bool(rank),
                 )
             )
-            acc = torch.tensor([x["accuracy"] for x in out]).mean()
-            dist.all_reduce(acc, dist.ReduceOp.AVG)
-            results["vqa"] = dict(accuracy=acc)
+            for metric_name in ["accuracy", "accuracy_easy"]:
+                metric = torch.tensor([x[metric_name] for x in out]).mean()
+                dist.all_reduce(metric, dist.ReduceOp.AVG)
+                results["vqa"] = dict(k=metric)
         else:
             # TODO: Reasonable default data mix for outcompare
             raise NotImplementedError
