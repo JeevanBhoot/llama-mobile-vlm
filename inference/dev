@@ -90,6 +90,7 @@ def cli(*args: Any, **kwargs: Any) -> Callable[[T], T]:
 
 BUILD = Path("build")
 SRC = Path("src")
+THIRD_PARTY = Path("third-party")
 ANDROID_NDK = Path("/opt/android-sdk/ndk/latest")
 PLATFORMS = ["release", "debug"] + (["android"] if ANDROID_NDK.exists() else [])
 THIRD_PARTY_SOURCES = (
@@ -109,10 +110,9 @@ THIRD_PARTY_SOURCES = (
 @cli()
 def setup(platforms: List[str]) -> None:
     """download third-party libraries"""
-    third_party = Path("third-party")
-    third_party.mkdir(exist_ok=True)
+    THIRD_PARTY.mkdir(exist_ok=True)
     for path in THIRD_PARTY_SOURCES:
-        _run(["wget", "-nv", "-O", third_party / Path(path).name, path])
+        _run(["wget", "-nv", "-O", THIRD_PARTY / Path(path).name, path])
 
 
 @cli()
@@ -135,7 +135,7 @@ def _generate_build_ninja(w: Any, platform: str) -> None:
     flags, cxxflags, linkflags, libs = [], [], [], []
     cxxflags += ["$flags", "-fcolor-diagnostics", "-fdiagnostics-absolute-paths"]
     cxxflags += ["-Wall", "-Wextra", "-Wconversion", "-Wdouble-promotion", "-Werror"]
-    cxxflags += [f"-I$src", f"-isystem $third-party"]
+    cxxflags += [f"-Isrc", f"-isystem third-party"]
     cxxflags += ["-g", "-fPIC", "-std=c++20"]
     cxxflags += ["-O0"] if "debug" in platform else ["-O3", "-DNDEBUG"]
     cxxflags += ["-fdata-sections", "-ffunction-sections"]
@@ -156,24 +156,19 @@ def _generate_build_ninja(w: Any, platform: str) -> None:
     for root in ["benchmark", "core", "lib", "programs", "tests"]:
         root_to_files[root] = []
         for cpp in (s.relative_to(SRC) for s in (SRC / root).glob("**/*.cpp")):
-            root_to_files[root] += [
-                (f"$src/{cpp}", f"$obj/{cpp.with_suffix('.o')}", {})
-            ]
+            root_to_files[root] += [(f"src/{cpp}", f"obj/{cpp.with_suffix('.o')}", {})]
     catch_cxxflags = [
         f for f in cxxflags if f not in ["-Wconversion", "-Wdouble-promotion"]
     ]
     root_to_files["catch"] = [
         (
-            "$third-party/catch_amalgamated.cpp",
-            "$obj/catch/catch_amalgamated.o",
+            "third-party/catch_amalgamated.cpp",
+            "obj/catch/catch_amalgamated.o",
             dict(cxxflags=catch_cxxflags),
         )
     ]
 
     # Variables
-    w.variable("src", f"../../{SRC}")
-    w.variable("third-party", "../../third-party")
-    w.variable("obj", "obj")
     w.variable("cxx", cxx)
     w.variable("libs", libs)
     w.variable("flags", flags)
@@ -246,21 +241,25 @@ def _generate_build_ninja(w: Any, platform: str) -> None:
         w.build(name, rule, objs)
 
     # Test data
-    w.build("testdata.bin", "runpy", "$src/tests/core/gentest_tensor_data.py")
+    w.build("testdata.bin", "runpy", "src/tests/core/gentest_tensor_data.py")
 
 
 @cli("targets", nargs="*", help="build targets")
 @cli("-v", "--verbose", action="store_true", help="enable verbose output")
 def build(platforms: List[str], targets: List[str], verbose: bool) -> None:
     """build C++ code"""
-    third_party = str(Path(__file__).parent / "third-party")
-    if third_party not in sys.path:
-        sys.path.append(third_party)
+    if str(THIRD_PARTY.absolute()) not in sys.path:
+        sys.path.append(str(THIRD_PARTY.absolute()))
     import ninja_syntax
 
     for platform in platforms:
         root = BUILD / platform
         root.mkdir(parents=True, exist_ok=True)
+        for source_dir in [SRC, THIRD_PARTY]:
+            link = root / source_dir.name
+            if link.is_symlink():
+                link.unlink()
+            link.symlink_to(source_dir.absolute())
         with (root / "build.ninja").open("w") as file:
             _generate_build_ninja(ninja_syntax.Writer(file), platform)
         _run(
