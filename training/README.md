@@ -36,7 +36,7 @@ if __name__ == "__main__":
     settings = train.Settings.default()
     settings.run_name = "dev"
     settings.training.n_steps = 16
-    settings.training.batch_size = 64
+    settings.training.batch_size = 128
     settings.training.optimiser.lr = 2**-16
     train.run_experiment(settings)
 ```
