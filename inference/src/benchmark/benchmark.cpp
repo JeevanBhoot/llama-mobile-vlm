@@ -17,6 +17,10 @@ Benchmark::Measurement Benchmark::result() const {
     auto meanSq = std::accumulate(begin, times.end(), 0.0,
                                   [](double sumSq, double time) { return sumSq + time * time; }) /
                   double(n);
+    if (mean < 1e-6) {
+        std::cerr << "WARNING: benchmark measurement mean time is very small (" << mean * 1e6
+                  << " us), results may be inaccurate due to timing overhead.\n";
+    }
     return {mean, std::sqrt((meanSq - mean * mean) / double(n)), n};
 }
 

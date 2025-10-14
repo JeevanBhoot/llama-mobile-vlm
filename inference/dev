@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import platform
 import os
 import shutil
 import subprocess
@@ -140,13 +141,14 @@ def _generate_build_ninja(w: Any, platform: str) -> None:
     cxxflags += ["-fdata-sections", "-ffunction-sections"]
     linkflags += ["$flags"]
     linkflags += ["-Wl,--gc-sections", "-Wl,--fatal-warnings", "-Wl,--no-undefined"]
+    if platform != "android":
+        cxxflags += [f"-mcpu=native"]
     if platform == "android":
         flags += ["--target=aarch64-linux-android35"]
         cxxflags += ["-DANDROID"]
         linkflags += ["-static-libstdc++"]
-    if platform == "android":
         libs += ["-llog", "-static-openmp"]
-    if cxx == "clang++":
+    if "clang++" in cxx:
         flags += ["-stdlib=libc++"]
     flags += ["-fopenmp"]
 
@@ -188,6 +190,13 @@ def _generate_build_ninja(w: Any, platform: str) -> None:
         deps="gcc",
     )
     w.rule(
+        "compile_asm",
+        command="$cxx -MMD -MT $out -MF $out.d $cxxflags -S $in -o $out",
+        description="ASM $out",
+        depfile="$out.d",
+        deps="gcc",
+    )
+    w.rule(
         "linkexe",
         command="$cxx $in $linkflags -o $out $libs",
         description="LINKEXE $out",
@@ -207,10 +216,22 @@ def _generate_build_ninja(w: Any, platform: str) -> None:
     # Objects
     for cpp, obj, vars in (v for vs in root_to_files.values() for v in vs):
         w.build(obj, "compile", cpp, variables=vars)
+        w.build(
+            f"{obj}.s",
+            "compile_asm",
+            cpp,
+            variables={
+                **vars,
+                "cxxflags": [
+                    f for f in vars.get("cxxflags", cxxflags) if f not in ["-g"]
+                ],
+            },
+        )
     w.newline()
 
     # Programs & shared libraries
     binaries = [
+        ("cli", "linkexe", ["core", "lib"]),
         ("benchmark", "linkexe", ["core", "lib", "benchmark"]),
         ("tests", "linkexe", ["core", "lib", "benchmark", "tests", "catch"]),
         ("libsquashed-llama.so", "linkso", ["core", "lib"]),
@@ -229,7 +250,8 @@ def _generate_build_ninja(w: Any, platform: str) -> None:
 
 
 @cli("targets", nargs="*", help="build targets")
-def build(platforms: List[str], targets: List[str]) -> None:
+@cli("-v", "--verbose", action="store_true", help="enable verbose output")
+def build(platforms: List[str], targets: List[str], verbose: bool) -> None:
     """build C++ code"""
     third_party = str(Path(__file__).parent / "third-party")
     if third_party not in sys.path:
@@ -241,7 +263,10 @@ def build(platforms: List[str], targets: List[str]) -> None:
         root.mkdir(parents=True, exist_ok=True)
         with (root / "build.ninja").open("w") as file:
             _generate_build_ninja(ninja_syntax.Writer(file), platform)
-        _run(["ninja", "-C", root, *targets], stdout_to_stderr=True)
+        _run(
+            ["ninja", "-C", root, *targets, "--verbose" if verbose else None],
+            stdout_to_stderr=True,
+        )
 
 
 @cli(
@@ -253,7 +278,7 @@ def build(platforms: List[str], targets: List[str]) -> None:
 @cli("--gdb", action="store_true", help="run under gdb")
 def tests(platforms: List[str], gdb: bool, args: List[str]) -> None:
     """run unit tests"""
-    build(platforms=platforms, targets=["tests", "testdata.bin"])
+    build(platforms=platforms, targets=["tests", "testdata.bin"], verbose=False)
     for platform in platforms:
         testdata = BUILD / platform / "testdata.bin"
         if platform == "android":
@@ -271,7 +296,7 @@ def tests(platforms: List[str], gdb: bool, args: List[str]) -> None:
 @cli("--gdb", action="store_true", help="run under gdb")
 def run(platforms: List[str], program: str, gdb: bool, args: List[str]) -> None:
     """build and run the given program"""
-    build(platforms=platforms, targets=[program])
+    build(platforms=platforms, targets=[program], verbose=False)
     for platform in platforms:
         _run_target(
             [BUILD / platform / program, *args], env={}, platform=platform, gdb=gdb
