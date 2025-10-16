@@ -18,7 +18,7 @@ sudo apt install clang clang-format gdb libc++-dev libopenmp-dev ninja-build
 # If android: install NDK to /opt/android-sdk/ndk/latest
 ```
 
-## Profiling using perf
+### Profiling using perf
 
 Install `linux-tools-generic`. On AWS Graviton, you may have to `sudo ln -s /usr/lib/linux-tools-6.8.0-85/perf /usr/local/bin/perf` and `rm /usr/bin/perf`.
 

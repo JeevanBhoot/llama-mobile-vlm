@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 
 import argparse
-import platform
+import contextlib
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Callable, Iterable, List, TypeVar
+from typing import Any, Callable, Iterable, List, TextIO, TypeVar
 
 
 ###############################################################################
@@ -17,21 +17,25 @@ T = TypeVar("T")
 
 
 def _run(
-    command: Iterable[Any], env: dict[str, str] = {}, stdout_to_stderr: bool = False
+    command: Iterable[Any],
+    env: dict[str, str] = {},
+    stdout: Path | TextIO | None = None,
 ) -> None:
     """Run a command, terminating on failure."""
-    cmd = [str(arg) for arg in command if arg is not None]
-    print("$ " + " ".join(cmd), file=sys.stderr)
-    environ = os.environ.copy()
-    environ["PYTHONPATH"] = f"{os.getcwd()}:{environ.get('PYTHONPATH', '')}"
-    environ.update(env)
-    exit_code = subprocess.call(
-        cmd,
-        env=environ,
-        stdout=(sys.stderr if stdout_to_stderr else None),
-    )
-    if exit_code:
-        sys.exit(exit_code)
+    with contextlib.ExitStack() as stack:
+        cmd = [str(arg) for arg in command if arg is not None]
+        print(
+            "$ " + " ".join(cmd) + (f" > {stdout}" if isinstance(stdout, Path) else ""),
+            file=sys.stderr,
+        )
+        if isinstance(stdout, Path):
+            stdout = stack.enter_context(stdout.open("w"))
+        environ = os.environ.copy()
+        environ["PYTHONPATH"] = f"{os.getcwd()}:{environ.get('PYTHONPATH', '')}"
+        environ.update(env)
+        exit_code = subprocess.call(cmd, env=environ, stdout=stdout)
+        if exit_code:
+            sys.exit(exit_code)
 
 
 def _push_to_device(src: Path) -> Path:
@@ -126,7 +130,7 @@ def clean(platforms: List[str]) -> None:
         BUILD.rmdir()
 
 
-def _generate_build_ninja(w: Any, platform: str) -> None:
+def _generate_build_ninja(w: Any, platform: str, gprof: bool) -> None:
     cxx = (
         ANDROID_NDK / "toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
         if platform == "android"
@@ -151,6 +155,9 @@ def _generate_build_ninja(w: Any, platform: str) -> None:
     if "clang++" in cxx:
         flags += ["-stdlib=libc++"]
     flags += ["-fopenmp"]
+    if gprof:
+        flags += ["-pg"]
+        cxxflags += ["-fno-omit-frame-pointer"]
 
     root_to_files = {}  # [root] -> (src, obj, {variable: value})
     for root in ["benchmark", "core", "lib", "programs", "tests"]:
@@ -245,8 +252,9 @@ def _generate_build_ninja(w: Any, platform: str) -> None:
 
 
 @cli("targets", nargs="*", help="build targets")
+@cli("--gprof", action="store_true", help="enable gprof")
 @cli("-v", "--verbose", action="store_true", help="enable verbose output")
-def build(platforms: List[str], targets: List[str], verbose: bool) -> None:
+def build(platforms: List[str], targets: List[str], gprof: bool, verbose: bool) -> None:
     """build C++ code"""
     if str(THIRD_PARTY.absolute()) not in sys.path:
         sys.path.append(str(THIRD_PARTY.absolute()))
@@ -261,10 +269,10 @@ def build(platforms: List[str], targets: List[str], verbose: bool) -> None:
                 link.unlink()
             link.symlink_to(source_dir.absolute())
         with (root / "build.ninja").open("w") as file:
-            _generate_build_ninja(ninja_syntax.Writer(file), platform)
+            _generate_build_ninja(ninja_syntax.Writer(file), platform, gprof=gprof)
         _run(
             ["ninja", "-C", root, *targets, "--verbose" if verbose else None],
-            stdout_to_stderr=True,
+            stdout=sys.stderr,
         )
 
 
@@ -274,10 +282,16 @@ def build(platforms: List[str], targets: List[str], verbose: bool) -> None:
     help="arguments for Catch2"
     "(https://github.com/catchorg/Catch2/blob/devel/docs/command-line.md)",
 )
+@cli("--gprof", action="store_true", help="enable gprof")
 @cli("--gdb", action="store_true", help="run under gdb")
-def tests(platforms: List[str], gdb: bool, args: List[str]) -> None:
+def tests(platforms: List[str], gprof: bool, gdb: bool, args: List[str]) -> None:
     """run unit tests"""
-    build(platforms=platforms, targets=["tests", "testdata.bin"], verbose=False)
+    build(
+        platforms=platforms,
+        targets=["tests", "testdata.bin"],
+        gprof=gprof,
+        verbose=False,
+    )
     for platform in platforms:
         testdata = BUILD / platform / "testdata.bin"
         if platform == "android":
@@ -292,14 +306,18 @@ def tests(platforms: List[str], gdb: bool, args: List[str]) -> None:
 
 @cli("program", help="program to run (see src/programs)")
 @cli("args", nargs="*", help="arguments")
+@cli("--gprof", action="store_true", help="enable gprof")
 @cli("--gdb", action="store_true", help="run under gdb")
-def run(platforms: List[str], program: str, gdb: bool, args: List[str]) -> None:
+def run(
+    platforms: List[str], program: str, gprof: bool, gdb: bool, args: List[str]
+) -> None:
     """build and run the given program"""
-    build(platforms=platforms, targets=[program], verbose=False)
+    build(platforms=platforms, targets=[program], gprof=gprof, verbose=False)
     for platform in platforms:
-        _run_target(
-            [BUILD / platform / program, *args], env={}, platform=platform, gdb=gdb
-        )
+        build_dir = BUILD / platform
+        _run_target([build_dir / program, *args], env={}, platform=platform, gdb=gdb)
+        if gprof and platform != "android":
+            _run(["gprof", build_dir / program], stdout=build_dir / f"{program}.gprof")
 
 
 @cli("-i", "--incremental", action="store_true", help="disable 'clean' before build")
