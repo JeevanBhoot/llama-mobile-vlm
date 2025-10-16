@@ -1,5 +1,6 @@
 #include "bench_model.hpp"
 #include "benchmark.hpp"
+#include "core/ops.hpp"
 
 #include <omp.h>
 #include <sstream>
@@ -205,14 +206,7 @@ Model Dummy::createModel(const Dummy::Config& c) {
     auto nParameters = countParameters(m);
     m._data = tensor::Buffer(sizeof(bf16) * nParameters);
     auto buffer = reinterpret_cast<bf16*>(m._data.get());
-#pragma omp parallel
-    {
-        std::default_random_engine rng(c.seed + static_cast<ulong>(omp_get_thread_num()));
-#pragma omp for schedule(static)
-        for (auto i = 0ul; i < nParameters; ++i) {
-            buffer[i] = floatToBf16(std::normal_distribution<float>(0, 0.02f)(rng));
-        }
-    }
+    ops::randn(buffer, nParameters, 0.02f, c.seed);
 
     // Create tensor views
     auto ptr = buffer;

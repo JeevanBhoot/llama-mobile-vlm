@@ -47,6 +47,8 @@ void attentionInPlace(bf16* queryOut,
 
 // Special ops
 
+void randn(bf16* out, ulong n, float stddev, ulong seed);
+
 uint sample(const bf16* logits,
             uint n,
             float temperature,

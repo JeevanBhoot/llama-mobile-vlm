@@ -1,5 +1,6 @@
 #include "ops.hpp"
 
+#include <omp.h>
 #include <algorithm>
 #include <cmath>
 
@@ -225,6 +226,17 @@ void attentionInPlace(bf16* __restrict__ queryOut,
 }
 
 // Special ops
+
+void randn(bf16* out, ulong n, float stddev, ulong seed) {
+#pragma omp parallel
+    {
+        std::default_random_engine rng(seed + static_cast<ulong>(omp_get_thread_num()));
+#pragma omp for schedule(static)
+        for (auto i = 0ul; i < n; ++i) {
+            out[i] = floatToBf16(std::normal_distribution<float>(0, stddev)(rng));
+        }
+    }
+}
 
 uint sample(const bf16* logits,
             uint n,

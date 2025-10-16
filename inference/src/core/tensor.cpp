@@ -236,6 +236,12 @@ TensorV unsqueeze(const TensorV& tensor, const std::vector<uint>& indices) {
     return TensorV{tensor.data, shape};
 }
 
+Tensor randn(Shape shape, float stddev, ulong seed) {
+    auto t = empty<bf16>(std::move(shape));
+    ops::randn(data<bf16>(t), prod(t.shape), stddev, seed);
+    return t;
+}
+
 Tensor clone(const TensorV& tensor) {
     return std::visit(
         [&](auto& d) {

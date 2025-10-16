@@ -17,8 +17,7 @@ TEST_CASE("squash::tensor::creation") {
     }
 
     // randn()
-    std::default_random_engine rng(123);
-    x = randn<float>({55}, rng, 1.0f);
+    x = randn({55}, 1.0f, 123);
     REQUIRE(x.shape == Shape({55}));
 }
 

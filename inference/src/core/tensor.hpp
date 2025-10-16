@@ -74,8 +74,7 @@ template <class T>
 Tensor create(const std::vector<T>& data);
 template <class T>
 Tensor zeros(Shape shape);
-template <class T>
-Tensor randn(Shape shape, std::default_random_engine& rng, float stddev);
+Tensor randn(Shape shape, float stddev, ulong seed);
 
 // Data movement and type conversion
 Tensor clone(const TensorV& tensor);
@@ -151,14 +150,6 @@ template <class T>
 Tensor zeros(Shape shape) {
     auto t = empty<T>(std::move(shape));
     std::fill_n(data<T>(t), prod(t.shape), cast<T>(0.0f));
-    return t;
-}
-
-template <class T>
-Tensor randn(Shape shape, std::default_random_engine& rng, float stddev) {
-    auto t = empty<T>(std::move(shape));
-    auto dist = std::normal_distribution<float>(0, stddev);
-    std::generate_n(data<T>(t), prod(t.shape), [&] { return cast<T>(dist(rng)); });
     return t;
 }
 
