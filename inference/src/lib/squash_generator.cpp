@@ -94,8 +94,8 @@ Tensor preprocess(const VisionModel& model, const Image& image) {
     const auto dChannel = 3;
     const auto dPatch = model.dPatch;
 
-    auto result = empty<float>({nPatch * nPatch, dChannel * dPatch * dPatch});
-    auto ptr = data<float>(result);
+    auto result = empty<bf16>({nPatch * nPatch, dChannel * dPatch * dPatch});
+    auto ptr = data<bf16>(result);
     const auto nStride = dChannel * dPatch * dPatch;
     const auto cStride = dPatch * dPatch;
     for (auto n = 0u; n < nPatch * nPatch; ++n) {
@@ -105,7 +105,7 @@ Tensor preprocess(const VisionModel& model, const Image& image) {
                 auto y = (n / nPatch) * dPatch + (i / dPatch);
                 auto px = resized.data[y * (resized.width * dChannel) + x * dChannel + c];
                 ptr[n * nStride + c * cStride + i] =
-                    (px / 255.0f - model.imageMean[c]) / model.imageStd[c];
+                    floatToBf16((px / 255.0f - model.imageMean[c]) / model.imageStd[c]);
             }
         }
     }
@@ -124,8 +124,8 @@ void resetCache(Generator& g, uint dSequenceMax) {
     const auto& textModel = g.model.textModel;
     for (auto i = 0u; i < textModel.dLayers; ++i) {
         g.kvCache.entries.push_back(
-            {empty<float>({dSequenceMax, textModel.dAttentionKV, textModel.dAttentionHead}),
-             empty<float>({dSequenceMax, textModel.dAttentionKV, textModel.dAttentionHead})});
+            {empty<bf16>({dSequenceMax, textModel.dAttentionKV, textModel.dAttentionHead}),
+             empty<bf16>({dSequenceMax, textModel.dAttentionKV, textModel.dAttentionHead})});
     }
 }
 
@@ -165,11 +165,11 @@ Tensor forwardImage(Generator& g, const TensorV& image) {
     auto x = projection(
         reshape(model.patchEmbedding, {model.dModel, 3 * model.dPatch * model.dPatch}), image);
     // Lookup {aspectRatioID = 0, tileIndex = 0}
-    x = add(std::move(x), castFloat(indexLeading(model.positionalEmbedding, {0, 0})));
-    x = concat({unsqueeze(castFloat(indexLeading(model.classEmbedding, {0, 0})), {0}), x}, 0);
+    x = add(std::move(x), indexLeading(model.positionalEmbedding, {0, 0}));
+    x = concat({unsqueeze(indexLeading(model.classEmbedding, {0, 0}), {0}), x}, 0);
     x = layerNorm(model.layerNormPre.weight, model.layerNormPre.bias, x, model.normEpsilon);
 
-    auto out = tile(castFloat(model.multiModalProjector.bias), {x.shape[0]});
+    auto out = tile(model.multiModalProjector.bias, {x.shape[0]});
 
     // First transformer stack
     for (auto i = 0u; i < model.dLayers0; ++i) {

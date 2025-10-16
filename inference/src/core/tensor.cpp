@@ -265,16 +265,22 @@ void assign(const TensorV& tensor, const TensorV& src) {
             << ", src.shape: " << src.shape;
         throw std::invalid_argument(err.str());
     }
-    ops::copy(data<float>(src), prod(src.shape), data<float>(tensor));
+    ops::copy(data<bf16>(src), prod(src.shape), data<bf16>(tensor));
 }
 
 Tensor castFloat(const TensorV& tensor) {
+    if (std::holds_alternative<_data::Flat<float>>(tensor.data)) {
+        return clone(tensor);
+    }
     auto out = empty<float>({tensor.shape.begin(), tensor.shape.end()});
     ops::castFloat(data<bf16>(tensor), data<float>(out), prod(out.shape));
     return out;
 }
 
 Tensor castBf16(const TensorV& tensor) {
+    if (std::holds_alternative<_data::Flat<bf16>>(tensor.data)) {
+        return clone(tensor);
+    }
     auto out = empty<bf16>({tensor.shape.begin(), tensor.shape.end()});
     ops::castBf16(data<float>(tensor), data<bf16>(out), prod(out.shape));
     return out;
@@ -315,12 +321,12 @@ Tensor concat(const std::vector<TensorV>& tensors, uint dim) {
     // Allocate result & concatenate via strided-copy
     auto shape = tensors[0].shape;
     shape[dim] = dConcat;
-    auto out = empty<float>(std::move(shape));
+    auto out = empty<bf16>(std::move(shape));
     auto dimIndex = 0u;
     for (auto& t : tensors) {
         auto dChunk = dTrailing * t.shape[dim];
-        ops::copyStrided(data<float>(t), dLeading, dChunk, dChunk, dTrailing * dConcat,
-                         data<float>(out) + dimIndex * dTrailing);
+        ops::copyStrided(data<bf16>(t), dLeading, dChunk, dChunk, dTrailing * dConcat,
+                         data<bf16>(out) + dimIndex * dTrailing);
         dimIndex += t.shape[dim];
     }
     return out;
@@ -329,10 +335,10 @@ Tensor concat(const std::vector<TensorV>& tensors, uint dim) {
 Tensor tile(const TensorV& tensor, const std::vector<uint>& reps) {
     auto shape = reps;
     shape.insert(shape.end(), tensor.shape.begin(), tensor.shape.end());
-    auto out = empty<float>(std::move(shape));
+    auto out = empty<bf16>(std::move(shape));
     auto dim = prod(tensor.shape);
     for (auto i = 0u; i < prod(reps); ++i) {
-        ops::copy(data<float>(tensor), dim, data<float>(out) + i * dim);
+        ops::copy(data<bf16>(tensor), dim, data<bf16>(out) + i * dim);
     }
     return out;
 }
@@ -343,7 +349,7 @@ Tensor add(Tensor&& x, const TensorV& y) {
         err << "add: shapes don't match, x.shape: " << x.shape << " and y.shape: " << y.shape;
         throw std::invalid_argument(err.str());
     }
-    ops::addInPlace(data<float>(x), data<float>(y), prod(x.shape));
+    ops::addInPlace(data<bf16>(x), data<bf16>(y), prod(x.shape));
     return std::move(x);
 }
 
@@ -353,12 +359,12 @@ Tensor broadcastAdd(Tensor&& x, const TensorV& y) {
         err << "broadcastAdd: bad shapes " << x.shape << " and " << y.shape;
         throw std::invalid_argument(err.str());
     }
-    ops::broadcastAddInPlace(data<float>(x), data<bf16>(y), prod(x.shape) / y.shape[0], y.shape[0]);
+    ops::broadcastAddInPlace(data<bf16>(x), data<bf16>(y), prod(x.shape) / y.shape[0], y.shape[0]);
     return std::move(x);
 }
 
 Tensor gelu(Tensor&& x) {
-    ops::geluInPlace(data<float>(x), prod(x.shape));
+    ops::geluInPlace(data<bf16>(x), prod(x.shape));
     return std::move(x);
 }
 
@@ -368,7 +374,7 @@ Tensor swiGlu(Tensor&& x, const TensorV& gate) {
         err << "swiGlu: bad shapes x: " << x.shape << ", gate: " << gate.shape;
         throw std::invalid_argument(err.str());
     }
-    ops::swiGluInPlace(data<float>(x), data<float>(gate), prod(x.shape));
+    ops::swiGluInPlace(data<bf16>(x), data<bf16>(gate), prod(x.shape));
     return std::move(x);
 }
 
@@ -378,9 +384,9 @@ Tensor rmsNorm(const TensorV& weight, const TensorV& x, float epsilon) {
         err << "rmsNorm: bad shapes weight: " << weight.shape << ", x: " << x.shape;
         throw std::invalid_argument(err.str());
     }
-    auto out = empty<float>({x.shape.begin(), x.shape.end()});
-    ops::rmsNorm(data<bf16>(weight), data<float>(x), prod(x.shape) / x.shape.back(), x.shape.back(),
-                 epsilon, data<float>(out));
+    auto out = empty<bf16>({x.shape.begin(), x.shape.end()});
+    ops::rmsNorm(data<bf16>(weight), data<bf16>(x), prod(x.shape) / x.shape.back(), x.shape.back(),
+                 epsilon, data<bf16>(out));
     return out;
 }
 
@@ -392,9 +398,9 @@ Tensor layerNorm(const TensorV& weight, const TensorV& bias, const TensorV& x, f
             << ", x: " << x.shape;
         throw std::invalid_argument(err.str());
     }
-    auto out = empty<float>({x.shape.begin(), x.shape.end()});
-    ops::layerNorm(data<bf16>(weight), data<bf16>(bias), data<float>(x),
-                   prod(x.shape) / x.shape.back(), x.shape.back(), epsilon, data<float>(out));
+    auto out = empty<bf16>({x.shape.begin(), x.shape.end()});
+    ops::layerNorm(data<bf16>(weight), data<bf16>(bias), data<bf16>(x),
+                   prod(x.shape) / x.shape.back(), x.shape.back(), epsilon, data<bf16>(out));
     return out;
 }
 
@@ -404,9 +410,9 @@ Tensor embeddingLookup(const TensorV& weight, const std::vector<uint>& tokens) {
         err << "embeddingLookup: expected 2D weight, weight.shape: " << weight.shape;
         throw std::invalid_argument(err.str());
     }
-    auto out = empty<float>({uint(tokens.size()), weight.shape[1]});
+    auto out = empty<bf16>({uint(tokens.size()), weight.shape[1]});
     ops::gather(data<bf16>(weight), tokens.data(), uint(tokens.size()), weight.shape[1],
-                data<float>(out));
+                data<bf16>(out));
     return out;
 }
 
@@ -417,9 +423,9 @@ Tensor projection(const TensorV& weight, const TensorV& x) {
             << ", expected (dOut, dIn) and (batch, dIn)";
         throw std::invalid_argument(err.str());
     }
-    auto out = empty<float>({x.shape[0], weight.shape[0]});
-    ops::matmulT(data<float>(x), data<bf16>(weight), x.shape[0], x.shape[1], weight.shape[0],
-                 data<float>(out));
+    auto out = empty<bf16>({x.shape[0], weight.shape[0]});
+    ops::matmulT(data<bf16>(x), data<bf16>(weight), x.shape[0], x.shape[1], weight.shape[0],
+                 data<bf16>(out));
     return out;
 }
 
@@ -431,7 +437,7 @@ Tensor rotate(Tensor&& x, const std::vector<float>& freq, uint offset) {
         throw std::invalid_argument(err.str());
     }
     auto dH = prod(x.shape) / (x.shape[0] * x.shape.back());
-    ops::rotateInPlace(data<float>(x), freq.data(), offset, /*dS*/ x.shape[0],
+    ops::rotateInPlace(data<bf16>(x), freq.data(), offset, /*dS*/ x.shape[0],
                        /*dH*/ dH, /*dim*/ x.shape.back());
     return std::move(x);
 }
@@ -447,7 +453,7 @@ Tensor attention(Tensor&& query, const TensorV& key, const TensorV& value, bool 
             << "; expected query: (dSq, dHkv, dHq, dim) and key,value: (dSkv, dHkv, dim)";
         throw std::invalid_argument(err.str());
     }
-    ops::attentionInPlace(data<float>(query), data<float>(key), data<float>(value),
+    ops::attentionInPlace(data<bf16>(query), data<bf16>(key), data<bf16>(value),
                           /*dSq*/ query.shape[0],
                           /*dSkv*/ key.shape[0], /*dHq*/ query.shape[2],
                           /*dHkv*/ query.shape[1], /*dim*/ query.shape[3], causal);
@@ -464,7 +470,7 @@ uint sample(const TensorV& logits,
         err << "sample: expected logits to be 1D, logits.shape: " << logits.shape;
         throw std::invalid_argument(err.str());
     }
-    return ops::sample(data<float>(logits), logits.shape[0], temperature, topK, topP, rng);
+    return ops::sample(data<bf16>(logits), logits.shape[0], temperature, topK, topP, rng);
 }
 
 }  // namespace squash::tensor

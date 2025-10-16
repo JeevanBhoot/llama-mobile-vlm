@@ -23,7 +23,7 @@ TEST_CASE("squash::tensor::creation") {
 }
 
 TEST_CASE("squash::tensor::basic") {
-    auto x = create(std::vector<float>({1, 2, 3, 4, 5, 6}));
+    auto x = castBf16(create(std::vector<float>({1, 2, 3, 4, 5, 6})));
 
     // reshape()
     x = reshape(std::move(x), {3, 2});
@@ -37,14 +37,14 @@ TEST_CASE("squash::tensor::basic") {
 
     // Helper function
     auto _t = [](const std::vector<float>& v, const Shape& shape) {
-        return reshape(create(v), shape);
+        return castBf16(reshape(create(v), shape));
     };
 
     // indexLeading()
-    REQUIRE_TENSOR_APPROX_EQUALS(indexLeading(x, {1}), _t({3, 4}, {2}), 0.0);
+    REQUIRE_TENSOR_APPROX_EQUALS(indexLeading(x, {1}), _t({3, 4}, {2}), 1e-6);
 
     // slice0()
-    REQUIRE_TENSOR_APPROX_EQUALS(slice0(x, 1, 3), _t({3, 4, 5, 6}, {2, 2}), 0.0);
+    REQUIRE_TENSOR_APPROX_EQUALS(slice0(x, 1, 3), _t({3, 4, 5, 6}, {2, 2}), 1e-6);
 
     // clone(), assign()
     auto y = clone(x);
@@ -60,7 +60,7 @@ TEST_CASE("squash::tensor::sample") {
     std::vector<float> logitsData;
     std::transform(ps.begin(), ps.end(), std::back_inserter(logitsData),
                    [](float v) { return 10 + std::log(v); });
-    auto logits = create(logitsData);
+    auto logits = castBf16(create(logitsData));
 
     std::default_random_engine rng(1234);
     const auto sampleN = 1000u;

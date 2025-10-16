@@ -24,6 +24,7 @@ struct TestCase {
             .shape = info.at("shape").template get<Shape>(),
         };
     }
+    Tensor tensor_bf16(const std::string& name) const { return castBf16(tensor(name)); }
 
     template <typename T>
     T scalar(const std::string& name) const {
@@ -41,6 +42,7 @@ struct TestCase {
 };
 
 void runTest(const TestCase& test) {
+    const auto DefaultTol = 0.05;
     if (false) {
         // dummy
 
@@ -51,56 +53,57 @@ void runTest(const TestCase& test) {
         REQUIRE_TENSOR_APPROX_EQUALS(castFloat(castBf16(xFloat)), xBf16, 0.0);
 
     } else if (test.op == "concat2") {
-        auto output = concat({test.tensor("t0"), test.tensor("t1")}, test.scalar<uint>("dim"));
-        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
+        auto output =
+            concat({test.tensor_bf16("t0"), test.tensor_bf16("t1")}, test.scalar<uint>("dim"));
+        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor_bf16("output"), DefaultTol);
 
     } else if (test.op == "tile") {
-        auto output = tile(test.tensor("tensor"), test.list<uint>("reps"));
-        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
+        auto output = tile(test.tensor_bf16("tensor"), test.list<uint>("reps"));
+        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor_bf16("output"), DefaultTol);
 
     } else if (test.op == "add") {
-        auto output = add(clone(test.tensor("x")), test.tensor("y"));
-        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
+        auto output = add(test.tensor_bf16("x"), test.tensor_bf16("y"));
+        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor_bf16("output"), DefaultTol);
 
     } else if (test.op == "broadcastAdd") {
-        auto output = broadcastAdd(clone(test.tensor("x")), castBf16(test.tensor("y")));
-        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
+        auto output = broadcastAdd(test.tensor_bf16("x"), test.tensor_bf16("y"));
+        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor_bf16("output"), DefaultTol);
 
     } else if (test.op == "gelu") {
-        auto output = gelu(clone(test.tensor("x")));
-        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
+        auto output = gelu(test.tensor_bf16("x"));
+        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor_bf16("output"), DefaultTol);
 
     } else if (test.op == "swiGlu") {
-        auto output = swiGlu(clone(test.tensor("x")), test.tensor("gate"));
-        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
+        auto output = swiGlu(test.tensor_bf16("x"), test.tensor_bf16("gate"));
+        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor_bf16("output"), DefaultTol);
 
     } else if (test.op == "rmsNorm") {
-        auto output = rmsNorm(castBf16(test.tensor("weight")), test.tensor("x"),
+        auto output = rmsNorm(test.tensor_bf16("weight"), test.tensor_bf16("x"),
                               test.scalar<float>("epsilon"));
-        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
+        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor_bf16("output"), DefaultTol);
 
     } else if (test.op == "layerNorm") {
-        auto output = layerNorm(castBf16(test.tensor("weight")), castBf16(test.tensor("bias")),
-                                test.tensor("x"), test.scalar<float>("epsilon"));
-        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
+        auto output = layerNorm(test.tensor_bf16("weight"), test.tensor_bf16("bias"),
+                                test.tensor_bf16("x"), test.scalar<float>("epsilon"));
+        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor_bf16("output"), 0.1);  // extreme value
 
     } else if (test.op == "embeddingLookup") {
-        auto output = embeddingLookup(castBf16(test.tensor("weight")), test.list<uint>("tokens"));
-        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
+        auto output = embeddingLookup(test.tensor_bf16("weight"), test.list<uint>("tokens"));
+        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor_bf16("output"), DefaultTol);
 
     } else if (test.op == "projection") {
-        auto output = projection(castBf16(test.tensor("weight")), test.tensor("x"));
-        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
+        auto output = projection(test.tensor_bf16("weight"), test.tensor_bf16("x"));
+        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor_bf16("output"), DefaultTol);
 
     } else if (test.op == "rotate") {
         auto output =
-            rotate(clone(test.tensor("x")), test.list<float>("freq"), test.scalar<uint>("offset"));
-        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
+            rotate(test.tensor_bf16("x"), test.list<float>("freq"), test.scalar<uint>("offset"));
+        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor_bf16("output"), DefaultTol);
 
     } else if (test.op == "attention") {
-        auto output = attention(clone(test.tensor("query")), test.tensor("key"),
-                                test.tensor("value"), test.scalar<bool>("causal"));
-        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), 0.01);
+        auto output = attention(test.tensor_bf16("query"), test.tensor_bf16("key"),
+                                test.tensor_bf16("value"), test.scalar<bool>("causal"));
+        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor_bf16("output"), DefaultTol);
 
     } else {
         FAIL("Unknown op: " + test.op);

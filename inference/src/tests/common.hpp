@@ -25,8 +25,10 @@ inline void assertTensorApproxEquals(const tensor::TensorV& actual,
             << ", actual: " << actual.shape << "\n";
         throw std::runtime_error(err.str());
     }
-    auto pActual = data<float>(actual);
-    auto pExpected = data<float>(expected);
+    auto fActual = castFloat(actual);
+    auto pActual = data<float>(fActual);
+    auto fExpected = castFloat(expected);
+    auto pExpected = data<float>(fExpected);
     auto nElement = prod(actual.shape);
 
     // Calculate RMS
@@ -40,7 +42,7 @@ inline void assertTensorApproxEquals(const tensor::TensorV& actual,
     std::vector<ulong> badIndices;
     for (auto i = 0u; i < nElement; ++i) {
         auto error = std::abs(static_cast<double>(pActual[i] - pExpected[i])) / rms;
-        if (error > rmsTol * rms) {
+        if (error > rmsTol) {
             badIndices.push_back(i);
         }
     }

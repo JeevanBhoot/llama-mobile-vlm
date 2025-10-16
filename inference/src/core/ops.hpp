@@ -5,37 +5,39 @@
 
 namespace squash::ops {
 
-// Data movement and type conversion
+// Float type
 
 void copy(const float* src, uint n, float* dest);
-void copy(const bf16* src, uint n, bf16* dest);
-// Copies dest[i*sDest + j] = src[i*sSrc + j], for i in [0, n), j in [0, d)
-void copyStrided(const float* src, uint n, uint d, uint sSrc, uint sDest, float* dest);
 void castFloat(const bf16* in, float* out, uint n);
 void castBf16(const float* in, bf16* out, uint n);
 
+// Data movement
+
+void copy(const bf16* src, uint n, bf16* dest);
+// Copies dest[i*sDest + j] = src[i*sSrc + j], for i in [0, n), j in [0, d)
+void copyStrided(const bf16* src, uint n, uint d, uint sSrc, uint sDest, bf16* dest);
+
 // Maths/NN ops
 
-void addInPlace(float* x, const float* y, uint n);
-void broadcastAddInPlace(float* x, const bf16* y, uint n, uint d);
-void geluInPlace(float* x, uint n);
-void swiGluInPlace(float* x, const float* gate, uint n);
-void rmsNorm(const bf16* weight, const float* x, uint batch, uint dim, float epsilon, float* out);
+void addInPlace(bf16* x, const bf16* y, uint n);
+void broadcastAddInPlace(bf16* x, const bf16* y, uint n, uint d);
+void geluInPlace(bf16* x, uint n);
+void swiGluInPlace(bf16* x, const bf16* gate, uint n);
+void rmsNorm(const bf16* weight, const bf16* x, uint batch, uint dim, float epsilon, bf16* out);
 void layerNorm(const bf16* weight,
                const bf16* bias,
-               const float* x,
+               const bf16* x,
                uint batch,
                uint dim,
                float epsilon,
-               float* out);
-void gather(const bf16* weight, const uint* indices, uint nIndices, uint dim, float* out);
+               bf16* out);
+void gather(const bf16* weight, const uint* indices, uint nIndices, uint dim, bf16* out);
 // lhs {dM, dK}, rhs {dN, dK}, out {dM, dN}
-void matmulT(const float* lhs, const bf16* rhs, uint dM, uint dK, uint dN, float* out);
-void rotateInPlace(float* x, const float* freq, uint offsetS, uint dS, uint dH, uint dim);
-void softmaxInPlace(float* x, uint batch, uint dim);
-void attentionInPlace(float* queryOut,
-                      const float* key,
-                      const float* value,
+void matmulT(const bf16* lhs, const bf16* rhs, uint dM, uint dK, uint dN, bf16* out);
+void rotateInPlace(bf16* x, const float* freq, uint offsetS, uint dS, uint dH, uint dim);
+void attentionInPlace(bf16* queryOut,
+                      const bf16* key,
+                      const bf16* value,
                       uint dSq,   // sequence length (query)
                       uint dSkv,  // sequence length (key-value)
                       uint dHq,   // heads (query)
@@ -45,7 +47,7 @@ void attentionInPlace(float* queryOut,
 
 // Special ops
 
-uint sample(const float* logits,
+uint sample(const bf16* logits,
             uint n,
             float temperature,
             uint topK,

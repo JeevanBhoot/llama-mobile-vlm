@@ -12,7 +12,7 @@ REGISTER_BENCHMARK(mlp)(const benchmarking::Report& report) {
     uint dModel = 2048;
     uint dFFN = 8192;
 
-    auto inputs = tensor::randn<float>({batchSize, dModel}, rng, 1.0f);
+    auto inputs = tensor::randn<bf16>({batchSize, dModel}, rng, 1.0f);
     auto wUp = tensor::randn<bf16>({dFFN, dModel}, rng, 0.02f);
     auto wGate = tensor::clone(wUp);  // save RNG time
     auto wDown = tensor::reshape(tensor::clone(wUp), {dModel, dFFN});

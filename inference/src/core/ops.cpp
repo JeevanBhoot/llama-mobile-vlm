@@ -5,17 +5,31 @@
 
 namespace squash::ops {
 
-// Data movement and type conversion
+// Float type
 
 void copy(const float* src, uint n, float* dest) {
     std::copy_n(src, n, dest);
 }
 
+void castFloat(const bf16* in, float* out, uint n) {
+    for (uint i = 0; i < n; ++i) {
+        out[i] = cast<float>(in[i]);
+    }
+}
+
+void castBf16(const float* in, bf16* out, uint n) {
+    for (uint i = 0; i < n; ++i) {
+        out[i] = cast<bf16>(in[i]);
+    }
+}
+
+// Data movement and type conversion
+
 void copy(const bf16* src, uint n, bf16* dest) {
     std::copy_n(src, n, dest);
 }
 
-void copyStrided(const float* src, uint n, uint d, uint sSrc, uint sDest, float* dest) {
+void copyStrided(const bf16* src, uint n, uint d, uint sSrc, uint sDest, bf16* dest) {
     for (uint i = 0; i < n; ++i) {
         for (uint j = 0; j < d; ++j) {
             dest[i * sDest + j] = src[i * sSrc + j];
@@ -23,88 +37,82 @@ void copyStrided(const float* src, uint n, uint d, uint sSrc, uint sDest, float*
     }
 }
 
-void castFloat(const bf16* in, float* out, uint n) {
-    for (uint i = 0; i < n; ++i) {
-        out[i] = bf16ToFloat(in[i]);
-    }
-}
-
-void castBf16(const float* in, bf16* out, uint n) {
-    for (uint i = 0; i < n; ++i) {
-        out[i] = floatToBf16(in[i]);
-    }
-}
-
 // Maths/NN ops
 
-void addInPlace(float* __restrict__ x, const float* __restrict__ y, const uint n) {
+void addInPlace(bf16* __restrict__ x, const bf16* __restrict__ y, const uint n) {
     for (auto i = 0u; i < n; ++i) {
-        x[i] += y[i];
+        x[i] = cast<bf16>(cast<float>(x[i]) + cast<float>(y[i]));
     }
 }
 
-void broadcastAddInPlace(float* __restrict__ x, const bf16* __restrict__ y, uint n, uint d) {
+void broadcastAddInPlace(bf16* __restrict__ x, const bf16* __restrict__ y, uint n, uint d) {
     for (auto i = 0u; i < n; ++i) {
         for (auto j = 0u; j < d; ++j) {
-            x[i * d + j] += bf16ToFloat(y[j]);
+            auto idx = i * d + j;
+            x[idx] = cast<bf16>(cast<float>(x[idx]) + cast<float>(y[j]));
         }
     }
 }
 
-void geluInPlace(float* x, uint n) {
+void geluInPlace(bf16* x, uint n) {
     // As per torch's 'approximate' GELU
     const float c0 = std::sqrtf(2.0f / M_PIf);
     const float c1 = 0.044715f;
     for (auto i = 0u; i < n; ++i) {
-        float z = std::tanhf(c0 * (x[i] + c1 * x[i] * x[i] * x[i]));
-        x[i] = 0.5f * x[i] * (1.0f + z);
+        float xi = cast<float>(x[i]);
+        float z = std::tanhf(c0 * (xi + c1 * xi * xi * xi));
+        x[i] = cast<bf16>(0.5f * xi * (1.0f + z));
     }
 }
 
-void swiGluInPlace(float* __restrict__ x, const float* __restrict__ gate, const uint n) {
+void swiGluInPlace(bf16* __restrict__ x, const bf16* __restrict__ gate, const uint n) {
     for (auto i = 0u; i < n; ++i) {
-        x[i] *= gate[i] / (1 + std::exp(-gate[i]));
+        auto gi = cast<float>(gate[i]);
+        auto xi = cast<float>(x[i]);
+        x[i] = cast<bf16>(xi * gi / (1 + std::exp(-gi)));
     }
 }
 
 void rmsNorm(const bf16* __restrict__ weight,
-             const float* __restrict__ x,
+             const bf16* __restrict__ x,
              const uint batch,
              const uint dim,
              float epsilon,
-             float* __restrict__ out) {
+             bf16* __restrict__ out) {
     for (auto n = 0u; n < batch; ++n) {
         auto xn = x + n * dim;
         float sumSq = 0;
         for (auto i = 0u; i < dim; ++i) {
-            sumSq += xn[i] * xn[i];
+            auto xi = cast<float>(xn[i]);
+            sumSq += xi * xi;
         }
         float scale = 1 / std::sqrt(sumSq / float(dim) + epsilon);
         for (auto i = 0u; i < dim; ++i) {
-            out[n * dim + i] = xn[i] * scale * bf16ToFloat(weight[i]);
+            out[n * dim + i] = cast<bf16>(cast<float>(xn[i]) * scale * cast<float>(weight[i]));
         }
     }
 }
 
 void layerNorm(const bf16* __restrict__ weight,
                const bf16* __restrict__ bias,
-               const float* x,
+               const bf16* __restrict__ x,
                uint batch,
                uint dim,
                float epsilon,
-               float* __restrict__ out) {
+               bf16* __restrict__ out) {
     for (auto n = 0u; n < batch; ++n) {
         auto xn = x + n * dim;
         float sum = 0, sumSq = 0;
         for (auto i = 0u; i < dim; ++i) {
-            sum += xn[i];
-            sumSq += xn[i] * xn[i];
+            auto xi = cast<float>(xn[i]);
+            sum += xi;
+            sumSq += xi * xi;
         }
         float mean = sum / float(dim);
         float scale = 1 / std::sqrt(sumSq / float(dim) - mean * mean + epsilon);
         for (auto i = 0u; i < dim; ++i) {
-            float normed = (xn[i] - mean) * scale;
-            out[n * dim + i] = normed * bf16ToFloat(weight[i]) + bf16ToFloat(bias[i]);
+            float normed = (cast<float>(xn[i]) - mean) * scale;
+            out[n * dim + i] = cast<bf16>(normed * cast<float>(weight[i]) + cast<float>(bias[i]));
         }
     }
 }
@@ -113,33 +121,33 @@ void gather(const bf16* __restrict__ weight,
             const uint* __restrict__ indices,
             const uint nIndices,
             const uint dim,
-            float* __restrict__ out) {
+            bf16* __restrict__ out) {
     for (auto n = 0u; n < nIndices; ++n) {
         for (auto i = 0u; i < dim; ++i) {
-            out[n * dim + i] = bf16ToFloat(weight[indices[n] * dim + i]);
+            out[n * dim + i] = weight[indices[n] * dim + i];
         }
     }
 }
 
-void matmulT(const float* __restrict__ lhs,
+void matmulT(const bf16* __restrict__ lhs,
              const bf16* __restrict__ rhs,
              const uint dM,
              const uint dK,
              const uint dN,
-             float* __restrict__ out) {
+             bf16* __restrict__ out) {
 #pragma omp parallel for
     for (auto n = 0u; n < dN; ++n) {
         for (auto m = 0u; m < dM; ++m) {
             float dot = 0;
             for (auto k = 0u; k < dK; ++k) {
-                dot += lhs[m * dK + k] * bf16ToFloat(rhs[n * dK + k]);
+                dot += cast<float>(lhs[m * dK + k]) * cast<float>(rhs[n * dK + k]);
             }
-            out[m * dN + n] = dot;
+            out[m * dN + n] = cast<bf16>(dot);
         }
     }
 }
 
-void rotateInPlace(float* __restrict__ x,
+void rotateInPlace(bf16* __restrict__ x,
                    const float* __restrict__ freq,
                    const uint offsetS,
                    const uint dS,
@@ -150,12 +158,12 @@ void rotateInPlace(float* __restrict__ x,
             for (auto i = 0u; i < dim / 2; ++i) {
                 auto idxRe = s * (dH * dim) + h * (dim) + i;
                 auto idxIm = idxRe + dim / 2;
-                auto re = x[idxRe];
-                auto im = x[idxIm];
+                auto re = cast<float>(x[idxRe]);
+                auto im = cast<float>(x[idxIm]);
                 auto cos = std::cos(freq[i] * float(s + offsetS));
                 auto sin = std::sin(freq[i] * float(s + offsetS));
-                x[idxRe] = cos * re - sin * im;
-                x[idxIm] = cos * im + sin * re;
+                x[idxRe] = cast<bf16>(cos * re - sin * im);
+                x[idxIm] = cast<bf16>(cos * im + sin * re);
             }
         }
     }
@@ -176,9 +184,9 @@ void softmaxInPlace(float* __restrict__ x, const uint batch, const uint dim) {
     }
 }
 
-void attentionInPlace(float* __restrict__ queryOut,
-                      const float* __restrict__ key,
-                      const float* __restrict__ value,
+void attentionInPlace(bf16* __restrict__ queryOut,
+                      const bf16* __restrict__ key,
+                      const bf16* __restrict__ value,
                       const uint dSq,
                       const uint dSkv,
                       const uint dHq,
@@ -194,9 +202,9 @@ void attentionInPlace(float* __restrict__ queryOut,
                 for (auto sKv = 0u; sKv < dSkv_row; ++sKv) {
                     float dot = 0;
                     for (auto i = 0u; i < dim; ++i) {
-                        dot +=
-                            queryOut[sQ * (dHkv * dHq * dim) + hKv * (dHq * dim) + hQ * (dim) + i] *
-                            key[sKv * (dHkv * dim) + hKv * (dim) + i];
+                        dot += cast<float>(queryOut[sQ * (dHkv * dHq * dim) + hKv * (dHq * dim) +
+                                                    hQ * (dim) + i]) *
+                               cast<float>(key[sKv * (dHkv * dim) + hKv * (dim) + i]);
                     }
                     scores[sKv] = dot / std::sqrt(float(dim));
                 }
@@ -205,9 +213,11 @@ void attentionInPlace(float* __restrict__ queryOut,
                 for (auto i = 0u; i < dim; ++i) {
                     float dot = 0;
                     for (auto sKv = 0u; sKv < dSkv_row; ++sKv) {
-                        dot += scores[sKv] * value[sKv * (dHkv * dim) + hKv * (dim) + i];
+                        dot +=
+                            scores[sKv] * cast<float>(value[sKv * (dHkv * dim) + hKv * (dim) + i]);
                     }
-                    queryOut[sQ * (dHkv * dHq * dim) + hKv * (dHq * dim) + hQ * (dim) + i] = dot;
+                    queryOut[sQ * (dHkv * dHq * dim) + hKv * (dHq * dim) + hQ * (dim) + i] =
+                        cast<bf16>(dot);
                 }
             }
         }
@@ -216,7 +226,7 @@ void attentionInPlace(float* __restrict__ queryOut,
 
 // Special ops
 
-uint sample(const float* logits,
+uint sample(const bf16* logits,
             uint n,
             float temperature,
             uint topK,
@@ -225,10 +235,13 @@ uint sample(const float* logits,
     // Compute the safe log-softmax normaliser
     std::vector<std::tuple<float, uint>> logitsAndIndices;
     logitsAndIndices.reserve(n);
-    auto maxLogit = *std::max_element(logits, logits + n);
+    auto maxLogit = cast<float>(logits[0]);
+    for (auto i = 1u; i < n; ++i) {
+        maxLogit = std::max(maxLogit, cast<float>(logits[i]));
+    }
     auto sumExp = 0.f;
     for (auto i = 0u; i < n; ++i) {
-        auto x = logits[i] - maxLogit;
+        auto x = cast<float>(logits[i]) - maxLogit;
         logitsAndIndices.push_back({x, i});
         sumExp += std::exp(x);
     }
