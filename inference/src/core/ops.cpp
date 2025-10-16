@@ -17,13 +17,13 @@ void copy(const float* src, uint n, float* dest) {
 
 void castFloat(const bf16* in, float* out, uint n) {
     for (uint i = 0; i < n; ++i) {
-        out[i] = cast<float>(in[i]);
+        out[i] = float(in[i]);
     }
 }
 
 void castBf16(const float* in, bf16* out, uint n) {
     for (uint i = 0; i < n; ++i) {
-        out[i] = cast<bf16>(in[i]);
+        out[i] = bf16(in[i]);
     }
 }
 
@@ -48,7 +48,7 @@ void copyStrided(const bf16* src, uint n, uint d, uint sSrc, uint sDest, bf16* d
 
 void addInPlace(bf16* __restrict__ x, const bf16* __restrict__ y, const uint n) {
     for (auto i = 0u; i < n; ++i) {
-        x[i] = cast<bf16>(cast<float>(x[i]) + cast<float>(y[i]));
+        x[i] = bf16(float(x[i]) + float(y[i]));
     }
 }
 
@@ -56,7 +56,7 @@ void broadcastAddInPlace(bf16* __restrict__ x, const bf16* __restrict__ y, uint 
     for (auto i = 0u; i < n; ++i) {
         for (auto j = 0u; j < d; ++j) {
             auto idx = i * d + j;
-            x[idx] = cast<bf16>(cast<float>(x[idx]) + cast<float>(y[j]));
+            x[idx] = bf16(float(x[idx]) + float(y[j]));
         }
     }
 }
@@ -66,17 +66,16 @@ void geluInPlace(bf16* x, uint n) {
     const float c0 = std::sqrtf(2.0f / M_PIf);
     const float c1 = 0.044715f;
     for (auto i = 0u; i < n; ++i) {
-        float xi = cast<float>(x[i]);
+        float xi = float(x[i]);
         float z = std::tanhf(c0 * (xi + c1 * xi * xi * xi));
-        x[i] = cast<bf16>(0.5f * xi * (1.0f + z));
+        x[i] = bf16(0.5f * xi * (1.0f + z));
     }
 }
 
 void swiGluInPlace(bf16* __restrict__ x, const bf16* __restrict__ gate, const uint n) {
     for (auto i = 0u; i < n; ++i) {
-        auto gi = cast<float>(gate[i]);
-        auto xi = cast<float>(x[i]);
-        x[i] = cast<bf16>(xi * gi / (1 + std::exp(-gi)));
+        auto gi = float(gate[i]);
+        x[i] = bf16(float(x[i]) * gi / (1 + std::exp(-gi)));
     }
 }
 
@@ -90,12 +89,12 @@ void rmsNorm(const bf16* __restrict__ weight,
         auto xn = x + n * dim;
         float sumSq = 0;
         for (auto i = 0u; i < dim; ++i) {
-            auto xi = cast<float>(xn[i]);
+            auto xi = float(xn[i]);
             sumSq += xi * xi;
         }
         float scale = 1 / std::sqrt(sumSq / float(dim) + epsilon);
         for (auto i = 0u; i < dim; ++i) {
-            out[n * dim + i] = cast<bf16>(cast<float>(xn[i]) * scale * cast<float>(weight[i]));
+            out[n * dim + i] = bf16(float(xn[i]) * scale * float(weight[i]));
         }
     }
 }
@@ -111,15 +110,15 @@ void layerNorm(const bf16* __restrict__ weight,
         auto xn = x + n * dim;
         float sum = 0, sumSq = 0;
         for (auto i = 0u; i < dim; ++i) {
-            auto xi = cast<float>(xn[i]);
+            auto xi = float(xn[i]);
             sum += xi;
             sumSq += xi * xi;
         }
         float mean = sum / float(dim);
         float scale = 1 / std::sqrt(sumSq / float(dim) - mean * mean + epsilon);
         for (auto i = 0u; i < dim; ++i) {
-            float normed = (cast<float>(xn[i]) - mean) * scale;
-            out[n * dim + i] = cast<bf16>(normed * cast<float>(weight[i]) + cast<float>(bias[i]));
+            float normed = (float(xn[i]) - mean) * scale;
+            out[n * dim + i] = bf16(normed * float(weight[i]) + float(bias[i]));
         }
     }
 }
@@ -147,9 +146,9 @@ void matmulT(const bf16* __restrict__ lhs,
         for (auto m = 0u; m < dM; ++m) {
             float dot = 0;
             for (auto k = 0u; k < dK; ++k) {
-                dot += cast<float>(lhs[m * dK + k]) * cast<float>(rhs[n * dK + k]);
+                dot += float(lhs[m * dK + k]) * float(rhs[n * dK + k]);
             }
-            out[m * dN + n] = cast<bf16>(dot);
+            out[m * dN + n] = bf16(dot);
         }
     }
 }
@@ -165,12 +164,12 @@ void rotateInPlace(bf16* __restrict__ x,
             for (auto i = 0u; i < dim / 2; ++i) {
                 auto idxRe = s * (dH * dim) + h * (dim) + i;
                 auto idxIm = idxRe + dim / 2;
-                auto re = cast<float>(x[idxRe]);
-                auto im = cast<float>(x[idxIm]);
+                auto re = float(x[idxRe]);
+                auto im = float(x[idxIm]);
                 auto cos = std::cos(freq[i] * float(s + offsetS));
                 auto sin = std::sin(freq[i] * float(s + offsetS));
-                x[idxRe] = cast<bf16>(cos * re - sin * im);
-                x[idxIm] = cast<bf16>(cos * im + sin * re);
+                x[idxRe] = bf16(cos * re - sin * im);
+                x[idxIm] = bf16(cos * im + sin * re);
             }
         }
     }
@@ -213,9 +212,9 @@ void attentionInPlace(bf16* __restrict__ queryOut,
             for (auto sKv = 0u; sKv < dSkv_row; ++sKv) {
                 float dot = 0;
                 for (auto i = 0u; i < dim; ++i) {
-                    dot += cast<float>(queryOut[sQ * (dHkv * dHq * dim) + hKv * (dHq * dim) +
-                                                hQ * (dim) + i]) *
-                           cast<float>(key[sKv * (dHkv * dim) + hKv * (dim) + i]);
+                    dot += float(queryOut[sQ * (dHkv * dHq * dim) + hKv * (dHq * dim) + hQ * (dim) +
+                                          i]) *
+                           float(key[sKv * (dHkv * dim) + hKv * (dim) + i]);
                 }
                 scores[sKv] = dot / std::sqrt(float(dim));
             }
@@ -224,10 +223,9 @@ void attentionInPlace(bf16* __restrict__ queryOut,
             for (auto i = 0u; i < dim; ++i) {
                 float dot = 0;
                 for (auto sKv = 0u; sKv < dSkv_row; ++sKv) {
-                    dot += scores[sKv] * cast<float>(value[sKv * (dHkv * dim) + hKv * (dim) + i]);
+                    dot += scores[sKv] * float(value[sKv * (dHkv * dim) + hKv * (dim) + i]);
                 }
-                queryOut[sQ * (dHkv * dHq * dim) + hKv * (dHq * dim) + hQ * (dim) + i] =
-                    cast<bf16>(dot);
+                queryOut[sQ * (dHkv * dHq * dim) + hKv * (dHq * dim) + hQ * (dim) + i] = bf16(dot);
             }
         }
     }
@@ -241,7 +239,7 @@ void randn(bf16* out, ulong n, float stddev, ulong seed) {
         std::default_random_engine rng(seed + static_cast<ulong>(omp_get_thread_num()));
 #pragma omp for schedule(static)
         for (auto i = 0ul; i < n; ++i) {
-            out[i] = floatToBf16(std::normal_distribution<float>(0, stddev)(rng));
+            out[i] = bf16(std::normal_distribution<float>(0, stddev)(rng));
         }
     }
 }
@@ -255,13 +253,13 @@ uint sample(const bf16* logits,
     // Compute the safe log-softmax normaliser
     std::vector<std::tuple<float, uint>> logitsAndIndices;
     logitsAndIndices.reserve(n);
-    auto maxLogit = cast<float>(logits[0]);
+    auto maxLogit = float(logits[0]);
     for (auto i = 1u; i < n; ++i) {
-        maxLogit = std::max(maxLogit, cast<float>(logits[i]));
+        maxLogit = std::max(maxLogit, float(logits[i]));
     }
     auto sumExp = 0.f;
     for (auto i = 0u; i < n; ++i) {
-        auto x = cast<float>(logits[i]) - maxLogit;
+        auto x = float(logits[i]) - maxLogit;
         logitsAndIndices.push_back({x, i});
         sumExp += std::exp(x);
     }

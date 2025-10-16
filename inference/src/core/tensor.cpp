@@ -67,29 +67,23 @@ Buffer Buffer::copy(ulong size, ulong alignment) const {
 namespace {
 constexpr ulong MaxPrint = 8u;
 
-float toFloat(float v) {
-    return v;
-}
-float toFloat(bf16 v) {
-    return bf16ToFloat(v);
-}
 template <class T>
 void printFlatTensorData(std::ostream& out, const _data::Flat<T>& data, ulong nElements) {
     if (nElements <= MaxPrint) {
         for (auto i = 0u; i < nElements; ++i) {
             if (i) out << ", ";
-            out << toFloat(data.data[i]);
+            out << float(data.data[i]);
         }
     } else {
         for (auto i = 0u; i < MaxPrint / 2; ++i) {
             if (i) out << ", ";
-            out << toFloat(data.data[i]);
+            out << float(data.data[i]);
         }
         out << " ... ";
         auto start2 = nElements - MaxPrint / 2;
         for (auto i = start2; i < nElements; ++i) {
             if (start2 < i) out << ", ";
-            out << toFloat(data.data[i]);
+            out << float(data.data[i]);
         }
     }
 }
@@ -148,7 +142,8 @@ void saveNpy(std::ostream& out, const TensorV& tensor) {
                           static_cast<std::streamsize>(nElement * sizeof(float)));
             } else if constexpr (std::is_same_v<T, _data::Flat<bf16>>) {
                 std::vector<float> fData(nElement);
-                std::transform(data.data, data.data + nElement, fData.data(), bf16ToFloat);
+                std::transform(data.data, data.data + nElement, fData.data(),
+                               [](bf16 x) { return float(x); });
                 out.write(reinterpret_cast<const char*>(fData.data()),
                           static_cast<std::streamsize>(nElement * sizeof(float)));
             } else {

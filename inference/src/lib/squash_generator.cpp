@@ -105,7 +105,7 @@ Tensor preprocess(const VisionModel& model, const Image& image) {
                 auto y = (n / nPatch) * dPatch + (i / dPatch);
                 auto px = resized.data[y * (resized.width * dChannel) + x * dChannel + c];
                 ptr[n * nStride + c * cStride + i] =
-                    floatToBf16((px / 255.0f - model.imageMean[c]) / model.imageStd[c]);
+                    bf16((px / 255.0f - model.imageMean[c]) / model.imageStd[c]);
             }
         }
     }

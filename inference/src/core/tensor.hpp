@@ -149,7 +149,7 @@ Tensor create(const std::vector<T>& data_) {
 template <class T>
 Tensor zeros(Shape shape) {
     auto t = empty<T>(std::move(shape));
-    std::fill_n(data<T>(t), prod(t.shape), cast<T>(0.0f));
+    std::fill_n(data<T>(t), prod(t.shape), T(0.0f));
     return t;
 }
 
