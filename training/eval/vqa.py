@@ -50,23 +50,19 @@ class VQA:
             ds = datasets.load_dataset("lmms-lab/VQAv2", split=split)
 
         ds = ds.select_columns(cols)
+
+        # Add prompt column
+        ds = ds.add_column(
+            name="prompt",
+            column=[cls.QUESTION_TEMPLATE.format(question=q) for q in ds["question"]],
+        )
+
         # NOTE: Images re-appear consequtive questions, best to shuffle
         if shuffle_seed:
             ds = ds.shuffle(shuffle_seed)
 
         if limit is not None:
             ds = ds.select(range(limit))
-
-        # Add prompt column
-        def _add_prompts(batch):
-            qs = batch["question"]
-            return {"prompt": [cls.QUESTION_TEMPLATE.format(question=q) for q in qs]}
-
-        ds = ds.map(
-            _add_prompts,
-            batched=True,
-            batch_size=1000,
-        )
 
         return ds
 

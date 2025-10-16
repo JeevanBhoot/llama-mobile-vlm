@@ -9,6 +9,7 @@ from utility import (
     distributed_batches,
     merge_params_mllama,
     set_padding_side_left,
+    from_dict,
 )
 
 
@@ -79,3 +80,21 @@ def test_merge_params_mllama() -> None:
     with torch.no_grad():
         actual = m(**inp)["last_hidden_state"]
     torch.testing.assert_close(actual, expected, rtol=1e-1, atol=1e-4)
+
+
+def test_from_dict() -> None:
+    from dataclasses import dataclass, asdict
+
+    @dataclass
+    class ConfigB:
+        f1: tuple[float]
+
+    @dataclass
+    class ConfigA:
+        f1: int
+        f2: list[float]
+        f3: ConfigB | None
+
+    cfg = ConfigA(f1=5, f2=[0.3, 0.5, 0.7], f3=ConfigB(f1=(-0.1, -0.3)))
+    d = asdict(cfg)
+    assert cfg == from_dict(ConfigA, d)

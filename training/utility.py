@@ -1,6 +1,8 @@
 import copy
+import dataclasses
 import subprocess
 import tempfile
+import typing
 import unittest.mock as um
 from contextlib import contextmanager
 from pathlib import Path
@@ -9,7 +11,7 @@ from typing import Callable, Iterable, Iterator, Optional, TypeVar
 import safetensors.torch
 import torch
 import weight_formats.quantisation_training as QT
-from torch import nn, Tensor
+from torch import Tensor, nn
 from transformers import MllamaVisionModel, PreTrainedTokenizerBase
 
 T = TypeVar("T")
@@ -154,3 +156,21 @@ def save_params_to_s3(params: dict[str, Tensor], s3_path: str | None) -> None:
         with tempfile.NamedTemporaryFile() as f:
             safetensors.torch.save_file(params, f.name)
             subprocess.check_call(["aws", "s3", "cp", f.name, s3_path])
+
+
+def from_dict(cls, data):
+    """Recursively reconstruct a dataclass from a dict."""
+    args = typing.get_args(cls)
+    if args:
+        dc_args = [a for a in args if dataclasses.is_dataclass(a)]
+        cls = dc_args[0] if len(dc_args) == 1 else cls
+        if len(dc_args) > 1:
+            print(f"Warning: Multiple dataclass types: {dc_args}")
+    if not dataclasses.is_dataclass(cls):
+        return data
+    return cls(
+        **{
+            f.name: (from_dict(f.type, data[f.name]) if f.name in data else None)
+            for f in dataclasses.fields(cls)
+        }
+    )

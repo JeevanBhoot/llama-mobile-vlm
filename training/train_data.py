@@ -139,6 +139,49 @@ class Coco(ImageDataset):
         self.remove_columns = ["objects"]
 
 
+class VQA(ImageDataset):
+    def __init__(self, split: str = "validation"):
+        self.name = "vqav2"
+        self.hf_name = "lmms-lab/VQAv2"
+        self.split = split
+        self.remove_columns = ["image_id", "question", "answers"]
+        self._template = LLAMA_PROMPT_TEMPLATES["instruct"]
+
+    def data(
+        self,
+        prompt_fn: Callable[[int], list[str]] | None,
+        seed: int | None = None,
+        sync: bool = True,
+    ) -> datasets.Dataset:
+        import eval.vqa
+
+        assert prompt_fn is None, "VQA dataset assumes default prompts"
+        if seed is None:
+            print(
+                "Warning: Seed should be specified  to avoid repeated images.",
+                flush=True,
+                file=sys.stderr,
+            )
+
+        data = eval.vqa.VQA.data(
+            shuffle_seed=None, split=self.split, limit=None, load_from_s3=sync
+        )
+
+        data = data.remove_columns(self.remove_columns)
+
+        # Use question_id as the index
+        data = data.rename_column("question_id", "index")
+
+        # Add system template
+        prompts = [self._template.format(prompt=p) for p in data["prompt"]]
+        data = data.remove_columns(["prompt"]).add_column("prompt", prompts)
+
+        if seed is not None:
+            data = data.shuffle(seed)
+
+        return data
+
+
 @dataclass
 class PromptConfig:
     templates: list[str]
@@ -171,7 +214,7 @@ class GenerationConfig:
     model_name: str
     dataset_name: str
     split: str
-    prompt_config: PromptConfig
+    prompt_config: PromptConfig | None
     seed: int | None
     data_range: tuple[int, int] | None
     n_generated_tokens: int
@@ -260,7 +303,11 @@ def _generate_worker(
 
     # NOTE: data method expects prompt_fn with only size argument
     data = IMAGE_DATASETS[config.dataset_name](split=config.split).data(
-        prompt_fn=lambda n: get_prompts(n, **asdict(config.prompt_config)),
+        prompt_fn=(
+            (lambda n: (get_prompts(n, **asdict(config.prompt_config))))
+            if config.prompt_config
+            else None
+        ),
         seed=config.seed,
     )
     if config.data_range is not None:
@@ -346,7 +393,11 @@ def generate_data(
     return dir_path
 
 
-IMAGE_DATASETS: dict[str, ImageDataset] = {"imagenet": ImageNet, "coco": Coco}
+IMAGE_DATASETS: dict[str, ImageDataset] = {
+    "imagenet": ImageNet,
+    "coco": Coco,
+    "vqav2": VQA,
+}
 
 
 @dataclass
@@ -357,11 +408,13 @@ class Datum:
     out: str
 
 
-def load_config(path: str | Path) -> dict[str, Any]:
+def load_config(path: str | Path) -> GenerationConfig:
+    from utility import from_dict
+
     path = Path(path)
     config_path = path / "config.json"
     with open(config_path) as f:
-        return json.loads(f.read())
+        return from_dict(GenerationConfig, json.loads(f.read()))
 
 
 class Dataset:
@@ -376,28 +429,32 @@ class Dataset:
             self._configs.append(config)
 
             data = (
-                IMAGE_DATASETS[config["dataset_name"]](split=config["split"])
+                IMAGE_DATASETS[config.dataset_name](split=config.split)
                 .data(
-                    prompt_fn=lambda n: get_prompts(n, **config["prompt_config"]),
-                    seed=config["seed"],
+                    prompt_fn=(
+                        (lambda n: (get_prompts(n, **asdict(config.prompt_config))))
+                        if config.prompt_config
+                        else None
+                    ),
+                    seed=config.seed,
                 )
-                .select(range(*config["data_range"]))
+                .select(range(*config.data_range))
             )
 
             if n is None:
                 n = len(data)
 
             out_path = path / "out"
-            out = []
+            out = {}
             for filename in out_path.glob("out*.jsonl"):
                 with open(filename) as f:
                     for line in f:
                         idx, text = json.loads(line)
-                        out.append((idx, text))
+                        out[idx] = text
 
-            # This is kinda dangerous - assumes indices are corresponding to data
-            out.sort(key=lambda x: x[0])
-            data = data.add_column(name="out", column=[x[1] for x in out])
+            data = data.add_column(
+                name="out", column=[out[idx] for idx in data["index"]]
+            )
             data_to_concat.append(data.select(range(n)))
 
         self.data = datasets.concatenate_datasets(data_to_concat).shuffle(seed)
