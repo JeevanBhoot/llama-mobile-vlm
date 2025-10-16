@@ -39,6 +39,8 @@ std::ostream& operator<<(std::ostream&, const Benchmark::Measurement&);
 struct Report {
     std::string name;
     bool jsonOutput;
+    Report operator[](const std::string& child) const;
+    void operator()(nlohmann::json result) const;
     void operator()(nlohmann::json::initializer_list_t result) const;
 };
 std::ostream& operator<<(std::ostream&, const Report&);

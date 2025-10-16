@@ -9,7 +9,10 @@ namespace squash::ops {
 // Float type
 
 void copy(const float* src, uint n, float* dest) {
-    std::copy_n(src, n, dest);
+#pragma omp parallel for
+    for (auto i = 0u; i < n; ++i) {
+        dest[i] = src[i];
+    }
 }
 
 void castFloat(const bf16* in, float* out, uint n) {
@@ -27,7 +30,10 @@ void castBf16(const float* in, bf16* out, uint n) {
 // Data movement and type conversion
 
 void copy(const bf16* src, uint n, bf16* dest) {
-    std::copy_n(src, n, dest);
+#pragma omp parallel for
+    for (auto i = 0u; i < n; ++i) {
+        dest[i] = src[i];
+    }
 }
 
 void copyStrided(const bf16* src, uint n, uint d, uint sSrc, uint sDest, bf16* dest) {
@@ -194,32 +200,34 @@ void attentionInPlace(bf16* __restrict__ queryOut,
                       const uint dHkv,
                       const uint dim,
                       const bool causal) {
-    std::unique_ptr<float[]> scores(new float[dSkv]);
-    for (auto hKv = 0u; hKv < dHkv; ++hKv) {
-        for (auto sQ = 0u; sQ < dSq; ++sQ) {
-            for (auto hQ = 0u; hQ < dHq; ++hQ) {
-                auto dSkv_row = causal ? (dSkv + 1 + sQ - dSq) : dSkv;
-                // q @ k.T / sqrt(dim)
-                for (auto sKv = 0u; sKv < dSkv_row; ++sKv) {
-                    float dot = 0;
-                    for (auto i = 0u; i < dim; ++i) {
-                        dot += cast<float>(queryOut[sQ * (dHkv * dHq * dim) + hKv * (dHq * dim) +
-                                                    hQ * (dim) + i]) *
-                               cast<float>(key[sKv * (dHkv * dim) + hKv * (dim) + i]);
-                    }
-                    scores[sKv] = dot / std::sqrt(float(dim));
-                }
-                softmaxInPlace(scores.get(), 1u, dSkv_row);
-                // s @ v
+#pragma omp parallel
+    {
+        std::unique_ptr<float[]> scores(new float[dSkv]);
+#pragma omp for
+        for (auto n = 0u; n < dHkv * dSq * dHq; ++n) {
+            auto hKv = n / (dSq * dHq);
+            auto sQ = (n / dHq) % dSq;
+            auto hQ = n % dHq;
+            auto dSkv_row = causal ? (dSkv + 1 + sQ - dSq) : dSkv;
+            // q @ k.T / sqrt(dim)
+            for (auto sKv = 0u; sKv < dSkv_row; ++sKv) {
+                float dot = 0;
                 for (auto i = 0u; i < dim; ++i) {
-                    float dot = 0;
-                    for (auto sKv = 0u; sKv < dSkv_row; ++sKv) {
-                        dot +=
-                            scores[sKv] * cast<float>(value[sKv * (dHkv * dim) + hKv * (dim) + i]);
-                    }
-                    queryOut[sQ * (dHkv * dHq * dim) + hKv * (dHq * dim) + hQ * (dim) + i] =
-                        cast<bf16>(dot);
+                    dot += cast<float>(queryOut[sQ * (dHkv * dHq * dim) + hKv * (dHq * dim) +
+                                                hQ * (dim) + i]) *
+                           cast<float>(key[sKv * (dHkv * dim) + hKv * (dim) + i]);
                 }
+                scores[sKv] = dot / std::sqrt(float(dim));
+            }
+            softmaxInPlace(scores.get(), 1u, dSkv_row);
+            // s @ v
+            for (auto i = 0u; i < dim; ++i) {
+                float dot = 0;
+                for (auto sKv = 0u; sKv < dSkv_row; ++sKv) {
+                    dot += scores[sKv] * cast<float>(value[sKv * (dHkv * dim) + hKv * (dim) + i]);
+                }
+                queryOut[sQ * (dHkv * dHq * dim) + hKv * (dHq * dim) + hQ * (dim) + i] =
+                    cast<bf16>(dot);
             }
         }
     }

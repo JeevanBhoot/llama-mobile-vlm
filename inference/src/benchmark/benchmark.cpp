@@ -44,12 +44,19 @@ std::ostream& operator<<(std::ostream& out, const Benchmark::Measurement& m) {
     return out << m.mean << " ± " << 2 * m.error;
 }
 
-void Report::operator()(nlohmann::json::initializer_list_t result) const {
+Report Report::operator[](const std::string& child) const {
+    return {name + "." + child, jsonOutput};
+}
+
+void Report::operator()(nlohmann::json json) const {
     if (jsonOutput) {
-        auto j = nlohmann::json(std::move(result));
-        j["benchmark"] = name;
-        std::cout << j.dump() << "\n";
+        json["benchmark"] = name;
+        std::cout << json.dump() << "\n";
     }
+}
+
+void Report::operator()(nlohmann::json::initializer_list_t result) const {
+    operator()(nlohmann::json(result));
 }
 
 std::ostream& operator<<(std::ostream& out, const Report& report) {
