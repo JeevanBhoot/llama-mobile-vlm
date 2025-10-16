@@ -325,8 +325,8 @@ def ci(platforms: List[str], incremental: bool) -> None:
     """run all CI checks"""
     if not incremental:
         clean(platforms=platforms)
-    tests(platforms=platforms, gdb=False, args=[])
-    run(platforms=platforms, program="benchmark", gdb=False, args=[])
+    tests(platforms=platforms, gprof=False, gdb=False, args=[])
+    run(platforms=platforms, program="benchmark", gprof=False, gdb=False, args=[])
 
 
 ################################################################################

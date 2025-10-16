@@ -28,8 +28,8 @@ REGISTER_BENCHMARK(mlp)(const benchmarking::Report& report) {
     }
 
     auto result = benchmark.result();
-    auto flopCount = 2ull * 3ull * static_cast<ulong>(dModel) * static_cast<ulong>(dFFN);
-    auto gflopCount = static_cast<double>(flopCount) / 1e9;
+    auto macCount = 3ull * static_cast<ulong>(dModel) * static_cast<ulong>(dFFN);
+    auto gmacCount = static_cast<double>(macCount) / 1e9;
     auto byteCount =
         sizeof(float) * batchSize * (3 * dModel + 5 * dFFN) + sizeof(bf16) * (3 * dFFN * dModel);
     auto gibCount = static_cast<double>(byteCount) / double(1u << 30);
@@ -38,12 +38,12 @@ REGISTER_BENCHMARK(mlp)(const benchmarking::Report& report) {
         {"d_model", dModel},
         {"d_ffn", dFFN},
         {"time_ms", 1e3 * result.mean},
-        {"flop_count", flopCount},
-        {"compute_gflop_s", gflopCount / result.mean},
+        {"mac_count", macCount},
+        {"compute_gmac_s", gmacCount / result.mean},
         {"transfer_gib_s", gibCount / result.mean},
         {"time", benchmark.times},
     });
-    std::cerr << report << gflopCount / result << " GFLOP/s, " << gibCount / result << " GiB/s\n";
+    std::cerr << report << gmacCount / result << " GMAC/s, " << gibCount / result << " GiB/s\n";
 }
 
 }  // namespace
