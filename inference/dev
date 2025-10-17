@@ -7,8 +7,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Callable, Iterable, List, TextIO, TypeVar
-
+from typing import Any, Callable, Iterable, List, Literal, TextIO, TypeVar
 
 ###############################################################################
 # Common
@@ -61,20 +60,20 @@ def _run_on_device(command: Iterable[Any], env: dict[str, str]) -> None:
     )
 
 
-def _run_under_gdb(command: Iterable[Any], env: dict[str, str]) -> None:
-    """Run under GDB (on host)"""
-    _run(["gdb", "-ex", "run", "--args", *command], env=env)
-
-
 def _run_target(
-    command: Iterable[Any], env: dict[str, str], platform: str, gdb: bool
+    command: Iterable[Any],
+    env: dict[str, str],
+    platform: str,
+    wrap: Literal["perf", "gdb"] | None,
 ) -> None:
     """Run the command on the given platform, optionally under gdb"""
     if platform == "android":
-        assert not gdb, "gdb not supported on android"
+        assert not wrap, "gdb/perf not supported on android"
         _run_on_device(command, env)
-    elif gdb:
-        _run_under_gdb(command, env)
+    elif wrap == "gdb":
+        _run(["gdb", "-ex", "run", "--args", *command], env=env)
+    elif wrap == "perf":
+        _run(["perf", "record", "-g", *command], env=env)
     else:
         _run(command, env)
 
@@ -283,8 +282,13 @@ def build(platforms: List[str], targets: List[str], gprof: bool, verbose: bool) 
     "(https://github.com/catchorg/Catch2/blob/devel/docs/command-line.md)",
 )
 @cli("--gprof", action="store_true", help="enable gprof")
-@cli("--gdb", action="store_true", help="run under gdb")
-def tests(platforms: List[str], gprof: bool, gdb: bool, args: List[str]) -> None:
+@cli("-w", "--wrap", choices=["perf", "gdb"], help="run under perf/gdb")
+def tests(
+    platforms: List[str],
+    gprof: bool,
+    wrap: Literal["perf", "gdb"] | None,
+    args: List[str],
+) -> None:
     """run unit tests"""
     build(
         platforms=platforms,
@@ -300,22 +304,26 @@ def tests(platforms: List[str], gprof: bool, gdb: bool, args: List[str]) -> None
             [BUILD / platform / "tests", *args],
             env=dict(TESTDATA=str(testdata)),
             platform=platform,
-            gdb=gdb,
+            wrap=wrap,
         )
 
 
 @cli("program", help="program to run (see src/programs)")
 @cli("args", nargs="*", help="arguments")
 @cli("--gprof", action="store_true", help="enable gprof")
-@cli("--gdb", action="store_true", help="run under gdb")
+@cli("-w", "--wrap", choices=["perf", "gdb"], help="run under perf/gdb")
 def run(
-    platforms: List[str], program: str, gprof: bool, gdb: bool, args: List[str]
+    platforms: List[str],
+    program: str,
+    gprof: bool,
+    wrap: Literal["perf", "gdb"] | None,
+    args: List[str],
 ) -> None:
     """build and run the given program"""
     build(platforms=platforms, targets=[program], gprof=gprof, verbose=False)
     for platform in platforms:
         build_dir = BUILD / platform
-        _run_target([build_dir / program, *args], env={}, platform=platform, gdb=gdb)
+        _run_target([build_dir / program, *args], env={}, platform=platform, wrap=wrap)
         if gprof and platform != "android":
             _run(["gprof", build_dir / program], stdout=build_dir / f"{program}.gprof")
 
@@ -325,8 +333,8 @@ def ci(platforms: List[str], incremental: bool) -> None:
     """run all CI checks"""
     if not incremental:
         clean(platforms=platforms)
-    tests(platforms=platforms, gprof=False, gdb=False, args=[])
-    run(platforms=platforms, program="benchmark", gprof=False, gdb=False, args=[])
+    tests(platforms=platforms, gprof=False, wrap=None, args=[])
+    run(platforms=platforms, program="benchmark", gprof=False, wrap=None, args=[])
 
 
 ################################################################################
