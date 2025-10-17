@@ -42,7 +42,7 @@ struct ComputeAndTransferBenchmark {
         details["time"] = benchmark.times;
         report(details);
 
-        std::cerr << std::right << std::setw(40) << report << 1e3 * result.mean << " ms, "
+        std::cerr << std::right << std::setw(45) << report << 1e3 * result.mean << " ms, "
                   << gmacCount / result.mean << " GMAC/s, " << gibCount / result.mean << " GiB/s\n";
     }
 };
@@ -67,18 +67,24 @@ REGISTER_BENCHMARK(_tensor_copy)(const benchmarking::Report& report) {
     }
 }
 
-REGISTER_BENCHMARK(_tensor_projection)(const benchmarking::Report& report) {
+REGISTER_BENCHMARK(_tensor_proj)(const benchmarking::Report& report) {
     selectOmpNumThreads();
     std::vector<std::tuple<uint, uint, uint, std::string>> cases = {
         // Sizes for 11B (batchSize, dIn, dOut)
-        {1, 4096, 14336, "text.mlp.up"},  //
-        {1, 14336, 4096, "text.mlp.down"},
-        {1, 4096, 4096, "text.attn.[q,o]"},
-        {1, 4096, 1024, "text.attn.[k,v]"},
-        {1, 4096, 128256, "text.output"},
-        {1601, 1280, 5120, "vision.mlp.up"},
-        {1601, 5120, 1280, "vision.mlp.down"},
-        {1601, 1280, 1280, "vision.attn.[q,k,v,o]"},
+        {1, 4096, 14336, "text.generate.mlp.up"},     //
+        {1, 14336, 4096, "text.generate.mlp.down"},   //
+        {1, 4096, 4096, "text.generate.attn.[q,o]"},  //
+        {1, 4096, 1024, "text.generate.attn.[k,v]"},  //
+        {1, 4096, 128256, "text.generate.predict"},   //
+        //
+        {128, 4096, 14336, "text.prefill.mlp.up"},     //
+        {128, 14336, 4096, "text.prefill.mlp.down"},   //
+        {128, 4096, 4096, "text.prefill.attn.[q,o]"},  //
+        {128, 4096, 1024, "text.prefill.attn.[k,v]"},  //
+        //
+        {1601, 1280, 5120, "vision.mlp.up"},          //
+        {1601, 5120, 1280, "vision.mlp.down"},        //
+        {1601, 1280, 1280, "vision.attn.[q,k,v,o]"},  //
     };
     for (auto [batchSize, dIn, dOut, name] : cases) {
         auto weight = tensor::randn({dOut, dIn}, 1.0f, 0x23f3ac651617c540);

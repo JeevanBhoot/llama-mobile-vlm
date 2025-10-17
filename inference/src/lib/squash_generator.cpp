@@ -152,6 +152,7 @@ void forward(Generator& g, const std::vector<uint>& tokens) {
         }
         x = add(std::move(x), mlp(model, model.layers[i].mlp, x));
     }
+    x = clone(slice0(x, x.shape[0] - 1, x.shape[0]));  // for efficiency, only keep last token
     x = rmsNorm(model.finalNorm, x, model.normEpsilon);
     x = projection(model.predictTokens, x);
     g.kvCache.dSequence += uint(tokens.size());
