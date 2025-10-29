@@ -49,7 +49,7 @@ struct Registry {
     using Fn = void (*)(const Report&);
     std::vector<std::tuple<std::string, Fn>> benchmarks;
 
-    static void run(const std::string& prefix, bool jsonOutput);
+    static void run(const std::string& prefix, bool jsonOutput, uint repeat = 1);
     struct Register {
         Register(const std::string& name, Fn fn);
     };

@@ -50,21 +50,18 @@ struct ComputeAndTransferBenchmark {
 REGISTER_BENCHMARK(_tensor_copy)(const benchmarking::Report& report) {
     selectOmpNumThreads();
 
-    for (auto i = 0; i < 1; ++i) {  // (use loop for temporary testing)
-        // Check cache flushing works: copy speed should not exceed main memory bandwidth
-        // Note - 64 MiB fits in the largest cache of a Graviton 4 CPU
-        const size_t nelement = 64 * 1024 * 1024;
-        auto x = tensor::randn({nelement}, 1.0f, 0x6ab49512d9d3de72);
-        auto y = tensor::clone(x);
+    // Check cache flushing works: copy speed should not exceed main memory bandwidth
+    // Note - 64 MiB fits in the largest cache of a Graviton 4 CPU
+    const size_t nelement = 64 * 1024 * 1024;
+    auto x = tensor::randn({nelement}, 1.0f, 0x6ab49512d9d3de72);
+    auto y = tensor::clone(x);
 
-        ComputeAndTransferBenchmark benchmark{.macCount = 0,
-                                              .byteCount = 2 * sizeof(bf16) * nelement};
-        for (auto rep = 0u; rep < 100u; ++rep) {
-            auto timer = benchmark.record();
-            tensor::assign(y, x);
-        }
-        benchmark.dump(report, {{"nelement", nelement}});
+    ComputeAndTransferBenchmark benchmark{.macCount = 0, .byteCount = 2 * sizeof(bf16) * nelement};
+    for (auto rep = 0u; rep < 100u; ++rep) {
+        auto timer = benchmark.record();
+        tensor::assign(y, x);
     }
+    benchmark.dump(report, {{"nelement", nelement}});
 }
 
 REGISTER_BENCHMARK(_tensor_proj)(const benchmarking::Report& report) {

@@ -63,12 +63,15 @@ std::ostream& operator<<(std::ostream& out, const Report& report) {
     return out << report.name << ": ";
 }
 
-void Registry::run(const std::string& prefix, bool jsonOutput) {
+void Registry::run(const std::string& prefix, bool jsonOutput, uint repeat) {
     auto nRun = 0u;
-    for (const auto& [name, fn] : instance().benchmarks) {
-        if ((prefix.empty() && name.at(0) != '_') || (!prefix.empty() && name.find(prefix) == 0)) {
-            std::cerr << "-- Running benchmark: " << name << "\n";
-            fn(Report{name, jsonOutput});
+    for (uint r = 0; r < repeat; ++r) {
+        for (const auto& [name, fn] : instance().benchmarks) {
+            if ((prefix.empty() && name.at(0) != '_') ||
+                (!prefix.empty() && name.find(prefix) == 0)) {
+                std::cerr << "-- Running benchmark: " << name << "\n";
+                fn(Report{name, jsonOutput});
+            }
             ++nRun;
         }
     }
