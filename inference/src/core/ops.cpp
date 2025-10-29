@@ -144,7 +144,7 @@ namespace {
 
 #if defined(__ARM_NEON)
 
-bf16 dot_product_bf16(const bf16* __restrict__ a, const bf16* __restrict__ b, const uint n) {
+float _dot_product_bf16(const bf16* __restrict__ a, const bf16* __restrict__ b, const uint n) {
     float32x4_t acc = vmovq_n_f32(0.0f);
     for (auto i = 0u; i < n / 8; ++i) {
         acc = vbfdotq_f32(acc, vld1q_bf16(reinterpret_cast<const __bf16*>(a + i * 8)),
@@ -154,17 +154,17 @@ bf16 dot_product_bf16(const bf16* __restrict__ a, const bf16* __restrict__ b, co
     for (auto i = (n / 8) * 8; i < n; ++i) {
         result += float(a[i]) * float(b[i]);
     }
-    return bf16(result);
+    return result;
 }
 
 #else  // !__ARM_NEON
 
-bf16 dot_product_bf16(const bf16* __restrict__ a, const bf16* __restrict__ b, const uint n) {
+float _dot_product_bf16(const bf16* __restrict__ a, const bf16* __restrict__ b, const uint n) {
     float result = 0;
     for (auto i = 0u; i < n; ++i) {
         result += float(a[i]) * float(b[i]);
     }
-    return bf16(result);
+    return result;
 }
 
 #endif  // __ARM_NEON
@@ -180,7 +180,7 @@ void matmulT(const bf16* __restrict__ lhs,
 #pragma omp parallel for
     for (auto n = 0u; n < dN; ++n) {
         for (auto m = 0u; m < dM; ++m) {
-            out[m * dN + n] = dot_product_bf16(&lhs[m * dK], &rhs[n * dK], dK);
+            out[m * dN + n] = bf16(_dot_product_bf16(&lhs[m * dK], &rhs[n * dK], dK));
         }
     }
 }
@@ -207,6 +207,7 @@ void rotateInPlace(bf16* __restrict__ x,
     }
 }
 
+namespace {
 void softmaxInPlace(float* __restrict__ x, const uint batch, const uint dim) {
     for (auto n = 0u; n < batch; ++n) {
         auto xn = x + n * dim;
@@ -221,6 +222,7 @@ void softmaxInPlace(float* __restrict__ x, const uint batch, const uint dim) {
         }
     }
 }
+}  // namespace
 
 void attentionInPlace(bf16* __restrict__ queryOut,
                       const bf16* __restrict__ key,
@@ -234,6 +236,7 @@ void attentionInPlace(bf16* __restrict__ queryOut,
 #pragma omp parallel
     {
         std::unique_ptr<float[]> scores(new float[dSkv]);
+        std::unique_ptr<float[]> outTmp(new float[dim]);
 #pragma omp for
         for (auto n = 0u; n < dHkv * dSq * dHq; ++n) {
             auto hKv = n / (dSq * dHq);
@@ -242,22 +245,22 @@ void attentionInPlace(bf16* __restrict__ queryOut,
             auto dSkv_row = causal ? (dSkv + 1 + sQ - dSq) : dSkv;
             // q @ k.T / sqrt(dim)
             for (auto sKv = 0u; sKv < dSkv_row; ++sKv) {
-                float dot = 0;
-                for (auto i = 0u; i < dim; ++i) {
-                    dot += float(queryOut[sQ * (dHkv * dHq * dim) + hKv * (dHq * dim) + hQ * (dim) +
-                                          i]) *
-                           float(key[sKv * (dHkv * dim) + hKv * (dim) + i]);
-                }
+                float dot = _dot_product_bf16(
+                    &queryOut[sQ * (dHkv * dHq * dim) + hKv * (dHq * dim) + hQ * (dim)],
+                    &key[sKv * (dHkv * dim) + hKv * (dim)], dim);
                 scores[sKv] = dot / std::sqrt(float(dim));
             }
             softmaxInPlace(scores.get(), 1u, dSkv_row);
             // s @ v
-            for (auto i = 0u; i < dim; ++i) {
-                float dot = 0;
-                for (auto sKv = 0u; sKv < dSkv_row; ++sKv) {
-                    dot += scores[sKv] * float(value[sKv * (dHkv * dim) + hKv * (dim) + i]);
+            std::fill_n(outTmp.get(), dim, 0.0f);
+            for (auto sKv = 0u; sKv < dSkv_row; ++sKv) {
+                for (auto i = 0u; i < dim; ++i) {
+                    outTmp[i] += scores[sKv] * float(value[sKv * (dHkv * dim) + hKv * (dim) + i]);
                 }
-                queryOut[sQ * (dHkv * dHq * dim) + hKv * (dHq * dim) + hQ * (dim) + i] = bf16(dot);
+            }
+            for (auto i = 0u; i < dim; ++i) {
+                queryOut[sQ * (dHkv * dHq * dim) + hKv * (dHq * dim) + hQ * (dim) + i] =
+                    bf16(outTmp[i]);
             }
         }
     }
