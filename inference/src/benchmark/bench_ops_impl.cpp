@@ -149,6 +149,13 @@ REGISTER_BENCHMARK(_dot_inst_throughput)(const benchmarking::Report& report) {
     auto outerReps = 100u;
     auto innerReps = 1u << 18;
 
+    auto maxThreads = std::thread::hardware_concurrency();
+    std::vector<uint> nthreadsRange;
+    for (auto t = 1u; t < maxThreads; t *= 4u) {
+        nthreadsRange.push_back(t);
+    }
+    nthreadsRange.push_back(maxThreads);
+
     struct OpTest {
         std::string instruction;
         uint macsPerLoop;
@@ -282,24 +289,31 @@ REGISTER_BENCHMARK(_dot_inst_throughput)(const benchmarking::Report& report) {
                      }});
 
     for (auto& test : tests) {
-        benchmarking::Benchmark benchmark;
-        for (auto rep = 0u; rep < outerReps; ++rep) {
-            auto timer = benchmark.record();
-            test.fn();
-        }
+        for (auto threads : nthreadsRange) {
+            benchmarking::Benchmark benchmark;
+            for (auto rep = 0u; rep < outerReps; ++rep) {
+                auto timer = benchmark.record();
+#pragma omp parallel for num_threads(threads) schedule(static)
+                for (auto i = 0u; i < threads; ++i) {
+                    test.fn();
+                }
+            }
 
-        auto result = benchmark.result();
-        auto macs = innerReps * test.macsPerLoop;
-        report({
-            {"instruction", test.instruction},
-            {"inner_reps", innerReps},
-            {"time_ms", 1e3 * result.mean},
-            {"mac_count", macs},
-            {"gmac_s", static_cast<double>(macs) / 1e9 / result.mean},
-            {"time", benchmark.times},
-        });
-        std::cerr << report << test.instruction << "  " << static_cast<double>(macs) / 1e9 / result
-                  << " GMAC/s\n";
+            auto result = benchmark.result();
+            auto macs = threads * innerReps * static_cast<ulong>(test.macsPerLoop);
+            report({
+                {"instruction", test.instruction},
+                {"threads", threads},
+                {"inner_reps", innerReps},
+                {"time_ms", 1e3 * result.mean},
+                {"mac_count", macs},
+                {"gmac_s", static_cast<double>(macs) / 1e9 / result.mean},
+                {"time", benchmark.times},
+            });
+            std::cerr << report << test.instruction << "  "
+                      << static_cast<double>(macs) / 1e9 / result << " GMAC/s, with " << threads
+                      << " threads\n";
+        }
     }
 }
 

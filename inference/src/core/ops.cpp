@@ -3,6 +3,11 @@
 #include <omp.h>
 #include <algorithm>
 #include <cmath>
+#include <iostream>
+
+#ifdef __ARM_NEON
+#include <arm_neon.h>
+#endif  // __ARM_NEON
 
 namespace squash::ops {
 
@@ -135,6 +140,37 @@ void gather(const bf16* __restrict__ weight,
     }
 }
 
+namespace {
+
+#if defined(__ARM_NEON)
+
+bf16 dot_product_bf16(const bf16* __restrict__ a, const bf16* __restrict__ b, const uint n) {
+    float32x4_t acc = vmovq_n_f32(0.0f);
+    for (auto i = 0u; i < n / 8; ++i) {
+        acc = vbfdotq_f32(acc, vld1q_bf16(reinterpret_cast<const __bf16*>(a + i * 8)),
+                          vld1q_bf16(reinterpret_cast<const __bf16*>(b + i * 8)));
+    }
+    float result = vaddvq_f32(acc);
+    for (auto i = (n / 8) * 8; i < n; ++i) {
+        result += float(a[i]) * float(b[i]);
+    }
+    return bf16(result);
+}
+
+#else  // !__ARM_NEON
+
+bf16 dot_product_bf16(const bf16* __restrict__ a, const bf16* __restrict__ b, const uint n) {
+    float result = 0;
+    for (auto i = 0u; i < n; ++i) {
+        result += float(a[i]) * float(b[i]);
+    }
+    return bf16(result);
+}
+
+#endif  // __ARM_NEON
+
+}  // namespace
+
 void matmulT(const bf16* __restrict__ lhs,
              const bf16* __restrict__ rhs,
              const uint dM,
@@ -144,11 +180,7 @@ void matmulT(const bf16* __restrict__ lhs,
 #pragma omp parallel for
     for (auto n = 0u; n < dN; ++n) {
         for (auto m = 0u; m < dM; ++m) {
-            float dot = 0;
-            for (auto k = 0u; k < dK; ++k) {
-                dot += float(lhs[m * dK + k]) * float(rhs[n * dK + k]);
-            }
-            out[m * dN + n] = bf16(dot);
+            out[m * dN + n] = dot_product_bf16(&lhs[m * dK], &rhs[n * dK], dK);
         }
     }
 }
