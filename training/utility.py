@@ -166,11 +166,19 @@ def from_dict(cls, data):
         cls = dc_args[0] if len(dc_args) == 1 else cls
         if len(dc_args) > 1:
             print(f"Warning: Multiple dataclass types: {dc_args}")
+
+    # Handle the case where tuple was converted to a list
+    if isinstance(data, list) and (
+        cls is tuple  # tuple
+        or typing.get_origin(cls) is tuple  # tuple[int, int]
+        or any(
+            a is tuple or typing.get_origin(a) is tuple for a in args
+        )  # tuple[int, int] | None
+    ):
+        return tuple(data)
+
     if not dataclasses.is_dataclass(cls):
         return data
     return cls(
-        **{
-            f.name: (from_dict(f.type, data[f.name]) if f.name in data else None)
-            for f in dataclasses.fields(cls)
-        }
+        **{f.name: (from_dict(f.type, data[f.name])) for f in dataclasses.fields(cls)}
     )

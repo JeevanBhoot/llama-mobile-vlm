@@ -245,27 +245,29 @@ def run_downstream(
 
     results = {}
     for task in tasks:
-        if task.name == "vqa":
-            data = vqa.VQA.data(limit=task.n_examples).shard(
-                num_shards=world_size, index=rank
-            )
-            out = list(
-                vqa.evaluate(
-                    model,
-                    processor,
-                    data,
-                    local_batch_size,
-                    disable_progress=bool(rank),
-                )
-            )
-            results["vqa"] = {}
-            for metric_name in ["accuracy", "accuracy_easy"]:
-                metric = torch.tensor([x[metric_name] for x in out]).mean()
-                dist.all_reduce(metric, dist.ReduceOp.AVG)
-                results["vqa"][metric_name] = metric
-        else:
-            # TODO: Reasonable default data mix for outcompare
+        if task.name not in vqa.TASKS:
             raise NotImplementedError
+
+        data = (
+            vqa.TASKS[task.name]
+            .data(limit=task.n_examples)
+            .shard(num_shards=world_size, index=rank)
+        )
+        out = list(
+            vqa.evaluate(
+                model,
+                processor,
+                task.name,
+                data,
+                local_batch_size,
+                disable_progress=bool(rank),
+            )
+        )
+        results[task.name] = {}
+        for metric in vqa.TASKS[task.name].METRICS:
+            m = torch.tensor([x[metric] for x in out]).mean()
+            dist.all_reduce(m, dist.ReduceOp.AVG)
+            results[task.name][metric] = m
 
     if rank == 0:
         return results

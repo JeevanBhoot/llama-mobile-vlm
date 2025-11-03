@@ -85,16 +85,29 @@ def test_merge_params_mllama() -> None:
 def test_from_dict() -> None:
     from dataclasses import dataclass, asdict
 
+    # Check for various type hints
     @dataclass
     class ConfigB:
-        f1: tuple[float]
+        f1: tuple
+        f2: tuple | None
+        f3: tuple[int, int]
+        f4: tuple[int, int] | None
 
     @dataclass
     class ConfigA:
-        f1: int
-        f2: list[float]
+        f1: float
+        f2: list[int]
         f3: ConfigB | None
 
-    cfg = ConfigA(f1=5, f2=[0.3, 0.5, 0.7], f3=ConfigB(f1=(-0.1, -0.3)))
+    cfg = ConfigA(
+        f1=0.5,
+        f2=[1, 2],
+        f3=ConfigB(f1=(1,), f2=(2,), f3=(3, 4), f4=(5, 6)),
+    )
     d = asdict(cfg)
+
+    # NOTE: tuple -> list happens when loading from json!
+    for k in d["f3"]:
+        d["f3"][k] = list(d["f3"][k])
+
     assert cfg == from_dict(ConfigA, d)
