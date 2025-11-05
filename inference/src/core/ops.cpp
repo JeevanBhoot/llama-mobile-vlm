@@ -144,17 +144,138 @@ namespace {
 
 #if defined(__ARM_NEON)
 
-float _dot_product_bf16(const bf16* __restrict__ a, const bf16* __restrict__ b, const uint n) {
+float _dot_product_bf16(const bf16* __restrict__ a, const bf16* __restrict__ b, const uint dK) {
     float32x4_t acc = vmovq_n_f32(0.0f);
-    for (auto i = 0u; i < n / 8; ++i) {
-        acc = vbfdotq_f32(acc, vld1q_bf16(reinterpret_cast<const __bf16*>(a + i * 8)),
-                          vld1q_bf16(reinterpret_cast<const __bf16*>(b + i * 8)));
+    // Main loop, process 8 elements per iteration
+    const auto kStop = (dK / 8) * 8;
+    for (auto k = 0u; k < kStop; k += 8) {
+        auto ai = vld1q_bf16(reinterpret_cast<const __bf16*>(a + k));
+        auto bi = vld1q_bf16(reinterpret_cast<const __bf16*>(b + k));
+        acc = vbfdotq_f32(acc, ai, bi);
     }
+    // Handle remainder when dK is not a multiple of 8
     float result = vaddvq_f32(acc);
-    for (auto i = (n / 8) * 8; i < n; ++i) {
-        result += float(a[i]) * float(b[i]);
+    for (auto k = kStop; k < dK; ++k) {
+        result += float(a[k]) * float(b[k]);
     }
     return result;
+}
+
+template <uint BlockM, uint BlockN>
+void _matmulT_chunk_bfmmla(const __bf16* __restrict__ a,
+                           const __bf16* __restrict__ b,
+                           const uint dK,
+                           const uint dN,
+                           __bf16* __restrict__ out) {
+    // Note: we expect all BlockM, BlockN loops to be unrolled
+    static_assert(BlockM % 2 == 0 && BlockN % 2 == 0, "BlockM and BlockN must be even");
+
+    // Each accumulator holds a 2x2 result, accumulated over the full `k` dimension
+    float32x4_t accs[(BlockM / 2) * (BlockN / 2)];
+    for (auto i = 0u; i < (BlockM / 2) * (BlockN / 2); ++i) {
+        accs[i] = vmovq_n_f32(0.0f);
+    }
+    // Main loop, process `(m, k, n) = (BlockM, 8, BlockN)` elements per iteration
+    const auto kStop = (dK / 8) * 8;
+    for (auto k = 0u; k < kStop; k += 8) {
+        bfloat16x8_t aa[BlockM], bb[BlockN];
+        for (auto m = 0u; m < BlockM; ++m) {
+            aa[m] = vld1q_bf16(&a[m * dK + k]);
+        }
+        for (auto n = 0u; n < BlockN; ++n) {
+            bb[n] = vld1q_bf16(&b[n * dK + k]);
+        }
+        for (auto m = 0u; m < (BlockM / 2); ++m) {
+            for (auto n = 0u; n < (BlockN / 2); ++n) {
+                auto& acc = accs[m * (BlockN / 2) + n];
+                acc = vbfmmlaq_f32(
+                    acc, vcombine_bf16(vget_low_bf16(aa[2 * m]), vget_low_bf16(aa[2 * m + 1])),
+                    vcombine_bf16(vget_low_bf16(bb[2 * n]), vget_low_bf16(bb[2 * n + 1])));
+                acc = vbfmmlaq_f32(
+                    acc, vcombine_bf16(vget_high_bf16(aa[2 * m]), vget_high_bf16(aa[2 * m + 1])),
+                    vcombine_bf16(vget_high_bf16(bb[2 * n]), vget_high_bf16(bb[2 * n + 1])));
+            }
+        }
+    }
+    // Handle remainder when dK is not a multiple of 8
+    for (auto k = kStop; k < dK; ++k) {
+        for (auto m = 0u; m < (BlockM / 2); ++m) {
+            for (auto n = 0u; n < (BlockN / 2); ++n) {
+                auto& acc = accs[m * (BlockN / 2) + n];
+                float a0 = float(a[(2 * m + 0) * dK + k]);
+                float a1 = float(a[(2 * m + 1) * dK + k]);
+                float b0 = float(b[(2 * n + 0) * dK + k]);
+                float b1 = float(b[(2 * n + 1) * dK + k]);
+                acc = vmlaq_f32(acc, float32x4_t{a0, a0, a1, a1}, float32x4_t{b0, b1, b0, b1});
+            }
+        }
+    }
+    // Store out results, a BlockM x BlockN matrix
+    for (auto m = 0u; m < (BlockM / 2); ++m) {
+        for (auto n = 0u; n < (BlockN / 2); ++n) {
+            auto acc_bf16 = vcvt_bf16_f32(accs[m * (BlockN / 2) + n]);
+            vst1_lane_bf16(&out[(2 * m + 0) * dN + (2 * n + 0)], acc_bf16, 0);
+            vst1_lane_bf16(&out[(2 * m + 0) * dN + (2 * n + 1)], acc_bf16, 1);
+            vst1_lane_bf16(&out[(2 * m + 1) * dN + (2 * n + 0)], acc_bf16, 2);
+            vst1_lane_bf16(&out[(2 * m + 1) * dN + (2 * n + 1)], acc_bf16, 3);
+        }
+    }
+}
+
+void _matmulT(const bf16* __restrict__ a,
+              const bf16* __restrict__ b,
+              const uint dM,
+              const uint dK,
+              const uint dN,
+              bf16* __restrict__ out) {
+    // Matrix-vector case
+    if (dM == 1 || dN == 1) {
+#pragma omp parallel for
+        for (auto i = 0u; i < dM * dN; ++i) {
+            auto m = i / dN;
+            auto n = i % dN;
+            out[m * dN + n] = bf16(_dot_product_bf16(&a[m * dK], &b[n * dK], dK));
+        }
+        return;
+    }
+
+    constexpr auto G0 = 16u;  // block size
+    constexpr auto G1 = 8u;   // inner block size
+
+    const auto blocksM = (dM + G0 - 1) / G0;
+    const auto blocksN = (dN + G0 - 1) / G0;
+
+#pragma omp parallel for
+    for (auto i0 = 0u; i0 < blocksM * blocksN; ++i0) {
+        auto m0 = G0 * (i0 / blocksN);
+        auto m1 = std::min(m0 + G0, dM);
+        auto n0 = G0 * (i0 % blocksN);
+        auto n1 = std::min(n0 + G0, dN);
+
+        // Main loop
+        auto mStop = (m1 / G1) * G1;
+        auto nStop = (n1 / G1) * G1;
+        for (auto n = n0; n < nStop; n += G1) {
+            for (auto m = m0; m < mStop; m += G1) {
+                _matmulT_chunk_bfmmla<G1, G1>(reinterpret_cast<const __bf16*>(&a[m * dK]),
+                                              reinterpret_cast<const __bf16*>(&b[n * dK]), dK, dN,
+                                              reinterpret_cast<__bf16*>(&out[m * dN + n]));
+            }
+        }
+        // Handle remainder when dN is not a multiple of G1, `out[m0:m1, nStop:n1]`
+        for (auto n = nStop; n < n1; ++n) {
+            for (auto m = m0; m < m1; ++m) {
+                out[m * dN + n] = bf16(_dot_product_bf16(&a[m * dK], &b[n * dK], dK));
+            }
+        }
+        // Handle remainder when dM is not a multiple of G1, `out[mStop:m1, n0:nStop]`
+        // (note: excludes the bottom-right corner which is handled in the loop above)
+        for (auto m = mStop; m < m1; ++m) {
+            for (auto n = n0; n < nStop; ++n) {
+                out[m * dN + n] = bf16(_dot_product_bf16(&a[m * dK], &b[n * dK], dK));
+            }
+        }
+    }
 }
 
 #else  // !__ARM_NEON
@@ -167,6 +288,20 @@ float _dot_product_bf16(const bf16* __restrict__ a, const bf16* __restrict__ b, 
     return result;
 }
 
+void _matmulT(const bf16* __restrict__ lhs,
+              const bf16* __restrict__ rhs,
+              const uint dM,
+              const uint dK,
+              const uint dN,
+              bf16* __restrict__ out) {
+#pragma omp parallel for
+    for (auto n = 0u; n < dN; ++n) {
+        for (auto m = 0u; m < dM; ++m) {
+            out[m * dN + n] = bf16(_dot_product_bf16(&lhs[m * dK], &rhs[n * dK], dK));
+        }
+    }
+}
+
 #endif  // __ARM_NEON
 
 }  // namespace
@@ -177,12 +312,7 @@ void matmulT(const bf16* __restrict__ lhs,
              const uint dK,
              const uint dN,
              bf16* __restrict__ out) {
-#pragma omp parallel for
-    for (auto n = 0u; n < dN; ++n) {
-        for (auto m = 0u; m < dM; ++m) {
-            out[m * dN + n] = bf16(_dot_product_bf16(&lhs[m * dK], &rhs[n * dK], dK));
-        }
-    }
+    _matmulT(lhs, rhs, dM, dK, dN, out);
 }
 
 void rotateInPlace(bf16* __restrict__ x,

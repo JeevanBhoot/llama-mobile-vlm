@@ -67,7 +67,7 @@ REGISTER_BENCHMARK(_tensor_copy)(const benchmarking::Report& report) {
 REGISTER_BENCHMARK(_tensor_proj)(const benchmarking::Report& report) {
     selectOmpNumThreads();
     std::vector<std::tuple<uint, uint, uint, std::string>> cases = {
-        // Sizes for 11B (batchSize, dIn, dOut)
+        // Sizes for 11B (batchSize, dIn, dOut) == (dM, dK, dN)
         {1, 4096, 14336, "text.generate.mlp.up"},     //
         {1, 14336, 4096, "text.generate.mlp.down"},   //
         {1, 4096, 4096, "text.generate.attn.[q,o]"},  //

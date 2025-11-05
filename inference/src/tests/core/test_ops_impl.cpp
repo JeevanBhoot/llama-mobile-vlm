@@ -20,19 +20,19 @@ TEST_CASE("ops_impl::arm::bf16") {
     float32x4_t acc = vmovq_n_f32(0.0f);
     acc = vbfmmlaq_f32(acc, vld1q_bf16(reinterpret_cast<const __bf16*>(a.data())),
                        vld1q_bf16(reinterpret_cast<const __bf16*>(b.data())));
-    REQUIRE(vgetq_lane_f32(acc, 0) == Approx(1.0f));
-    REQUIRE(vgetq_lane_f32(acc, 1) == Approx(5.0f));
-    REQUIRE(vgetq_lane_f32(acc, 2) == Approx(9.0f));
-    REQUIRE(vgetq_lane_f32(acc, 3) == Approx(13.0f));
+    REQUIRE(vgetq_lane_f32(acc, 0) == Approx(1.0f));   // a[0:4] . b[0:4]
+    REQUIRE(vgetq_lane_f32(acc, 1) == Approx(5.0f));   // a[0:4] . b[4:8]
+    REQUIRE(vgetq_lane_f32(acc, 2) == Approx(9.0f));   // a[4:8] . b[0:4]
+    REQUIRE(vgetq_lane_f32(acc, 3) == Approx(13.0f));  // a[4:8] . b[4:8]
 
     // bfdot 4*1x2x1
     acc = vmovq_n_f32(0.0f);
     acc = vbfdotq_f32(acc, vld1q_bf16(reinterpret_cast<const __bf16*>(a.data())),
                       vld1q_bf16(reinterpret_cast<const __bf16*>(b.data())));
-    REQUIRE(vgetq_lane_f32(acc, 0) == Approx(1.0f));
-    REQUIRE(vgetq_lane_f32(acc, 1) == Approx(0.0f));
-    REQUIRE(vgetq_lane_f32(acc, 2) == Approx(0.0f));
-    REQUIRE(vgetq_lane_f32(acc, 3) == Approx(13.0f));
+    REQUIRE(vgetq_lane_f32(acc, 0) == Approx(1.0f));   // a[0:2] . b[0:2]
+    REQUIRE(vgetq_lane_f32(acc, 1) == Approx(0.0f));   // a[2:4] . b[2:4]
+    REQUIRE(vgetq_lane_f32(acc, 2) == Approx(0.0f));   // a[4:6] . b[4:6]
+    REQUIRE(vgetq_lane_f32(acc, 3) == Approx(13.0f));  // a[6:8] . b[6:8]
 }
 
 #endif  // __ARM_NEON

@@ -174,9 +174,27 @@ class Tests:
 
     @staticmethod
     def projection(tests: TestFile) -> None:
+        torch.manual_seed(0x19DFB9E938DCE261)
+        weight = torch.randn(128, 256) / (256**0.5)
+        x = torch.randn(64, 256)
+        output = x @ weight.T
+        tests.add("projection", "regular", weight=weight, x=x, output=output)
+
+        torch.manual_seed(0x73DAB3442659F0EE)
+        weight = torch.randn(64, 143) / (143**0.5)
+        x = torch.randn(32, 143)
+        output = x @ weight.T
+        tests.add("projection", "odd-k", weight=weight, x=x, output=output)
+
+        torch.manual_seed(0x73DAB3442659F0EE)
+        weight = torch.randn(79, 64) / (64**0.5)
+        x = torch.randn(47, 64)
+        output = x @ weight.T
+        tests.add("projection", "odd-mn", weight=weight, x=x, output=output)
+
         torch.manual_seed(0x5BA87BB13DF4F97)
-        weight = torch.randn(32, 48) / (48**0.5)
-        x = torch.randn(7, 48)
+        weight = torch.randn(3, 5) / (5**0.5)
+        x = torch.randn(7, 5)
         output = x @ weight.T
         tests.add("projection", "small", weight=weight, x=x, output=output)
 
