@@ -367,9 +367,9 @@ REGISTER_BENCHMARK(text_model_1B)(const benchmarking::Report& report) {
 REGISTER_BENCHMARK(_vision_model_11B)(const benchmarking::Report& report) {
     auto config = Dummy::llama11B_VLM();
     // Reduce image layers for faster benchmark
-    config.vision->dLayers0 = 2;
-    config.vision->dLayers1 = 2;
-    config.vision->outputTaps = {0, 0, 0, 1, 1};  // keep 5
+    // config.vision->dLayers0 = 2;
+    // config.vision->dLayers1 = 2;
+    // config.vision->outputTaps = {0, 0, 0, 1, 1};  // keep 5
     runModelBenchmark(config, /*nPrompt*/ 64u, /*nGenerate*/ 64u, report);
 }
 
