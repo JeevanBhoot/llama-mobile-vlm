@@ -3,6 +3,7 @@
 
 #include <fstream>
 #include <numeric>
+#include <regex>
 #include <sstream>
 
 namespace squash::tensor {
@@ -155,6 +156,59 @@ void saveNpy(std::ostream& out, const TensorV& tensor) {
         tensor.data);
 }
 
+// Basic & restrictive implementation
+Tensor loadNpy(std::istream& in) {
+    // Read magic + version
+    char magic[6];
+    char versionMajor, versionMinor;
+    in.read(magic, sizeof(magic)).get(versionMajor).get(versionMinor);
+    if (std::string(magic, sizeof(magic)) != "\x93NUMPY" || versionMajor != 1 ||
+        versionMinor != 0) {
+        throw std::runtime_error("loadNpy: invalid npy file (bad magic or version)");
+    }
+
+    // Read header
+    uint16_t headerSize;
+    in.read(reinterpret_cast<char*>(&headerSize), sizeof(headerSize));
+    std::string header(headerSize, '\0');
+    in.read(header.data(), static_cast<std::streamsize>(headerSize));
+
+    // Parse header
+    std::regex re("'(\\w+?)': (\\(.+?\\)|.+?),");
+    std::sregex_iterator iter(header.begin(), header.end(), re);
+    std::unordered_map<std::string, std::string> headerMap;
+    for (; iter != std::sregex_iterator(); ++iter) {
+        std::smatch match = *iter;
+        headerMap[match[1]] = match[2];
+    }
+    if (headerMap["descr"] != "'<f4'") {
+        throw std::runtime_error("loadNpy: only '<f4' dtype is supported");
+    }
+    if (headerMap["fortran_order"] != "False") {
+        throw std::runtime_error("loadNpy: fortran_order=True is not supported");
+    }
+    // Parse shape
+    Shape shape;
+    std::string shapeStr = headerMap["shape"].substr(1, headerMap["shape"].size() - 2);
+    std::string dimStr;
+    std::stringstream ss(shapeStr);
+    while (std::getline(ss, dimStr, ',')) {
+        if (!dimStr.empty()) {
+            shape.push_back(static_cast<uint>(std::stoul(dimStr)));
+        }
+    }
+
+    // Read data
+    auto result = empty<float>(shape);
+    in.read(reinterpret_cast<char*>(data<float>(result)),
+            static_cast<std::streamsize>(prod(shape) * sizeof(float)));
+
+    if (!in.good()) {
+        throw std::runtime_error("loadNpy: error reading data");
+    }
+    return result;
+}
+
 void saveNpy(const std::string& path, const TensorV& tensor) {
     std::ofstream out(path, std::ios::binary);
     saveNpy(out, tensor);
@@ -163,6 +217,16 @@ void saveNpy(const std::string& path, const TensorV& tensor) {
         err << "saveNpy: error writing file " << path;
         throw std::runtime_error(err.str());
     }
+}
+
+Tensor loadNpy(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        std::ostringstream err;
+        err << "loadNpy: error opening file " << path;
+        throw std::runtime_error(err.str());
+    }
+    return loadNpy(in);
 }
 
 std::vector<uint> strides(const TensorV& tensor) {

@@ -102,3 +102,11 @@ TEST_CASE("squash::tensor::sample") {
     REQUIRE_THAT(counts[2], InRange(451, 549));
     REQUIRE_THAT(counts[3], InRange(94, 158));
 }
+
+TEST_CASE("squash::tensor::npy") {
+    std::stringstream str;
+    auto t = reshape(create(std::vector<float>({1, 2, 3, 4, 5, 6})), {2, 3});
+    saveNpy(str, t);
+    auto t2 = loadNpy(str);
+    REQUIRE_TENSOR_APPROX_EQUALS(t2, t, 0.0);
+}

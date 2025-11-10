@@ -53,6 +53,8 @@ std::ostream& operator<<(std::ostream&, const Shape&);
 std::ostream& operator<<(std::ostream&, const TensorV&);
 void saveNpy(std::ostream&, const TensorV&);
 void saveNpy(const std::string& path, const TensorV&);
+Tensor loadNpy(std::istream& in);
+Tensor loadNpy(const std::string& path);
 
 template <class T>
 T* data(const TensorV& tensor);
