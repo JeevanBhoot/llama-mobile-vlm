@@ -149,7 +149,7 @@ def prepare_parameters(
                 params[weight] = params[weight] * params.pop(gate).view(()).tanh()
                 gate = f"{prefix}.gate_ffn"
                 gate_tensor = params.pop(gate).view(()).tanh()
-                weight = f"{prefix}.mlp.up_proj.weight"
+                weight = f"{prefix}.mlp.down_proj.weight"
                 params[weight] = params[weight] * gate_tensor
                 bias = f"{prefix}.mlp.down_proj.bias"
                 params[bias] = params[bias] * gate_tensor
