@@ -56,9 +56,9 @@ Image resizeImage(const Image& image, uint height, uint width) {
     int newHeight = static_cast<int>(scale * static_cast<float>(image.height));
     int newWidth = static_cast<int>(scale * static_cast<float>(image.width));
     Image result(height, width, std::vector<uint8_t>(height * width * 3, 0));
-    stbir_resize_uint8_srgb(image.data.data(), static_cast<int>(image.width),
-                            static_cast<int>(image.height), 0, result.data.data(), newWidth,
-                            newHeight, static_cast<int>(result.width * 3), STBIR_RGB);
+    stbir_resize_uint8_linear(image.data.data(), static_cast<int>(image.width),
+                              static_cast<int>(image.height), 0, result.data.data(), newWidth,
+                              newHeight, static_cast<int>(result.width * 3), STBIR_RGB);
     return result;
 }
 
