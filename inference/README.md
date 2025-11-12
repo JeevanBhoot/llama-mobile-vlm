@@ -8,6 +8,12 @@
 
 # Try out a language model
 ./dev run cli ../models/Llama-3.2-1B-Instruct-BF16.sqt
+
+# E.g.
+echo "I don't much like" | ./dev run cli -- ../models/Llama-3.2-1B-Instruct-BF16.sqt -g 64
+
+# E.g. vision model
+echo "What colour shirt is the person to the left of the laptop wearing?" | ./dev run cli -- ../models/Llama-3.2-11B-Vision-Instruct-BF16.sqt -g 64 --image ../models/test.jpg
 ```
 
 ## Setup

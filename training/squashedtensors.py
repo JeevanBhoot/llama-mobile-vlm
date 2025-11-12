@@ -1,5 +1,6 @@
 """Model serialization in the squashedtensors '.sqt' format."""
 
+import argparse
 import contextlib
 import datetime
 import io
@@ -15,9 +16,8 @@ import torch
 import transformers
 from torch import Tensor, nn
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
-from transformers.models.mllama.modeling_mllama import MllamaForConditionalGeneration
 from transformers.models.mllama.image_processing_mllama import MllamaImageProcessor
-
+from transformers.models.mllama.modeling_mllama import MllamaForConditionalGeneration
 
 FILE_VERSION = 1
 
@@ -308,3 +308,41 @@ def save(
             f.write(data.numpy().tobytes())
             assert f.tell() == buffer_start + end
             f.write((align(len(data), alignment) - len(data)) * b"\0")
+
+
+def _run() -> None:
+    parser = argparse.ArgumentParser(
+        description="Serialize a Llama model to squashedtensors '.sqt' format"
+    )
+    parser.add_argument(
+        "model_name_or_path",
+        type=str,
+        help="HuggingFace model name or path (e.g., 'meta-llama/Llama-3.2-1B-Instruct')",
+    )
+    parser.add_argument(
+        "output_path",
+        type=Path,
+        help="Output path for the '.sqt' file",
+    )
+    args = parser.parse_args()
+    config = transformers.AutoConfig.from_pretrained(args.model_name_or_path)
+    if config.model_type == "llama":
+        model_cls = LlamaForCausalLM
+        image_processor = None
+    elif config.model_type == "mllama":
+        model_cls = MllamaForConditionalGeneration
+        image_processor = transformers.AutoProcessor.from_pretrained(
+            args.model_name_or_path
+        ).image_processor
+    else:
+        raise ValueError(
+            f"Unsupported model type {config.model_type!r} for {args.model_name_or_path}"
+            ", expected 'llama' or 'mllama'"
+        )
+    tokenizer = transformers.AutoTokenizer.from_pretrained(args.model_name_or_path)
+    model = model_cls.from_pretrained(args.model_name_or_path)
+    save(model, tokenizer, image_processor, args.output_path)
+
+
+if __name__ == "__main__":
+    _run()
