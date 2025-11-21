@@ -1,7 +1,8 @@
 #include <cxxopts.hpp>
 #include <fstream>
 #include <iostream>
-#include "squash.hpp"
+
+#include "lib/squash.hpp"
 
 int main(int argc, char** argv) {
     cxxopts::Options options("cli", "Text generation CLI");
@@ -25,16 +26,16 @@ int main(int argc, char** argv) {
 
     squash::selectOmpNumThreads();
 
-    std::optional<squash::Image> image;
-    if (args.count("image")) {
-        image.emplace(squash::loadImage(args["image"].as<std::string>()));
-    }
-
     squash::Timer timer;
     std::ifstream modelFile(args["model_file"].as<std::string>());
     auto model = squash::loadSquashedTensors(modelFile);
     auto generator = squash::Generator(model);
     std::cerr << "-- Loaded " << model.source << " (" << timer.elapsed() << " s)\n\n";
+
+    std::optional<squash::Image> image;
+    if (args.count("image")) {
+        image.emplace(squash::loadImage(args["image"].as<std::string>()));
+    }
 
     std::string prompt;
     squash::Generator::Options generatorOptions{

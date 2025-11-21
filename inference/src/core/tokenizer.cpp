@@ -1,9 +1,8 @@
 #include "tokenizer.hpp"
 
 #include <regex>
+#include <sstream>
 #include <unordered_map>
-
-#include "squash.hpp"
 
 namespace squash {
 
@@ -224,7 +223,7 @@ struct Tokenizer::Impl {
         for (auto token : tokens) {
             if (idToToken.size() <= token) {
                 std::ostringstream err;
-                err << "Token " << token << " is out of vocab range (" << tokens.size() << ")";
+                err << "Token " << token << " is out of vocab range (" << idToToken.size() << ")";
                 throw std::runtime_error(err.str());
             }
             out.append(impl::decodeBytesForBPE(idToToken[token]));

@@ -8,14 +8,36 @@
 
 # Try out a language model
 ./dev run cli ../models/Llama-3.2-1B-Instruct-BF16.sqt
+
+# E.g.
+echo "I don't much like" | ./dev run cli -- ../models/Llama-3.2-1B-Instruct-BF16.sqt -g 64
+
+# E.g. vision model
+echo "What colour shirt is the person to the left of the laptop wearing?" | ./dev run cli -- ../models/Llama-3.2-11B-Vision-Instruct-BF16.sqt -g 64 --image ../models/test.jpg
 ```
 
 ## Setup
 
 ```sh
 ./dev setup
-sudo apt install ninja-build clang clang-format
+sudo apt install clang clang-format gdb libc++-dev libopenmp-dev ninja-build
 # If android: install NDK to /opt/android-sdk/ndk/latest
+```
+
+### Profiling using perf
+
+Install `linux-tools-generic`. On AWS Graviton, you may have to `sudo ln -s /usr/lib/linux-tools-6.8.0-85/perf /usr/local/bin/perf` and `rm /usr/bin/perf`.
+
+```conf
+# Add to /etc/sysctl.conf, then restart
+kernel.perf_event_paranoid = 0
+```
+
+```sh
+./dev build benchmark
+perf record -g ./build/release/benchmark text_model_1B
+perf report
+perf report -d benchmark
 ```
 
 ## License information

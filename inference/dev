@@ -1,45 +1,81 @@
 #!/usr/bin/env python3
 
 import argparse
+import contextlib
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Callable, Iterable, List, TypeVar
+from typing import Any, Callable, Iterable, List, Literal, TextIO, TypeVar
+
+###############################################################################
+# Common
 
 T = TypeVar("T")
 
 
-def _run(command: Iterable[Any]) -> None:
+def _run(
+    command: Iterable[Any],
+    env: dict[str, str] = {},
+    stdout: Path | TextIO | None = None,
+) -> None:
     """Run a command, terminating on failure."""
-    cmd = [str(arg) for arg in command if arg is not None]
-    print("$ " + " ".join(cmd), file=sys.stderr)
-    environ = os.environ.copy()
-    environ["PYTHONPATH"] = f"{os.getcwd()}:{environ.get('PYTHONPATH', '')}"
-    exit_code = subprocess.call(cmd, env=environ)
-    if exit_code:
-        sys.exit(exit_code)
+    with contextlib.ExitStack() as stack:
+        cmd = [str(arg) for arg in command if arg is not None]
+        print(
+            "$ " + " ".join(cmd) + (f" > {stdout}" if isinstance(stdout, Path) else ""),
+            file=sys.stderr,
+        )
+        if isinstance(stdout, Path):
+            stdout = stack.enter_context(stdout.open("w"))
+        environ = os.environ.copy()
+        environ["PYTHONPATH"] = f"{os.getcwd()}:{environ.get('PYTHONPATH', '')}"
+        environ.update(env)
+        exit_code = subprocess.call(cmd, env=environ, stdout=stdout)
+        if exit_code:
+            sys.exit(exit_code)
 
 
-def _run_on_device(command: Iterable[Any]) -> None:
+def _push_to_device(src: Path) -> Path:
+    """Push a file to an attached Android device"""
+    dest = Path(f"/data/local/tmp/{src.name}")
+    _run(["adb", "push", str(src), str(dest)])
+    return dest
+
+
+def _run_on_device(command: Iterable[Any], env: dict[str, str]) -> None:
     """Run on an attached Android device"""
     program, *args = command
-    _run(["adb", "push", program, f"/data/local/tmp/{Path(program).name}"])
+    program = _push_to_device(Path(program))
     args_str = " ".join(str(arg) for arg in args if arg is not None)
     _run(
         [
             "adb",
             "shell",
-            "cd /data/local/tmp && env LD_LIBRARY_PATH=/data/local/tmp"
-            f" ./{Path(program).name} {args_str}",
-        ]
+            f"cd {program.parent} && env LD_LIBRARY_PATH={program.parent}"
+            f" ./{program.name} {args_str}",
+        ],
+        env=env,
     )
 
 
-def _run_under_gdb(command: Iterable[Any]) -> None:
-    """Run under GDB (on host)"""
-    _run(["gdb", "-ex", "run", "--args", *command])
+def _run_target(
+    command: Iterable[Any],
+    env: dict[str, str],
+    platform: str,
+    wrap: Literal["perf", "gdb"] | None,
+) -> None:
+    """Run the command on the given platform, optionally under gdb"""
+    if platform == "android":
+        assert not wrap, "gdb/perf not supported on android"
+        _run_on_device(command, env)
+    elif wrap == "gdb":
+        _run(["gdb", "-ex", "run", "--args", *command], env=env)
+    elif wrap == "perf":
+        _run(["perf", "record", "-g", *command], env=env)
+    else:
+        _run(command, env)
 
 
 def cli(*args: Any, **kwargs: Any) -> Callable[[T], T]:
@@ -57,6 +93,7 @@ def cli(*args: Any, **kwargs: Any) -> Callable[[T], T]:
 
 BUILD = Path("build")
 SRC = Path("src")
+THIRD_PARTY = Path("third-party")
 ANDROID_NDK = Path("/opt/android-sdk/ndk/latest")
 PLATFORMS = ["release", "debug"] + (["android"] if ANDROID_NDK.exists() else [])
 THIRD_PARTY_SOURCES = (
@@ -69,14 +106,16 @@ THIRD_PARTY_SOURCES = (
     "https://raw.githubusercontent.com/nothings/stb/2e2bef463a5b53ddf8bb788e25da6b8506314c08/stb_image_resize2.h",
 )
 
+###############################################################################
+# Commands
+
 
 @cli()
 def setup(platforms: List[str]) -> None:
     """download third-party libraries"""
-    third_party = Path("third-party")
-    third_party.mkdir(exist_ok=True)
+    THIRD_PARTY.mkdir(exist_ok=True)
     for path in THIRD_PARTY_SOURCES:
-        _run(["wget", "-nv", "-O", third_party / Path(path).name, path])
+        _run(["wget", "-nv", "-O", THIRD_PARTY / Path(path).name, path])
 
 
 @cli()
@@ -90,51 +129,52 @@ def clean(platforms: List[str]) -> None:
         BUILD.rmdir()
 
 
-def _generate_build_ninja(w: Any, platform: str) -> None:
+def _generate_build_ninja(w: Any, platform: str, gprof: bool) -> None:
     cxx = (
         ANDROID_NDK / "toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
         if platform == "android"
         else os.getenv("CXX", "clang++")
     )
     flags, cxxflags, linkflags, libs = [], [], [], []
-    cxxflags += ["$flags", "-fcolor-diagnostics"]
+    cxxflags += ["$flags", "-fcolor-diagnostics", "-fdiagnostics-absolute-paths"]
     cxxflags += ["-Wall", "-Wextra", "-Wconversion", "-Wdouble-promotion", "-Werror"]
-    cxxflags += [f"-I$src", f"-isystem $third-party"]
+    cxxflags += [f"-Isrc", f"-isystem third-party"]
     cxxflags += ["-g", "-fPIC", "-std=c++20"]
     cxxflags += ["-O0"] if "debug" in platform else ["-O3", "-DNDEBUG"]
     cxxflags += ["-fdata-sections", "-ffunction-sections"]
     linkflags += ["$flags"]
     linkflags += ["-Wl,--gc-sections", "-Wl,--fatal-warnings", "-Wl,--no-undefined"]
+    if platform != "android":
+        cxxflags += [f"-mcpu=native"]
     if platform == "android":
         flags += ["--target=aarch64-linux-android35"]
         cxxflags += ["-DANDROID"]
         linkflags += ["-static-libstdc++"]
-    if platform == "android":
         libs += ["-llog", "-static-openmp"]
+    if "clang++" in cxx:
+        flags += ["-stdlib=libc++"]
     flags += ["-fopenmp"]
+    if gprof:
+        flags += ["-pg"]
+        cxxflags += ["-fno-omit-frame-pointer"]
 
     root_to_files = {}  # [root] -> (src, obj, {variable: value})
-    for root in ["", "lib", "tests", "programs"]:
+    for root in ["benchmark", "core", "lib", "programs", "tests"]:
         root_to_files[root] = []
-        for cpp in (s.relative_to(SRC) for s in (SRC / root).glob("*.cpp")):
-            root_to_files[root] += [
-                (f"$src/{cpp}", f"$obj/{cpp.with_suffix('.o')}", {})
-            ]
+        for cpp in (s.relative_to(SRC) for s in (SRC / root).glob("**/*.cpp")):
+            root_to_files[root] += [(f"src/{cpp}", f"obj/{cpp.with_suffix('.o')}", {})]
     catch_cxxflags = [
         f for f in cxxflags if f not in ["-Wconversion", "-Wdouble-promotion"]
     ]
     root_to_files["catch"] = [
         (
-            "$third-party/catch_amalgamated.cpp",
-            "$obj/catch/catch_amalgamated.o",
+            "third-party/catch_amalgamated.cpp",
+            "obj/catch/catch_amalgamated.o",
             dict(cxxflags=catch_cxxflags),
         )
     ]
 
     # Variables
-    w.variable("src", f"../../{SRC}")
-    w.variable("third-party", "../../third-party")
-    w.variable("obj", "obj")
     w.variable("cxx", cxx)
     w.variable("libs", libs)
     w.variable("flags", flags)
@@ -151,6 +191,13 @@ def _generate_build_ninja(w: Any, platform: str) -> None:
         deps="gcc",
     )
     w.rule(
+        "compile_asm",
+        command="$cxx -MMD -MT $out -MF $out.d $cxxflags -S $in -o $out",
+        description="ASM $out",
+        depfile="$out.d",
+        deps="gcc",
+    )
+    w.rule(
         "linkexe",
         command="$cxx $in $linkflags -o $out $libs",
         description="LINKEXE $out",
@@ -160,51 +207,72 @@ def _generate_build_ninja(w: Any, platform: str) -> None:
         command="$cxx $in $linkflags -shared -o $out $libs",
         description="LINKSO $out",
     )
+    w.rule(
+        "runpy",
+        command="python3 $in $out",
+        description="PYTHON $in",
+    )
     w.newline()
 
     # Objects
     for cpp, obj, vars in (v for vs in root_to_files.values() for v in vs):
         w.build(obj, "compile", cpp, variables=vars)
+        w.build(
+            f"{obj}.s",
+            "compile_asm",
+            cpp,
+            variables={
+                **vars,
+                "cxxflags": [
+                    f for f in vars.get("cxxflags", cxxflags) if f not in ["-g"]
+                ],
+            },
+        )
     w.newline()
 
     # Programs & shared libraries
-    for _, obj, _ in root_to_files["programs"]:
-        w.build(
-            f"{Path(obj).stem}",
-            "linkexe",
-            [obj] + [obj for _, obj, _ in root_to_files[""] + root_to_files["lib"]],
-        )
-    w.build(
-        "tests",
-        "linkexe",
-        [
+    binaries = [
+        ("cli", "linkexe", ["core", "lib"]),
+        ("benchmark", "linkexe", ["core", "lib", "benchmark"]),
+        ("tests", "linkexe", ["core", "lib", "benchmark", "tests", "catch"]),
+        ("libsquashed-llama.so", "linkso", ["core", "lib"]),
+    ]
+    for name, rule, roots in binaries:
+        objs = [obj for root in roots for _, obj, _ in root_to_files[root]]
+        objs += [
             obj
-            for root, fs in root_to_files.items()
-            if root != "programs"
-            for _, obj, _ in fs
-        ],
-    )
-    w.build(
-        "libsquashed-llama.so",
-        "linkso",
-        [obj for _, obj, _ in root_to_files[""] + root_to_files["lib"]],
-    )
+            for src, obj, _ in root_to_files["programs"]
+            if src.endswith(f"{name}.cpp")
+        ]
+        w.build(name, rule, objs)
+
+    # Test data
+    w.build("testdata.bin", "runpy", "src/tests/core/gentest_tensor_data.py")
 
 
 @cli("targets", nargs="*", help="build targets")
-def build(platforms: List[str], targets: List[str]) -> None:
+@cli("--gprof", action="store_true", help="enable gprof")
+@cli("-v", "--verbose", action="store_true", help="enable verbose output")
+def build(platforms: List[str], targets: List[str], gprof: bool, verbose: bool) -> None:
     """build C++ code"""
-    third_party = str(Path(__file__).parent / "third-party")
-    if third_party not in sys.path:
-        sys.path.append(third_party)
+    if str(THIRD_PARTY.absolute()) not in sys.path:
+        sys.path.append(str(THIRD_PARTY.absolute()))
     import ninja_syntax
 
     for platform in platforms:
         root = BUILD / platform
         root.mkdir(parents=True, exist_ok=True)
+        for source_dir in [SRC, THIRD_PARTY]:
+            link = root / source_dir.name
+            if link.is_symlink():
+                link.unlink()
+            link.symlink_to(source_dir.absolute())
         with (root / "build.ninja").open("w") as file:
-            _generate_build_ninja(ninja_syntax.Writer(file), platform)
-        _run(["ninja", "-C", root, *targets])
+            _generate_build_ninja(ninja_syntax.Writer(file), platform, gprof=gprof)
+        _run(
+            ["ninja", "-C", root, *targets, "--verbose" if verbose else None],
+            stdout=sys.stderr,
+        )
 
 
 @cli(
@@ -213,26 +281,64 @@ def build(platforms: List[str], targets: List[str]) -> None:
     help="arguments for Catch2"
     "(https://github.com/catchorg/Catch2/blob/devel/docs/command-line.md)",
 )
-@cli("--gdb", action="store_true", help="run under gdb")
-def tests(platforms: List[str], gdb: bool, args: List[str]) -> None:
+@cli("--gprof", action="store_true", help="enable gprof")
+@cli("-w", "--wrap", choices=["perf", "gdb"], help="run under perf/gdb")
+def tests(
+    platforms: List[str],
+    gprof: bool,
+    wrap: Literal["perf", "gdb"] | None,
+    args: List[str],
+) -> None:
     """run unit tests"""
-    run(platforms=platforms, program="tests", gdb=gdb, args=args)
+    build(
+        platforms=platforms,
+        targets=["tests", "testdata.bin"],
+        gprof=gprof,
+        verbose=False,
+    )
+    for platform in platforms:
+        testdata = BUILD / platform / "testdata.bin"
+        if platform == "android":
+            testdata = _push_to_device(testdata)
+        _run_target(
+            [BUILD / platform / "tests", *args],
+            env=dict(TESTDATA=str(testdata)),
+            platform=platform,
+            wrap=wrap,
+        )
 
 
 @cli("program", help="program to run (see src/programs)")
 @cli("args", nargs="*", help="arguments")
-@cli("--gdb", action="store_true", help="run under gdb")
-def run(platforms: List[str], program: str, gdb: bool, args: List[str]) -> None:
+@cli("--gprof", action="store_true", help="enable gprof")
+@cli("-w", "--wrap", choices=["perf", "gdb"], help="run under perf/gdb")
+def run(
+    platforms: List[str],
+    program: str,
+    gprof: bool,
+    wrap: Literal["perf", "gdb"] | None,
+    args: List[str],
+) -> None:
     """build and run the given program"""
-    build(platforms=platforms, targets=[program])
+    build(platforms=platforms, targets=[program], gprof=gprof, verbose=False)
     for platform in platforms:
-        if platform == "android":
-            runner = _run_on_device
-        elif gdb:
-            runner = _run_under_gdb
-        else:
-            runner = _run
-        runner([BUILD / platform / program, *args])
+        build_dir = BUILD / platform
+        _run_target([build_dir / program, *args], env={}, platform=platform, wrap=wrap)
+        if gprof and platform != "android":
+            _run(["gprof", build_dir / program], stdout=build_dir / f"{program}.gprof")
+
+
+@cli("-i", "--incremental", action="store_true", help="disable 'clean' before build")
+def ci(platforms: List[str], incremental: bool) -> None:
+    """run all CI checks"""
+    if not incremental:
+        clean(platforms=platforms)
+    tests(platforms=platforms, gprof=False, wrap=None, args=[])
+    run(platforms=platforms, program="benchmark", gprof=False, wrap=None, args=[])
+
+
+################################################################################
+# Driver
 
 
 def _main() -> None:
@@ -249,7 +355,7 @@ def _main() -> None:
         help=f"platforms to build (default: [{PLATFORMS[0]}])",
     )
     parser.set_defaults(
-        _action=lambda platforms: tests(platforms=platforms, gdb=False, args=[])
+        _action=lambda platforms: ci(platforms=platforms, incremental=True)
     )
 
     subs = parser.add_subparsers()

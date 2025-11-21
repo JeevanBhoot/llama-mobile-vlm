@@ -41,6 +41,13 @@ if __name__ == "__main__":
     train.run_experiment(settings)
 ```
 
+## Create .sqt files for the C++ inference library
+
+```sh
+python squashedtensors.py meta-llama/Llama-3.2-1B-Instruct ../models/Llama-3.2-1B-Instruct-BF16.sqt
+python squashedtensors.py meta-llama/Llama-3.2-11B-Vision-Instruct ../models/Llama-3.2-11B-Vision-Instruct-BF16.sqt
+```
+
 ## Resources
 
  - Dataset: `s3://graphcore-research/2024-10-squashedllama/data/`

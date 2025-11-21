@@ -2,8 +2,6 @@
 
 Squashedtensors is a derivative of [safetensors](https://github.com/huggingface/safetensors), for saving (quantised) model weights, tokenizer and hyperparameters.
 
-**TODO - tokenizer.**
-
 ## Differences from safetensors
 
  - Prepend file magic & version number.
@@ -45,7 +43,12 @@ Note that `data_offsets` are relative to the start of the buffer.
 
 | Key | Format | Description |
 | --- | --- | -- |
-| source | STRING | Original model name (e.g. huggingface model path) |
-| created | STRING | Timestamp of file creation (model quantisation), ISO 8601 |
-| alignment | INTEGER | Byte alignment of the buffer & all tensor start offsets within it |
-| config.* | * | Model hyperparameters |
+| `source` | `STRING` | Original model name (e.g. huggingface model path) |
+| `created` | `STRING` | Timestamp of file creation (model quantisation), ISO 8601 |
+| `alignment` | `INTEGER` | Byte alignment of the buffer & all tensor start offsets within it |
+| `config.*` | * | Model hyperparameters (model-dependent) |
+| `vocab.begin_of_text_id` | `INTEGER` | Special token ID for begin of text |
+| `vocab.end_of_text_id` | `INTEGER` | Special token ID for end of text |
+| `vocab.pre_tokenizer` | `STRING` | Regex for pre-tokenization |
+| `vocab.merges` | `LIST[STRING]` | BPE merge rules |
+| `vocab.vocab` | `LIST[STRING]` | Vocabulary list, an ID-to-token mapping |
