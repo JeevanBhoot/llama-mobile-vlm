@@ -37,7 +37,11 @@ def test_dataset(tmp_path: Path) -> None:
         return_value=dummy,
     ):
         out_dir = train_data.generate_data(
-            config, batch_size=2, world_size=1, data_path=str(tmp_path)
+            config,
+            batch_size=2,
+            world_size=1,
+            data_path=str(tmp_path),
+            sync_to_s3=False,
         )
 
     config_read = train_data.load_config(out_dir)

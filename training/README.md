@@ -18,7 +18,7 @@ pip install -r requirements.txt
 
 Sync from AWS S3:
 ```sh
-aws s3 sync s3://graphcore-research/2024-10-squashedllama/data/ data/
+aws s3 sync s3://graphcore-research-us-east-1/2024-10-squashedllama/data/ data/
 ```
 
 If missing `aws` client (for fetching data from S3 buckets):
@@ -50,5 +50,5 @@ python squashedtensors.py meta-llama/Llama-3.2-11B-Vision-Instruct ../models/Lla
 
 ## Resources
 
- - Dataset: `s3://graphcore-research/2024-10-squashedllama/data/`
- - Trained checkpoints: `s3://graphcore-research/2024-10-squashedllama/checkpoints/`
+ - Dataset: `s3://graphcore-research-us-east-1/2024-10-squashedllama/data/`
+ - Trained checkpoints: `s3://graphcore-research-us-east-1/2024-10-squashedllama/checkpoints/`

@@ -3,6 +3,7 @@ import json
 import subprocess
 import sys
 import time
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +20,7 @@ from utility import (
     LLAMA_PROMPT_TEMPLATES,
     LOCAL_DATA_PATH,
     S3_DATA_PATH,
+    check_s3_access,
     set_padding_side_left,
 )
 
@@ -149,7 +151,7 @@ class VQA(ImageDataset):
 
     def data(
         self,
-        prompt_fn: Callable[[int], list[str]] | None,
+        prompt_fn: Callable[[int], list[str]] | None = None,
         seed: int | None = None,
         sync: bool = True,
     ) -> datasets.Dataset:
@@ -167,14 +169,19 @@ class VQA(ImageDataset):
             shuffle_seed=None, split=self.split, limit=None, load_from_s3=sync
         )
 
-        data = data.remove_columns(self.remove_columns)
-
         # Use question_id as the index
         data = data.rename_column("question_id", "index")
 
         # Add system template
-        prompts = [self._template.format(prompt=p) for p in data["prompt"]]
-        data = data.remove_columns(["prompt"]).add_column("prompt", prompts)
+        prompts = [
+            self._template.format(
+                prompt=eval.vqa.VQA.QUESTION_TEMPLATE.format(question=q)
+            )
+            for q in data["question"]
+        ]
+        data = data.add_column("prompt", prompts)
+
+        data = data.remove_columns(self.remove_columns)
 
         if seed is not None:
             data = data.shuffle(seed)
@@ -336,10 +343,11 @@ def _generate_worker(
 
 def generate_data(
     config: GenerationConfig,
-    batch_size: int = 16 * torch.cuda.device_count(),
+    batch_size: int = 128,
     dtype: str = "bfloat16",
     world_size: int = torch.cuda.device_count(),
     data_path: str = LOCAL_DATA_PATH,
+    sync_to_s3: bool = True,
 ) -> str:
     n_examples = config.data_range[1] - config.data_range[0]
     if n_examples % batch_size != 0:
@@ -357,11 +365,9 @@ def generate_data(
 
     ctx = mp.get_context("spawn")
 
-    dir_path = (
-        f"{data_path}/{config.dataset_name}-{config.split}-generation"
-        f"/{config.to_hash()}"
-    )
-    out_path = dir_path + "/out/out{}.jsonl"
+    dir_path = f"{config.dataset_name}-{config.split}-generation/{config.to_hash()}"
+    path = f"{data_path}/{dir_path}"
+    out_path = path + "/out/out{}.jsonl"
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
 
     processes = []
@@ -383,14 +389,22 @@ def generate_data(
     for p in processes:
         p.join()
 
+    if all(p.exitcode == 0 for p in processes):
+        (Path(path) / "log" / "_SUCCESS").touch()
+
     # Save config info
     d = config.to_dict()
     d["created at"] = datetime.now().isoformat(timespec="seconds")
-    config_path = f"{dir_path}/config.json"
+    config_path = f"{path}/config.json"
     with open(config_path, "w") as f:
         json.dump(d, f, indent=2)
 
-    return dir_path
+    if sync_to_s3:
+        check_s3_access()
+        s3_path = f"{S3_DATA_PATH}/{dir_path}"
+        subprocess.run(["aws", "s3", "sync", path, s3_path], check=True)
+
+    return path
 
 
 IMAGE_DATASETS: dict[str, ImageDataset] = {
@@ -424,8 +438,15 @@ class Dataset:
         data_to_concat: list[datasets.Dataset] = []
         self._configs = []
         for path, n in zip(paths, n_examples):
-            path = Path(path)
-            config = load_config(path)
+            local_path = Path(LOCAL_DATA_PATH) / path
+            if not local_path.exists():
+                check_s3_access()
+                s3_path = f"{S3_DATA_PATH}/{path}"
+                subprocess.run(
+                    ["aws", "s3", "sync", s3_path, str(local_path)], check=True
+                )
+
+            config = load_config(local_path)
             self._configs.append(config)
 
             data = (
@@ -444,7 +465,7 @@ class Dataset:
             if n is None:
                 n = len(data)
 
-            out_path = path / "out"
+            out_path = local_path / "out"
             out = {}
             for filename in out_path.glob("out*.jsonl"):
                 with open(filename) as f:
@@ -466,3 +487,51 @@ class Dataset:
     def get_datums(self) -> Iterable[Datum]:
         for x in self.data:
             yield Datum(**x)
+
+
+def join_data(paths: list[str | Path], out_path: str | Path) -> None:
+    """Join generated data from a distributed process and write to a new path.
+    Requires:
+    - config fields for each path should match (apart from data_range)
+    - data_range fields should be joinable
+    (such as [0, 16] and [16, 32], but not [0, 16], [14, 32])
+    """
+    # Load configs, check if they can be joined
+    configs = []
+    for p in paths:
+        configs.append(load_config(p))
+    configs.sort(key=lambda x: x.data_range[0])
+
+    # Check if metadata matches and data ranges are joinable
+    for c1, c2 in zip(configs[:-1], configs[1:]):
+        d1 = c1.to_dict()
+        d2 = c2.to_dict()
+        if d1.pop("data_range")[1] != d2.pop("data_range")[0]:
+            return
+        if d1 != d2:
+            return
+
+    config = deepcopy(configs[0])
+    config.data_range = (configs[0].data_range[0], configs[-1].data_range[1])
+
+    out_path = Path(out_path)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    # Save config info
+    d = config.to_dict()
+    d["created at"] = datetime.now().isoformat(timespec="seconds")
+    with open(out_path / "config.json", "w") as f:
+        json.dump(d, f, indent=2)
+
+    json_path = out_path / "out" / "out.jsonl"
+    json_path.parent.mkdir()
+    with open(json_path, "w") as f:
+        for p in paths:
+            for in_json_path in (p / "out").iterdir():
+                with open(in_json_path, "r") as g:
+                    for line in g:
+                        f.write(line)
+
+    success_path = out_path / "log" / "_SUCCESS"
+    success_path.parent.mkdir()
+    success_path.touch()

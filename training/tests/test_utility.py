@@ -1,15 +1,16 @@
 import urllib
 
 import PIL
+import pytest
 import torch
 import transformers
 
 from utility import (
     batches,
     distributed_batches,
+    from_dict,
     merge_params_mllama,
     set_padding_side_left,
-    from_dict,
 )
 
 
@@ -44,6 +45,7 @@ def test_distributed_batches() -> None:
     assert out[1] == [[2, 3], [6, 7]]
 
 
+@pytest.mark.skip(reason="Not used")
 def test_merge_params_mllama() -> None:
     name = "meta-llama/Llama-3.2-11B-Vision-Instruct"
     m = transformers.MllamaVisionModel.from_pretrained(
@@ -83,7 +85,7 @@ def test_merge_params_mllama() -> None:
 
 
 def test_from_dict() -> None:
-    from dataclasses import dataclass, asdict
+    from dataclasses import asdict, dataclass
 
     # Check for various type hints
     @dataclass

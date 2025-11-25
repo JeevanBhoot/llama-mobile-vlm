@@ -17,7 +17,8 @@ from transformers import MllamaVisionModel, PreTrainedTokenizerBase
 T = TypeVar("T")
 
 LOCAL_DATA_PATH = f"{Path(__file__).parent}/data"
-S3_DATA_PATH = "s3://graphcore-research/2024-10-squashedllama/data"
+S3_REPO_PATH = "s3://graphcore-research-us-east-1/2024-10-squashedllama"
+S3_DATA_PATH = f"{S3_REPO_PATH}/data"
 
 LLAMA_PROMPT_TEMPLATES = dict(
     instruct="<|start_header_id|>user<|end_header_id|>"
@@ -119,9 +120,7 @@ def merge_params_mllama(m: MllamaVisionModel) -> None:
 
 def check_s3_access() -> None:
     """Check that we have credentials for AWS S3 access."""
-    subprocess.check_call(
-        ["aws", "s3", "ls", "s3://graphcore-research"], stdout=subprocess.DEVNULL
-    )
+    subprocess.check_call(["aws", "s3", "ls", S3_REPO_PATH], stdout=subprocess.DEVNULL)
 
 
 def get_unsharded_quantised_params(
@@ -177,7 +176,7 @@ def from_dict(cls, data):
     ):
         return tuple(data)
 
-    if not dataclasses.is_dataclass(cls):
+    if not dataclasses.is_dataclass(cls) or data is None:
         return data
     return cls(
         **{f.name: (from_dict(f.type, data[f.name])) for f in dataclasses.fields(cls)}

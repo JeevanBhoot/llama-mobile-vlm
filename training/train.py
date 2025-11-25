@@ -1,12 +1,11 @@
 import gc
 import itertools as it
-import json
 import sys
 import time
 import traceback
 from contextlib import nullcontext
-from dataclasses import asdict, dataclass, field
-from typing import Any, Iterable, Optional
+from dataclasses import asdict, dataclass
+from typing import Any, Iterable, Literal, Optional
 
 import datasets
 import torch
@@ -14,17 +13,17 @@ import torch.distributed as dist
 import torch.distributed.fsdp as fsdp
 import torch.multiprocessing as mp
 import transformers
+import wandb
 import weight_formats.quantisation as Q
 import weight_formats.quantisation_training as QT
 from tqdm import tqdm
 from transformers import MllamaForConditionalGeneration, MllamaProcessor
 from weight_formats.experiments.qat import _compute_kl_loss
 
-import wandb
 from eval import vqa
-from train_data import Dataset, Datum, GenerationConfig
+from train_data import Dataset, Datum
 from utility import (
-    LOCAL_DATA_PATH,
+    S3_REPO_PATH,
     check_s3_access,
     distributed_batches,
     get_unsharded_quantised_params,
@@ -33,9 +32,7 @@ from utility import (
 )
 
 WANDB_PROJECT = "llama-mobile"
-CHECKPOINT_PATH = (
-    "s3://graphcore-research/2024-10-squashedllama/checkpoints/{name}.safetensors"
-)
+CHECKPOINT_PATH = S3_REPO_PATH + "/checkpoints/{name}.safetensors"
 
 
 def _log(*msg: Any) -> None:
@@ -48,12 +45,6 @@ def _log(*msg: Any) -> None:
 class DataShard:
     path: str
     n_examples: int | None
-    config: GenerationConfig = field(init=False)
-
-    def __post_init__(self):
-        config_path = f"{LOCAL_DATA_PATH}/{self.path}/config.json"
-        with open(config_path) as f:
-            self.config = json.loads(f.read())
 
 
 @dataclass
@@ -85,7 +76,7 @@ class TrainingSettings:
 
 @dataclass
 class ExecutionSettings:
-    world_size: int = torch.cuda.device_count()
+    world_size: int | Literal["auto"] = "auto"
     params_dtype: str = "float32"
     compute_dtype: str = "bfloat16"
     teacher_dtype: str = "bfloat16"
@@ -128,7 +119,7 @@ class Settings:
             model_name="meta-llama/Llama-3.2-11B-Vision-Instruct",
             data=DataSettings(
                 train=[
-                    DataShard("imagenet-train-generation/701c74", None),
+                    DataShard("imagenet-train-generation/17-11-25-all-examples", None),
                 ],
                 validation=None,
             ),
@@ -142,8 +133,8 @@ class Settings:
             ),
             training=TrainingSettings(
                 n_steps=16,
-                batch_size=64,
-                optimiser=OptimiserSettings(lr=2**-16),
+                batch_size=128,
+                optimiser=OptimiserSettings(lr=2**-18),
                 lr_schedule=LRScheduleSettings(),
             ),
             execution=ExecutionSettings(),
@@ -274,7 +265,7 @@ def run_downstream(
 
 
 def load_dataset(data_shards: list[DataShard]) -> Dataset:
-    paths = [f"{LOCAL_DATA_PATH}/{x.path}" for x in data_shards]
+    paths = [x.path for x in data_shards]
     n_examples = [x.n_examples for x in data_shards]
     return Dataset(paths, n_examples)
 
@@ -536,6 +527,8 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
 
 
 def run_experiment(settings: Settings) -> None:
+    if settings.execution.world_size == "auto":
+        settings.execution.world_size = torch.cuda.device_count()
     try:
         mp.spawn(
             fsdp_train,
