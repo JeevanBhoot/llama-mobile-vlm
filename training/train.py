@@ -228,9 +228,9 @@ def run_validation(
     with torch.no_grad():
         for batch in batches:
             inps = _tokenise_and_add_mask(batch, processor)
-            mask = inps.pop("prompt_mask")
-            loss += _compute_kl_loss(student, teacher, inps, mask).item()
-            n_tokens += inps["attention_mask"].sum()
+            prompt_mask = inps.pop("prompt_mask")
+            loss += _compute_kl_loss(student, teacher, inps, prompt_mask).item()
+            n_tokens += (inps["attention_mask"] & prompt_mask).sum()
 
     if torch.distributed.is_initialized():
         dist.reduce(loss, dst=0, op=dist.ReduceOp.SUM)
@@ -436,11 +436,11 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                 t0 = time.time()
 
                 inps = _tokenise_and_add_mask(batch, processor)
-                mask = inps.pop("prompt_mask")
+                prompt_mask = inps.pop("prompt_mask")
 
                 opt.zero_grad()
 
-                loss = _compute_kl_loss(student, teacher, inps, mask)
+                loss = _compute_kl_loss(student, teacher, inps, prompt_mask)
 
                 loss.backward()
                 opt.step()
@@ -451,7 +451,7 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                 total_loss = loss.detach().clone()
                 dist.reduce(total_loss, dst=0, op=dist.ReduceOp.SUM)
                 with torch.no_grad():
-                    n_toks = inps["attention_mask"].sum()
+                    n_toks = (inps["attention_mask"] & prompt_mask).sum()
                     dist.reduce(n_toks, dst=0, op=dist.ReduceOp.SUM)
                     total_n_toks += n_toks.item()
                 if settings.wandb and rank == 0:
