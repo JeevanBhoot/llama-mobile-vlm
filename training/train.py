@@ -195,6 +195,26 @@ def _quantise(
     return model
 
 
+def _tokenise_and_add_mask(
+    batch: list[Datum], processor: MllamaProcessor
+) -> dict[str, torch.Tensor]:
+    imgs = [[x.image] for x in batch]
+    prompts_tok = processor(imgs, [x.prompt for x in batch])["input_ids"]
+
+    # TODO: Save outputs without <bot> tokens
+    inp = processor(
+        imgs,
+        [x.out.replace("<|begin_of_text|>", "") for x in batch],
+        return_tensors="pt",
+        padding=True,
+    )
+    mask = torch.ones_like(inp["attention_mask"])
+    for i, n in enumerate([len(x) for x in prompts_tok]):
+        mask[i, :n] = 0
+    inp["prompt_mask"] = mask
+    return inp
+
+
 def run_validation(
     teacher: MllamaForConditionalGeneration,
     student: MllamaForConditionalGeneration,
@@ -203,16 +223,14 @@ def run_validation(
 ) -> Optional[float]:
     """Return total validation loss to rank 0"""
 
-    device = torch.get_default_device()
     loss = torch.tensor(0.0, dtype=torch.float32)
     n_tokens = torch.tensor(0, dtype=torch.int64)
     with torch.no_grad():
         for batch in batches:
-            imgs = [[x.image] for x in batch]
-            texts = [x.out for x in batch]
-            inps = processor(imgs, texts, return_tensors="pt", padding=True).to(device)
-            loss += _compute_kl_loss(student, teacher, inps).item()
-            n_tokens += inps["attention_mask"].sum()
+            inps = _tokenise_and_add_mask(batch, processor)
+            prompt_mask = inps.pop("prompt_mask")
+            loss += _compute_kl_loss(student, teacher, inps, prompt_mask).item()
+            n_tokens += (inps["attention_mask"] & prompt_mask).sum()
 
     if torch.distributed.is_initialized():
         dist.reduce(loss, dst=0, op=dist.ReduceOp.SUM)
@@ -268,26 +286,6 @@ def load_dataset(data_shards: list[DataShard]) -> Dataset:
     paths = [x.path for x in data_shards]
     n_examples = [x.n_examples for x in data_shards]
     return Dataset(paths, n_examples)
-
-
-def _tokenise_and_add_mask(
-    batch: list[Datum], processor: MllamaProcessor
-) -> dict[str, torch.Tensor]:
-    imgs = [[x.image] for x in batch]
-    prompts_tok = processor(imgs, [x.prompt for x in batch])["input_ids"]
-
-    # TODO: Save outputs without <bot> tokens
-    inp = processor(
-        imgs,
-        [x.out.replace("<|begin_of_text|>", "") for x in batch],
-        return_tensors="pt",
-        padding=True,
-    )
-    mask = torch.ones_like(inp["attention_mask"])
-    for i, n in enumerate([len(x) for x in prompts_tok]):
-        mask[i, :n] = 0
-    inp["prompt_mask"] = mask
-    return inp
 
 
 def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
@@ -438,11 +436,11 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                 t0 = time.time()
 
                 inps = _tokenise_and_add_mask(batch, processor)
-                mask = inps.pop("prompt_mask")
+                prompt_mask = inps.pop("prompt_mask")
 
                 opt.zero_grad()
 
-                loss = _compute_kl_loss(student, teacher, inps, mask)
+                loss = _compute_kl_loss(student, teacher, inps, prompt_mask)
 
                 loss.backward()
                 opt.step()
@@ -453,7 +451,7 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                 total_loss = loss.detach().clone()
                 dist.reduce(total_loss, dst=0, op=dist.ReduceOp.SUM)
                 with torch.no_grad():
-                    n_toks = inps["attention_mask"].sum()
+                    n_toks = (inps["attention_mask"] & prompt_mask).sum()
                     dist.reduce(n_toks, dst=0, op=dist.ReduceOp.SUM)
                     total_n_toks += n_toks.item()
                 if settings.wandb and rank == 0:
