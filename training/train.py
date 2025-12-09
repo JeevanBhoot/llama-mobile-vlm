@@ -80,7 +80,7 @@ class ExecutionSettings:
     params_dtype: str = "float32"
     compute_dtype: str = "bfloat16"
     teacher_dtype: str = "bfloat16"
-    compile: str | None = "default"
+    compile: str | None = None
     recomputation: bool = True
     wrap_teacher: bool = True
 
@@ -121,7 +121,7 @@ class Settings:
                 train=[
                     DataShard("imagenet-train-generation/17-11-25-all-examples", None),
                 ],
-                validation=None,
+                validation=[DataShard("vqav2-validation-generation/61e74b", 4096)],
             ),
             quantisation=QuantisationSettings(
                 fmt=Q.LinearScalingFormat(
