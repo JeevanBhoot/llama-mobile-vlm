@@ -140,7 +140,12 @@ class Settings:
             ),
             execution=ExecutionSettings(),
             wandb=True,
-            downstream_tasks=[Task("vqa", 1024)],
+            downstream_tasks=[
+                Task("vqa", 1024),
+                Task("chartqa", 1024),
+                Task("docvqa", 1024),
+                Task("ai2d", 1024),
+            ],
             memory_profile=False,
             save_checkpoint=False,
         )
