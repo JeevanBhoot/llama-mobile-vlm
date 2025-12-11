@@ -91,6 +91,7 @@ class QuantisationSettings:
     scaling_mode: QT.ScalingMode = "dynamic"
     clip_gradient: bool = False
     trainable_centroids: bool = False
+    mode: Literal["qat", "one-shot"] = "qat"
 
 
 @dataclass
@@ -187,6 +188,7 @@ def _quantise(
         scaling_mode=settings.scaling_mode,
         clip_gradient=settings.clip_gradient,
         error_weight=None,
+        mode=settings.mode,
     )
     if not settings.trainable_centroids:
         for _, p in QT.get_named_parameters(model, "centroids"):
