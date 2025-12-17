@@ -17,6 +17,7 @@ spec:
     spec:
       # Pass dictionary, e.g. {nvidia.com/gpu.clique: clique-id}
       nodeSelector: __TEMPLATE_NODE_SELECTOR__
+      runtimeClassName: nvidia
       containers:
       - name: worker
         image: nvidia/cuda:12.9.1-cudnn-devel-ubuntu22.04
