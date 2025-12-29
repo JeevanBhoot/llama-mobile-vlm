@@ -4,7 +4,7 @@ import sys
 import time
 import traceback
 from contextlib import nullcontext
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable, Literal, Optional
 
 import datasets
@@ -19,6 +19,8 @@ import weight_formats.quantisation_training as QT
 from tqdm import tqdm
 from transformers import MllamaForConditionalGeneration, MllamaProcessor
 from weight_formats.experiments.qat import _compute_kl_loss
+
+from collections import defaultdict
 
 from eval import vqa
 from train_data import Dataset, Datum
@@ -72,6 +74,7 @@ class TrainingSettings:
     batch_size: int
     optimiser: OptimiserSettings
     lr_schedule: LRScheduleSettings
+    freeze_params: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -88,6 +91,7 @@ class ExecutionSettings:
 @dataclass
 class QuantisationSettings:
     fmt: Q.TensorFormat
+    exclude: list[str] = field(default_factory=list)
     scaling_mode: QT.ScalingMode = "dynamic"
     clip_gradient: bool = False
     trainable_centroids: bool = False
@@ -187,9 +191,17 @@ def _apply_fsdp(model: MllamaForConditionalGeneration, **kwargs) -> None:
 def _quantise(
     model: torch.nn.Module, settings: QuantisationSettings
 ) -> torch.nn.Module:
+    fmt_spec = defaultdict(lambda: settings.fmt)
+    param_names = [x[0] for x in model.named_parameters()]
+    exclude = tuple(settings.exclude)
+    if exclude:
+        for p_name in param_names:
+            if p_name.startswith(exclude):
+                fmt_spec[p_name] = Q.TorchFormat("bfloat16")
+
     QT.convert(
         model,
-        fmt_spec=settings.fmt,
+        fmt_spec=fmt_spec,
         scaling_mode=settings.scaling_mode,
         clip_gradient=settings.clip_gradient,
         error_weight=None,
@@ -365,6 +377,13 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                         compute_dtype=getattr(torch, settings.execution.compute_dtype),
                     )
                     run.config["n_bits"] = n_bits
+
+            # Optionally freeze parameters
+            if settings.training.freeze_params:
+                freeze_params = tuple(settings.training.freeze_params)
+                for p_name, p in student.named_parameters():
+                    if p_name.startswith(freeze_params):
+                        p.requires_grad_(False)
 
             if settings.execution.recomputation:
                 student.gradient_checkpointing_enable({"use_reentrant": False})
