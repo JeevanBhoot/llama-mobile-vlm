@@ -365,8 +365,11 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                 device_map="cpu",
             )
 
-            # NOTE: Dropout should be set to 0 by the config
             student.train()
+            # Sanity check to make sure dropout is disabled
+            for m in student.modules():
+                if hasattr(m, "dropout"):
+                    assert m.dropout == 0
 
             if settings.quantisation is not None:
                 student = _quantise(student, settings.quantisation)
