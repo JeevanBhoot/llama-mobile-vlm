@@ -105,6 +105,12 @@ class Task:
 
 
 @dataclass
+class EvaluationSettings:
+    tasks: list[Task]
+    batch_size: int
+
+
+@dataclass
 class Settings:
     run_name: str
     model_name: str
@@ -112,8 +118,8 @@ class Settings:
     quantisation: QuantisationSettings | None
     training: TrainingSettings
     execution: ExecutionSettings
+    evaluation: EvaluationSettings | None
     wandb: bool
-    downstream_tasks: list[Task] | None
     memory_profile: bool
     save_checkpoint: bool
 
@@ -143,13 +149,16 @@ class Settings:
                 lr_schedule=LRScheduleSettings(),
             ),
             execution=ExecutionSettings(),
+            evaluation=EvaluationSettings(
+                tasks=[
+                    Task("vqa", 1024),
+                    Task("chartqa", 1024),
+                    Task("docvqa", 1024),
+                    Task("ai2d", 1024),
+                ],
+                batch_size=512,
+            ),
             wandb=True,
-            downstream_tasks=[
-                Task("vqa", 1024),
-                Task("chartqa", 1024),
-                Task("docvqa", 1024),
-                Task("ai2d", 1024),
-            ],
             memory_profile=False,
             save_checkpoint=False,
         )
@@ -263,7 +272,7 @@ def run_downstream(
     model: MllamaForConditionalGeneration,
     processor: MllamaProcessor,
     tasks: list[Task],
-    local_batch_size: int = 16,
+    batch_size: int,
 ) -> Optional[dict[str, Any]]:
     if dist.is_initialized():
         rank = dist.get_rank()
@@ -287,7 +296,7 @@ def run_downstream(
                 processor,
                 task.name,
                 data,
-                local_batch_size,
+                batch_size // world_size,
                 disable_progress=bool(rank),
             )
         )
@@ -502,7 +511,7 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
             torch.cuda.empty_cache()
 
             # Unshard model in either case
-            if settings.downstream_tasks or settings.save_checkpoint:
+            if settings.evaluation or settings.save_checkpoint:
                 params = get_unsharded_quantised_params(
                     student, dtype=getattr(torch, settings.execution.compute_dtype)
                 )
@@ -510,7 +519,7 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                 gc.collect()
                 torch.cuda.empty_cache()
 
-            if settings.downstream_tasks:
+            if settings.evaluation:
                 _log("downstream tasks")
                 eval_model = (
                     transformers.MllamaForConditionalGeneration.from_pretrained(
@@ -521,7 +530,10 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                 )
                 QT.load_convert(eval_model, params)
                 results = run_downstream(
-                    eval_model, processor, tasks=settings.downstream_tasks
+                    eval_model,
+                    processor,
+                    tasks=settings.evaluation.tasks,
+                    batch_size=settings.evaluation.batch_size,
                 )
                 if settings.wandb and rank == 0:
                     run.summary["downstream"] = results
