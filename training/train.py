@@ -156,7 +156,7 @@ class Settings:
                     Task("docvqa", 1024),
                     Task("ai2d", 1024),
                 ],
-                batch_size=512,
+                batch_size=128,
             ),
             wandb=True,
             memory_profile=False,
