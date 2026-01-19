@@ -565,7 +565,28 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
         dist.destroy_process_group()
 
 
+def _sync_datasets(settings: Settings) -> None:
+    from utility import LOCAL_DATA_PATH, S3_DATA_PATH
+    import subprocess
+
+    check_s3_access()
+
+    train = settings.data.train
+    val = settings.data.validation if settings.data.validation else []
+    for ds in it.chain(train, val):
+        local_path = f"{LOCAL_DATA_PATH}/{ds.path}"
+        s3_path = f"{S3_DATA_PATH}/{ds.path}"
+        subprocess.run(["aws", "s3", "sync", s3_path, local_path], check=True)
+
+    if settings.evaluation:
+        for task in settings.evaluation.tasks:
+            vqa.TASKS[task.name].data()
+
+
 def run_experiment(settings: Settings) -> None:
+    # Sync datasets before spawning processes
+    _sync_datasets(settings)
+
     if settings.execution.world_size == "auto":
         settings.execution.world_size = torch.cuda.device_count()
     try:
