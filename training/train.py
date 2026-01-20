@@ -1,11 +1,15 @@
 import gc
 import itertools as it
+import json
+import os
 import sys
 import time
 import traceback
+from collections import defaultdict
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
-from typing import Any, Iterable, Literal, Optional
+from pathlib import Path
+from typing import Any, Literal, Optional
 
 import datasets
 import torch
@@ -19,8 +23,6 @@ import weight_formats.quantisation_training as QT
 from tqdm import tqdm
 from transformers import MllamaForConditionalGeneration, MllamaProcessor
 from weight_formats.experiments.qat import _compute_kl_loss
-
-from collections import defaultdict
 
 from eval import vqa
 from train_data import Dataset, Datum
@@ -74,6 +76,7 @@ class TrainingSettings:
     batch_size: int
     optimiser: OptimiserSettings
     lr_schedule: LRScheduleSettings
+    validation_interval: int | None = None
     freeze_params: list[str] = field(default_factory=list)
 
 
@@ -108,6 +111,7 @@ class Task:
 class EvaluationSettings:
     tasks: list[Task]
     batch_size: int
+    save_outputs: bool
 
 
 @dataclass
@@ -157,6 +161,7 @@ class Settings:
                     Task("ai2d", 1024),
                 ],
                 batch_size=128,
+                save_outputs=True,
             ),
             wandb=True,
             memory_profile=False,
@@ -247,24 +252,25 @@ def run_validation(
     teacher: MllamaForConditionalGeneration,
     student: MllamaForConditionalGeneration,
     processor: MllamaProcessor,
-    batches: Iterable[list[Datum]],
+    batches: list[list[Datum]],
 ) -> Optional[float]:
     """Return total validation loss to rank 0"""
+    rank = dist.get_rank()
 
     loss = torch.tensor(0.0, dtype=torch.float32)
     n_tokens = torch.tensor(0, dtype=torch.int64)
     with torch.no_grad():
-        for batch in batches:
+        for batch in tqdm(batches, desc="Validation", leave=False, disable=bool(rank)):
             inps = _tokenise_and_add_mask(batch, processor)
             prompt_mask = inps.pop("prompt_mask")
-            loss += _compute_kl_loss(student, teacher, inps, prompt_mask).item()
+            loss += _compute_kl_loss(student, teacher, inps, prompt_mask)
             n_tokens += (inps["attention_mask"] & prompt_mask).sum()
 
     if torch.distributed.is_initialized():
         dist.reduce(loss, dst=0, op=dist.ReduceOp.SUM)
         dist.reduce(n_tokens, dst=0, op=dist.ReduceOp.SUM)
 
-    if dist.get_rank() == 0:
+    if rank == 0:
         return loss.item() / n_tokens.item()
 
 
@@ -273,12 +279,17 @@ def run_downstream(
     processor: MllamaProcessor,
     tasks: list[Task],
     batch_size: int,
+    out_path: Path | str | None,
 ) -> Optional[dict[str, Any]]:
     if dist.is_initialized():
         rank = dist.get_rank()
         world_size = dist.get_world_size()
     else:
         rank, world_size = 0, 1
+
+    if out_path:
+        out_path = Path(out_path)
+        out_path.mkdir(parents=True, exist_ok=True)
 
     results = {}
     for task in tasks:
@@ -300,14 +311,44 @@ def run_downstream(
                 disable_progress=bool(rank),
             )
         )
+        if out_path:
+            with open(out_path / f"{task.name}.{rank}", "w") as f:
+                for x in out:
+                    print(json.dumps(x), file=f)
+                # Make sure per-rank files are visible at the end
+                f.flush()
+                os.fsync(f.fileno())
+
         results[task.name] = {}
         for metric in vqa.TASKS[task.name].METRICS:
-            m = torch.tensor([x[metric] for x in out]).mean()
-            dist.all_reduce(m, dist.ReduceOp.AVG)
-            results[task.name][metric] = m
+            m = torch.tensor([x[metric] for x in out]).sum()
+            n = torch.tensor(len(out), device=m.device)
+            if dist.is_initialized():
+                dist.all_reduce(m, dist.ReduceOp.SUM)
+                dist.all_reduce(n, dist.ReduceOp.SUM)
+            results[task.name][metric] = m / n
 
-    if rank == 0:
+    # all_reduce should already sync ranks, but just in case
+    if dist.is_initialized():
+        dist.barrier()
+
+    if rank != 0:
+        return
+
+    if not out_path:
         return results
+
+    import fileinput
+
+    # Join shards into per-task jsonl files
+    for task in tasks:
+        join_path = out_path / f"{task.name}.jsonl"
+        parts = (out_path / f"{task.name}.{i}" for i in range(world_size))
+        with open(join_path, "w") as f:
+            for line in fileinput.input(parts):
+                f.write(line)
+
+    return results
 
 
 def load_dataset(data_shards: list[DataShard]) -> Dataset:
@@ -316,14 +357,42 @@ def load_dataset(data_shards: list[DataShard]) -> Dataset:
     return Dataset(paths, n_examples)
 
 
+def _sync_datasets(settings: Settings) -> None:
+    import subprocess
+
+    from train_data import IMAGE_DATASETS, load_config
+    from utility import LOCAL_DATA_PATH, S3_DATA_PATH
+
+    check_s3_access()
+
+    train = settings.data.train
+    val = settings.data.validation if settings.data.validation else []
+    for ds in it.chain(train, val):
+        local_path = f"{LOCAL_DATA_PATH}/{ds.path}"
+        s3_path = f"{S3_DATA_PATH}/{ds.path}"
+        subprocess.run(["aws", "s3", "sync", s3_path, local_path], check=True)
+        config = load_config(local_path)
+        IMAGE_DATASETS[config.dataset_name](split=config.split).data(prompt_fn=None)
+
+    if settings.evaluation:
+        for task in settings.evaluation.tasks:
+            vqa.TASKS[task.name].data()
+
+
 def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
     if settings.save_checkpoint:
         check_s3_access()
+
+    device = torch.device("cuda", rank)
+    torch.cuda.set_device(device)
+    torch.set_default_device(device)
+
     dist.init_process_group(
         "nccl",
         init_method=init_method,
         world_size=settings.execution.world_size,
         rank=rank,
+        device_id=device,
     )
     total_t, total_val_t = None, None
     try:
@@ -334,6 +403,7 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
             transformers.utils.logging.disable_progress_bar()
             datasets.utils.logging.disable_progress_bar()
 
+        obj = [None]
         if settings.wandb and rank == 0:
             config = settings.to_dict()
             config["name"] = settings.run_name
@@ -345,10 +415,17 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                 entity="graphcore",
                 project=WANDB_PROJECT,
             )
+            obj[0] = run.id
 
-        device = torch.device("cuda", rank)
-        torch.cuda.set_device(device)
-        torch.set_default_device(device)
+        _log("Downloading datasets")
+        if rank == 0:
+            _sync_datasets(settings)
+
+        dist.barrier()
+
+        # Broadcast run id so all ranks can write outputs
+        dist.broadcast_object_list(obj, src=0)
+        run_id = obj[0]
 
         processor = transformers.AutoProcessor.from_pretrained(settings.model_name)
 
@@ -357,7 +434,7 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
             teacher = transformers.MllamaForConditionalGeneration.from_pretrained(
                 settings.model_name,
                 torch_dtype=getattr(torch, settings.execution.teacher_dtype),
-                device_map="cpu" if settings.execution.wrap_teacher else device,
+                device_map=device,
             )
             for p in teacher.parameters():
                 p.requires_grad_(False)
@@ -370,9 +447,10 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
             # Quantised model
             student = transformers.MllamaForConditionalGeneration.from_pretrained(
                 settings.model_name,
-                torch_dtype=getattr(torch, settings.execution.params_dtype),
-                device_map="cpu",
+                torch_dtype=getattr(torch, settings.execution.teacher_dtype),
+                device_map=device,
             )
+            student.to(dtype=getattr(torch, settings.execution.params_dtype))
 
             student.train()
             # Sanity check to make sure dropout is disabled
@@ -443,9 +521,10 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
 
             if settings.data.validation:
                 val_data = load_dataset(settings.data.validation)
-                # Assuming n_validation_steps == n_training_steps
-                # TODO: Make this flexible
-                n_val_steps = len(val_data.data) // settings.training.batch_size
+                # By default total num validation steps == total num training steps
+                val_interval = settings.training.validation_interval
+                if val_interval is None:
+                    val_interval = len(val_data.data) // settings.training.batch_size
                 val_batches = list(
                     distributed_batches(
                         val_data.get_datums(),
@@ -455,15 +534,16 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                     )
                 )
 
-            _log("training")
             total_t0 = time.time()
             total_val_t = 0.0
             total_n_toks = 0
             for step, batch in tqdm(
-                enumerate(batches), total=settings.training.n_steps, disable=bool(rank)
+                enumerate(batches),
+                desc="Training",
+                total=settings.training.n_steps,
+                disable=bool(rank),
             ):
-                # TODO: Make this flexible
-                if settings.data.validation and step % n_val_steps == 0:
+                if settings.data.validation and step % val_interval == 0:
                     t0 = time.time()
                     val_loss = run_validation(teacher, student, processor, val_batches)
                     val_step_t = time.time() - t0
@@ -520,7 +600,12 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                 torch.cuda.empty_cache()
 
             if settings.evaluation:
-                _log("downstream tasks")
+                _log("Evaluating downstream tasks")
+                out_path = (
+                    Path(f"out/evaluation/{run_id}")
+                    if settings.evaluation.save_outputs
+                    else None
+                )
                 eval_model = (
                     transformers.MllamaForConditionalGeneration.from_pretrained(
                         settings.model_name,
@@ -534,12 +619,24 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                     processor,
                     tasks=settings.evaluation.tasks,
                     batch_size=settings.evaluation.batch_size,
+                    out_path=out_path,
                 )
                 if settings.wandb and rank == 0:
                     run.summary["downstream"] = results
 
+                    # Save generated outputs as wandb artifact
+                    if out_path:
+                        artifact = wandb.Artifact(
+                            f"task-outputs-{run.id}", "task_outputs"
+                        )
+                        for task in settings.evaluation.tasks:
+                            path = out_path / f"{task.name}.jsonl"
+                            if path.exists():
+                                artifact.add_file(path)
+                        wandb.log_artifact(artifact)
+
             if settings.save_checkpoint:
-                _log("save checkpoint")
+                _log("Saving checkpoint")
                 path = None
                 if rank == 0:
                     path = CHECKPOINT_PATH.format(
@@ -565,28 +662,7 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
         dist.destroy_process_group()
 
 
-def _sync_datasets(settings: Settings) -> None:
-    from utility import LOCAL_DATA_PATH, S3_DATA_PATH
-    import subprocess
-
-    check_s3_access()
-
-    train = settings.data.train
-    val = settings.data.validation if settings.data.validation else []
-    for ds in it.chain(train, val):
-        local_path = f"{LOCAL_DATA_PATH}/{ds.path}"
-        s3_path = f"{S3_DATA_PATH}/{ds.path}"
-        subprocess.run(["aws", "s3", "sync", s3_path, local_path], check=True)
-
-    if settings.evaluation:
-        for task in settings.evaluation.tasks:
-            vqa.TASKS[task.name].data()
-
-
 def run_experiment(settings: Settings) -> None:
-    # Sync datasets before spawning processes
-    _sync_datasets(settings)
-
     if settings.execution.world_size == "auto":
         settings.execution.world_size = torch.cuda.device_count()
     try:

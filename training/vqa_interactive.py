@@ -15,9 +15,8 @@ import safetensors.torch
 import torch
 import tqdm
 import transformers
-import weight_formats.quantisation as Q
 import weight_formats.quantisation_training as QT
-from torch import Tensor, nn
+from torch import Tensor
 
 import train
 from utility import LLAMA_PROMPT_TEMPLATES
@@ -65,7 +64,9 @@ def load_parameters_from_file(
                 params[name] = module().cpu()
             else:
                 for k, p in module._parameters.items():
-                    params[".".join(name.split(".") + [k])] = None if p is None else p.cpu()
+                    params[".".join(name.split(".") + [k])] = (
+                        None if p is None else p.cpu()
+                    )
     return params
 
 

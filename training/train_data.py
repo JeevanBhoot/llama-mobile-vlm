@@ -483,7 +483,6 @@ class Dataset:
     def __len__(self):
         return len(self.data)
 
-    # TODO: This function is unnecessary now!
     def get_datums(self) -> Iterable[Datum]:
         for x in self.data:
             yield Datum(**x)
