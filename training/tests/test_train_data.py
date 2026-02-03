@@ -11,6 +11,7 @@ def test_dataset(tmp_path: Path) -> None:
     class InlineProc:
         def __init__(self, target, args):
             self._target, self._args = target, args
+            self.exitcode = 0
 
         def start(self):
             self._target(*self._args)  # run synchronously in-process
