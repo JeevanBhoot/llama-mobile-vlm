@@ -2,11 +2,14 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
+  namespace: graphcore
   generateName: __TEMPLATE_USER__-__TEMPLATE_PROJECT__-
   labels:
+    kueue.x-k8s.io/queue-name: unified
     user: __TEMPLATE_USER__
-    app: __TEMPLATE_PROJECT__
-    team: graphcore
+    email: __TEMPLATE_USER___at_graphcore.ai
+    project: __TEMPLATE_PROJECT__
+    organization: graphcore
 spec:
   parallelism: 1
   completions: 1
@@ -14,10 +17,21 @@ spec:
   backoffLimitPerIndex: 0  # maximal number of failures per index
   ttlSecondsAfterFinished: 7200
   template:
+    metadata:
+      labels:
+        user: __TEMPLATE_USER__
+        email: __TEMPLATE_USER___at_graphcore.ai
+        project: __TEMPLATE_PROJECT__
+        organization: graphcore
     spec:
       # Pass dictionary, e.g. {nvidia.com/gpu.clique: clique-id}
       nodeSelector: __TEMPLATE_NODE_SELECTOR__
       runtimeClassName: nvidia
+      tolerations:
+      - key: "kueue.x-k8s.io/dedicated"
+        operator: "Equal"
+        value: "true"
+        effect: "NoSchedule"
       containers:
       - name: worker
         image: nvidia/cuda:12.9.1-cudnn-devel-ubuntu22.04
@@ -66,7 +80,4 @@ spec:
             nvidia.com/gpu: __TEMPLATE_GPUS__
             memory: __TEMPLATE_MEMORY__
             cpu: __TEMPLATE_CPUS__
-        ports:
-        - containerPort: 8888
-          name: notebook
       restartPolicy: Never
