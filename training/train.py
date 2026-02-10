@@ -267,8 +267,8 @@ def run_validation(
             n_tokens += (inps["attention_mask"] & prompt_mask).sum()
 
     if torch.distributed.is_initialized():
-        dist.reduce(loss, dst=0, op=dist.ReduceOp.SUM)
-        dist.reduce(n_tokens, dst=0, op=dist.ReduceOp.SUM)
+        dist.all_reduce(loss)
+        dist.all_reduce(n_tokens)
 
     if rank == 0:
         return loss.item() / n_tokens.item()
@@ -558,7 +558,9 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
 
                 opt.zero_grad()
 
-                loss = _compute_kl_loss(student, teacher, inps, prompt_mask)
+                n_toks = (inps["attention_mask"] & prompt_mask).sum()
+                dist.all_reduce(n_toks)
+                loss = _compute_kl_loss(student, teacher, inps, prompt_mask) / n_toks
 
                 loss.backward()
                 opt.step()
@@ -566,12 +568,8 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
 
                 # Log step data
                 out = {}
-                total_loss = loss.detach().clone()
-                dist.reduce(total_loss, dst=0, op=dist.ReduceOp.SUM)
-                with torch.no_grad():
-                    n_toks = (inps["attention_mask"] & prompt_mask).sum()
-                    dist.reduce(n_toks, dst=0, op=dist.ReduceOp.SUM)
-                    total_n_toks += n_toks.item()
+                total_n_toks += n_toks.item()
+                dist.all_reduce(loss)
                 if settings.wandb and rank == 0:
                     out["train/tokens"] = total_n_toks
                     out["train/toks_per_step"] = n_toks.item()
@@ -579,7 +577,7 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                     out["perf/toks_per_s"] = (
                         out["train/toks_per_step"] / out["perf/step_time"]
                     )
-                    out["train/loss"] = total_loss.item() / n_toks.item()
+                    out["train/loss"] = loss.item()
                     if val_loss:
                         out["val/loss"] = val_loss
                         out["perf/val_step_time"] = val_step_t
