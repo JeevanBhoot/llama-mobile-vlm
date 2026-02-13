@@ -9,7 +9,8 @@ Evaluate Visual question-answering tasks
 - ChartQA
     - https://arxiv.org/abs/2203.10244
     - Baseline accuracy: 75.9% (test, 1k sample), Meta: 83.4% (test)
-    - NOTE: Uses "relaxed accuracy": numeric answers should allow 5% tolerance
+    - NOTE: Numeric answers allow 5% tolerance. This is called "relaxed accuracy"
+    in the paper; the term is used differently here (!)
 
 - DocVQA
     - https://arxiv.org/abs/2007.00398
@@ -144,6 +145,10 @@ def _process_text(text: str) -> str:
     return text
 
 
+def _relaxed_match(text: str, answer: str) -> bool:
+    return bool(re.search(rf"\b{re.escape(answer)}\b", text))
+
+
 @dataclass
 class Batch:
     ids: list[int]
@@ -152,13 +157,14 @@ class Batch:
     answers: list[Any]
 
 
-METRIC: TypeAlias = Literal["accuracy", "accuracy_easy", "anls"]
+METRIC: TypeAlias = Literal["accuracy", "anls", "accuracy_relaxed"]
 
 
 class Task:
     QUESTION_TEMPLATE: str
     MAX_NEW_TOKENS: int
     METRICS: list[METRIC]
+    RELAXED_METRICS: list[METRIC]
 
     @classmethod
     def data(
@@ -171,7 +177,9 @@ class Task:
         raise NotImplementedError
 
     @classmethod
-    def evaluate_prediction(cls, out: str, answer: Any) -> dict[str, float]:
+    def evaluate_prediction(
+        cls, out: str, answer: Any, include_relaxed_metrics: bool = False
+    ) -> dict[str, float]:
         raise NotImplementedError
 
 
@@ -186,7 +194,8 @@ class VQA(Task):
         "Respond with as few words as possible.\n Question: {question}"
     )
     MAX_NEW_TOKENS = 25
-    METRICS = ["accuracy", "accuracy_easy"]
+    METRICS = ["accuracy"]
+    RELAXED_METRICS = ["accuracy_relaxed"]
 
     @classmethod
     def data(
@@ -231,7 +240,9 @@ class VQA(Task):
         )
 
     @classmethod
-    def evaluate_prediction(cls, out: str, answers: list[str]) -> dict[str, float]:
+    def evaluate_prediction(
+        cls, out: str, answers: list[str], include_relaxed_metrics: bool = False
+    ) -> dict[str, float]:
         out_norm = _process_text(out)
         answers_norm = [_process_text(answer) for answer in answers]
 
@@ -239,16 +250,19 @@ class VQA(Task):
         n_matches = sum(
             [out_norm.startswith(answer) for answer in answers_norm if answer]
         )
-        n_matches_easy = sum(
-            [
-                bool(re.search(rf"\b{re.escape(answer)}\b", out_norm))
-                for answer in answers_norm
-                if answer
-            ]
-        )
-        return dict(
-            accuracy=min(n_matches / 3, 1.0), accuracy_easy=min(n_matches_easy / 3, 1.0)
-        )
+        results = dict(accuracy=min(n_matches / 3, 1.0))
+
+        if include_relaxed_metrics:
+            n_matches_relaxed = sum(
+                [
+                    bool(re.search(rf"\b{re.escape(answer)}\b", out_norm))
+                    for answer in answers_norm
+                    if answer
+                ]
+            )
+            results["accuracy_relaxed"] = min(n_matches_relaxed / 3, 1.0)
+
+        return results
 
 
 class ChartQA(Task):
@@ -261,6 +275,7 @@ class ChartQA(Task):
     )
     MAX_NEW_TOKENS = 512
     METRICS = ["accuracy"]
+    RELAXED_METRICS = ["accuracy_relaxed"]
 
     @classmethod
     def data(
@@ -310,7 +325,7 @@ class ChartQA(Task):
         return ""
 
     @classmethod
-    def _parse_numeric(cls, text: str) -> float | None:
+    def _parse_numeric(cls, text: str) -> list[float]:
         # Convert number words to digits
         text = text.lower()
         text = re.sub(
@@ -320,27 +335,53 @@ class ChartQA(Task):
         )
 
         # Extract just the numerical part (if it exists)
-        match = re.search(r"[-]?\d*\.?\d+", text)
-        if match:
-            return float(match.group())
-        return None
+        matches = re.findall(r"[-]?\d*\.?\d+", text)
+        return [float(x) for x in matches]
 
     @classmethod
-    def evaluate_prediction(cls, out: str, label: str) -> dict[str, float]:
+    def _check_numeric_answer(cls, num_answer: float, num_label: float) -> bool:
+        return 0.95 * num_label < num_answer < 1.05 * num_label
+
+    @classmethod
+    def evaluate_prediction(
+        cls, out: str, label: str, include_relaxed_metrics: bool = False
+    ) -> dict[str, float]:
         answer = cls._get_answer(out)
 
-        # If numeric, allow for 5% tolerance
-        num_answer = cls._parse_numeric(answer)
-        if num_answer is not None:
-            try:
-                num_label = float(label)
-                match = 0.95 * num_label < num_answer < 1.05 * num_label
-                return dict(accuracy=float(match))
-            except ValueError:
-                pass
+        results = {}
 
-        # Ignore case, punctuation, etc.
-        return dict(accuracy=float(_process_text(answer) == _process_text(label)))
+        # Check if expected answer is numeric
+        try:
+            num_label = float(label)
+        except ValueError:
+            num_label = None
+
+        # Expecting a numeric answer, allow for 5% tolerance
+        if num_label is not None:
+            nums_in_answer = cls._parse_numeric(answer)
+
+            results["accuracy"] = float(
+                cls._check_numeric_answer(nums_in_answer[0], num_label)
+                if nums_in_answer
+                else False
+            )
+
+            if include_relaxed_metrics:
+                nums_in_out = cls._parse_numeric(out)
+                results["accuracy_relaxed"] = float(
+                    any(cls._check_numeric_answer(x, num_label) for x in nums_in_out)
+                )
+        # Non-numeric answer (ignore case, punctuation, etc.)
+        else:
+            answer_norm = _process_text(answer)
+            label_norm = _process_text(label)
+            results["accuracy"] = float(answer_norm == label_norm)
+            if include_relaxed_metrics:
+                results["accuracy_relaxed"] = float(
+                    _relaxed_match(answer_norm, label_norm)
+                )
+
+        return results
 
 
 class DocVQA(Task):
@@ -354,6 +395,7 @@ class DocVQA(Task):
     )
     MAX_NEW_TOKENS = 512
     METRICS = ["anls"]
+    RELAXED_METRICS = ["accuracy_relaxed"]
 
     @classmethod
     def data(
@@ -392,17 +434,34 @@ class DocVQA(Task):
 
     @classmethod
     def evaluate_prediction(
-        cls, out: str, answers: list[str], threshold: float = 0.5
+        cls,
+        out: str,
+        answers: list[str],
+        threshold: float = 0.5,
+        include_relaxed_metrics: bool = False,
     ) -> dict[str, float]:
-        out = cls._preprocess(out)
-        results = []
+        out_p = cls._preprocess(out)
+
+        results = {}
+
+        matches = []
         for ans in answers:
-            ans = cls._preprocess(ans)
-            norm_dist = edit_distance(out, ans) / max(len(out), len(ans))
+            ans_p = cls._preprocess(ans)
+            norm_dist = edit_distance(out_p, ans_p) / max(len(out_p), len(ans_p))
             # If normalised distance >= threshold, assume answer is wrong and set to 1
-            norm_dist = norm_dist if norm_dist < threshold else 1
-            results.append(1 - norm_dist)
-        return dict(anls=max(results))  # report the best match
+            norm_dist = norm_dist if norm_dist < threshold else 1.0
+            matches.append(1 - norm_dist)
+        results["anls"] = max(matches)  # report the best match
+
+        if include_relaxed_metrics:
+            out_norm = _process_text(out)
+            relaxed_matches = []
+            for ans in answers:
+                ans_norm = _process_text(ans)
+                relaxed_matches.append(_relaxed_match(out_norm, ans_norm))
+            results["accuracy_relaxed"] = float(any(relaxed_matches))
+
+        return results
 
 
 class AI2D(Task):
@@ -422,6 +481,7 @@ class AI2D(Task):
     )
     MAX_NEW_TOKENS = 400
     METRICS = ["accuracy"]
+    RELAXED_METRICS = ["accuracy_relaxed"]
 
     @classmethod
     def _format_options(cls, options: list[str]) -> str:
@@ -476,20 +536,29 @@ class AI2D(Task):
         return ""
 
     @classmethod
-    def _parse_numeric(cls, text: str) -> int | None:
+    def _parse_numeric(cls, text: str) -> list[int]:
         # In the answer, find "1)", "2)", etc. and return the index
-        match = re.search(r"([1-4])\)", text)
-        if match:
-            return int(match.group(1))
-        return None
+        matches = re.findall(r"([1-4])\)", text)
+        return [int(x) for x in matches]
 
     @classmethod
-    def evaluate_prediction(cls, out: str, answer: str) -> dict[str, float]:
-        num_answer = int(answer)
-        num_out = cls._parse_numeric(cls._get_answer(out))
-        # Ground truth starts from 0
-        num_out = num_out - 1 if num_out is not None else None
-        return dict(accuracy=float(num_out == num_answer))
+    def evaluate_prediction(
+        cls, out: str, label: str, include_relaxed_metrics: bool = False
+    ) -> dict[str, float]:
+        results = {}
+
+        num_label = int(label) + 1  # convert to 1-4
+
+        answer = cls._get_answer(out)
+        nums_in_answer = cls._parse_numeric(answer)
+        num_answer = nums_in_answer[0] if nums_in_answer else None
+        results["accuracy"] = float(num_answer == num_label)
+
+        if include_relaxed_metrics:
+            nums_in_out = cls._parse_numeric(out)
+            results["accuracy_relaxed"] = float(num_label in nums_in_out)
+
+        return results
 
 
 TASKS: dict[str, Task] = dict(vqa=VQA, chartqa=ChartQA, docvqa=DocVQA, ai2d=AI2D)
@@ -502,6 +571,7 @@ def evaluate(
     data: datasets.Dataset,
     batch_size: int,
     system_template: str = LLAMA_PROMPT_TEMPLATES["instruct"],
+    include_relaxed_metrics: bool = False,
     disable_progress: bool = False,
 ) -> Iterable[dict]:
     task = TASKS[task_name]
@@ -544,5 +614,8 @@ def evaluate(
             yield dict(
                 id=id,
                 output=out,
-                **task.evaluate_prediction(out, answers),
+                answers=answers,
+                **task.evaluate_prediction(
+                    out, answers, include_relaxed_metrics=include_relaxed_metrics
+                ),
             )

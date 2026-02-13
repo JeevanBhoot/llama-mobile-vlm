@@ -34,8 +34,8 @@ def test_process_text() -> None:
 def test_vqa_evaluate_prediction() -> None:
     answers = ["Three musketeers", "3 Musketeers"] + ["4 swordsmen"] * 8
     out = "  The three MUSKETEERS! 4 swordsmen <|eot_id|>"
-    results = vqa.VQA.evaluate_prediction(out, answers)
-    assert results == dict(accuracy=2 / 3, accuracy_easy=1.0)
+    results = vqa.VQA.evaluate_prediction(out, answers, include_relaxed_metrics=True)
+    assert results == {"accuracy": 2 / 3, "accuracy_relaxed": 1.0}
 
 
 def test_chartqa_get_answer() -> None:
@@ -61,7 +61,7 @@ def test_chartqa_parse_numeric() -> None:
         "13.5%",
     ]
     out = [vqa.ChartQA._parse_numeric(text) for text in texts]
-    expected = [None, 5.0, 3.1415, 135.0, 10.0, 53.4, 13.5]
+    expected = [[], [5.0], [3.1415], [135.0], [10.0], [53.4], [13.5]]
     assert out == expected
 
 
@@ -77,11 +77,20 @@ def test_chartqa_evaluate_prediction() -> None:
 
     misses = [
         base.format("Answer: Green. But there is more text after."),
-        base.format("Answer: 105.1"),
         base.format("The answer is 100."),
+        base.format("Answer: 105.1"),
     ]
-    out = [vqa.ChartQA.evaluate_prediction(x, l) for x, l in zip(hits + misses, labels)]
-    expected = [{"accuracy": acc} for acc in [1.0, 1.0, 1.0, 0.0, 0.0, 0.0]]
+    out = [
+        vqa.ChartQA.evaluate_prediction(x, l, include_relaxed_metrics=True)
+        for x, l in zip(hits + misses, labels)
+    ]
+    expected_accs = [1.0, 1.0, 1.0, 0.0, 0.0, 0.0]
+    expected_rel_accs = [1.0, 1.0, 1.0, 1.0, 1.0, 0.0]
+
+    expected = [
+        {"accuracy": acc, "accuracy_relaxed": r_acc}
+        for acc, r_acc in zip(expected_accs, expected_rel_accs)
+    ]
     assert out == expected
 
 
@@ -101,7 +110,7 @@ def test_ai2d_get_answer() -> None:
 def test_ai2d_parse_numeric() -> None:
     texts = ["0)", "1)", "Answer is 2)", "3), I think.", "4)", "5)"]
     out = [vqa.AI2D._parse_numeric(text) for text in texts]
-    expected = [None, 1, 2, 3, 4, None]
+    expected = [[], [1], [2], [3], [4], []]
     assert out == expected
 
 
@@ -115,14 +124,21 @@ def test_ai2d_evaluate_prediction() -> None:
     ]
 
     misses = [
+        base.format("The correct option is 1)."),  # looking for answer/option:
         base.format("Answer: 1."),  # looking for N)
         base.format("Answer: 2)"),  # incorrect
-        base.format("The correct option is 1)."),  # looking for answer/option:
     ]
-    out = [vqa.AI2D.evaluate_prediction(x, l) for x, l in zip(hits + misses, labels)]
-    expected = [{"accuracy": acc} for acc in [1.0, 1.0, 1.0, 0.0, 0.0, 0.0]]
-    print(out)
-    print(expected)
+    out = [
+        vqa.AI2D.evaluate_prediction(x, l, include_relaxed_metrics=True)
+        for x, l in zip(hits + misses, labels)
+    ]
+    expected_accs = [1.0, 1.0, 1.0, 0.0, 0.0, 0.0]
+    expected_rel_accs = [1.0, 1.0, 1.0, 1.0, 0.0, 0.0]
+
+    expected = [
+        {"accuracy": acc, "accuracy_relaxed": rel_acc}
+        for acc, rel_acc in zip(expected_accs, expected_rel_accs)
+    ]
     assert out == expected
 
 
@@ -160,7 +176,7 @@ def test_evaluate() -> None:
         out = vqa.evaluate(
             model, processor, task_name=task_name, data=data, batch_size=1
         )
-        expected_keys = {"id", "output", *task.METRICS}
+        expected_keys = {"id", "output", "answers", *task.METRICS}
         for x, y in zip(data, out):
             assert set(y.keys()) == expected_keys
             ids = [

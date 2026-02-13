@@ -112,6 +112,7 @@ class EvaluationSettings:
     tasks: list[Task]
     batch_size: int
     save_outputs: bool
+    include_relaxed_metrics: bool
 
 
 @dataclass
@@ -162,6 +163,7 @@ class Settings:
                 ],
                 batch_size=128,
                 save_outputs=True,
+                include_relaxed_metrics=True,
             ),
             wandb=True,
             memory_profile=False,
@@ -279,6 +281,7 @@ def run_downstream(
     processor: MllamaProcessor,
     tasks: list[Task],
     batch_size: int,
+    include_relaxed_metrics: bool,
     out_path: Path | str | None,
 ) -> Optional[dict[str, Any]]:
     if dist.is_initialized():
@@ -308,6 +311,7 @@ def run_downstream(
                 task.name,
                 data,
                 batch_size // world_size,
+                include_relaxed_metrics=include_relaxed_metrics,
                 disable_progress=bool(rank),
             )
         )
@@ -320,7 +324,10 @@ def run_downstream(
                 os.fsync(f.fileno())
 
         results[task.name] = {}
-        for metric in vqa.TASKS[task.name].METRICS:
+        metrics = vqa.TASKS[task.name].METRICS
+        if include_relaxed_metrics:
+            metrics += vqa.TASKS[task.name].RELAXED_METRICS
+        for metric in metrics:
             m = torch.tensor([x[metric] for x in out]).sum()
             n = torch.tensor(len(out), device=m.device)
             if dist.is_initialized():
@@ -617,6 +624,7 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                     processor,
                     tasks=settings.evaluation.tasks,
                     batch_size=settings.evaluation.batch_size,
+                    include_relaxed_metrics=settings.evaluation.include_relaxed_metrics,
                     out_path=out_path,
                 )
                 if settings.wandb and rank == 0:
