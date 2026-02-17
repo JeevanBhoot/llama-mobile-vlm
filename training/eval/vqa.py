@@ -348,6 +348,9 @@ class ChartQA(Task):
     ) -> dict[str, float]:
         answer = cls._get_answer(out)
 
+        # Used for evaluating relaxed accuracy
+        out_norm = _process_text(out)
+
         results = {}
 
         # Check if expected answer is numeric
@@ -367,7 +370,7 @@ class ChartQA(Task):
             )
 
             if include_relaxed_metrics:
-                nums_in_out = cls._parse_numeric(out)
+                nums_in_out = cls._parse_numeric(out_norm)
                 results["accuracy_relaxed"] = float(
                     any(cls._check_numeric_answer(x, num_label) for x in nums_in_out)
                 )
@@ -378,7 +381,7 @@ class ChartQA(Task):
             results["accuracy"] = float(answer_norm == label_norm)
             if include_relaxed_metrics:
                 results["accuracy_relaxed"] = float(
-                    _relaxed_match(answer_norm, label_norm)
+                    _relaxed_match(out_norm, label_norm)
                 )
 
         return results
