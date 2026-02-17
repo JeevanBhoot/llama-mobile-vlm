@@ -146,7 +146,8 @@ def _process_text(text: str) -> str:
 
 
 def _relaxed_match(text: str, answer: str) -> bool:
-    return bool(re.search(rf"\b{re.escape(answer)}\b", text))
+    # Previously: re.search(rf"\b{re.escape(answer)}\b", text)
+    return answer in text
 
 
 @dataclass
@@ -457,7 +458,7 @@ class DocVQA(Task):
         results["anls"] = max(matches)  # report the best match
 
         if include_relaxed_metrics:
-            out_norm = _process_text(out)
+            out_norm = _process_text(out.replace("<|eot_id|>", ""))
             relaxed_matches = []
             for ans in answers:
                 ans_norm = _process_text(ans)
