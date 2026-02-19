@@ -130,14 +130,18 @@ class Settings:
 
     @classmethod
     def default(cls) -> "Settings":
+        gen_path = "generation/llama-3.2-11b-vision-instruct"
         return cls(
             run_name="test",
             model_name="meta-llama/Llama-3.2-11B-Vision-Instruct",
             data=DataSettings(
                 train=[
-                    DataShard("imagenet-train-generation/17-11-25-all-examples", None),
+                    DataShard(
+                        f"{gen_path}/imagenet-train/17-11-25-all-examples",
+                        None,
+                    )
                 ],
-                validation=[DataShard("vqav2-validation-generation/61e74b", 4096)],
+                validation=[DataShard(f"{gen_path}/coco-validation/0d5e0f", 4096)],
             ),
             quantisation=QuantisationSettings(
                 fmt=Q.LinearScalingFormat(
@@ -150,7 +154,7 @@ class Settings:
             training=TrainingSettings(
                 n_steps=16,
                 batch_size=128,
-                optimiser=OptimiserSettings(lr=2**-18),
+                optimiser=OptimiserSettings(lr=2**-17),
                 lr_schedule=LRScheduleSettings(),
             ),
             execution=ExecutionSettings(),

@@ -1,12 +1,13 @@
 import unittest.mock as um
 from pathlib import Path
-
+import uuid
+import shutil
 import torch
 
 import train_data
 
 
-def test_dataset(tmp_path: Path) -> None:
+def test_dataset() -> None:
     # To avoid running multiprocessing
     class InlineProc:
         def __init__(self, target, args):
@@ -33,28 +34,32 @@ def test_dataset(tmp_path: Path) -> None:
     dummy.name_or_path = "meta-llama/Llama-3.2-11B-Vision-Instruct"
     dummy.generate.return_value = torch.tensor([[0], [0]], device=dummy.device)
 
-    with um.patch("train_data.mp.get_context", return_value=InlineCtx()), um.patch(
-        "train_data.transformers.MllamaForConditionalGeneration.from_pretrained",
-        return_value=dummy,
-    ):
-        out_dir = train_data.generate_data(
-            config,
-            batch_size=2,
-            world_size=1,
-            data_path=str(tmp_path),
-            sync_to_s3=False,
-        )
+    try:
+        with um.patch("train_data.mp.get_context", return_value=InlineCtx()), um.patch(
+            "train_data.transformers.MllamaForConditionalGeneration.from_pretrained",
+            return_value=dummy,
+        ):
+            out_dir = train_data.generate_data(
+                config,
+                batch_size=2,
+                world_size=1,
+                dir_name=f"tmp-pytest-{uuid.uuid4().hex[:6]}",
+                sync_to_s3=False,
+            )
 
-    config_read = train_data.load_config(out_dir)
-    assert config == config_read
+        config_read = train_data.load_config(out_dir)
+        assert config == config_read
 
-    # Last batch is dropped as n_examples % batch_size != 0
-    assert config.data_range == (0, 2)
+        # Last batch is dropped as n_examples % batch_size != 0
+        assert config.data_range == (0, 2)
 
-    # # Check if joining works
-    ds = train_data.Dataset([out_dir] * 2, n_examples=[None] * 2)
+        # # Check if joining works
+        ds = train_data.Dataset([out_dir] * 2, n_examples=[None] * 2)
 
-    assert len(ds.data) == 4
-    for x in ds.get_datums():
-        assert isinstance(x, train_data.Datum)
-        assert x.out == "!"  # token_idx = 0
+        assert len(ds.data) == 4
+        for x in ds.get_datums():
+            assert isinstance(x, train_data.Datum)
+            assert x.out == "!"  # token_idx = 0
+    finally:
+        if Path(out_dir).exists():
+            shutil.rmtree(out_dir)

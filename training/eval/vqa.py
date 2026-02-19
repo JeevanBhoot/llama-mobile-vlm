@@ -210,8 +210,8 @@ class VQA(Task):
 
         if load_from_s3:
             dir_name = f"vqav2-{split}"
-            local_path = f"{LOCAL_DATA_PATH}/{dir_name}"
-            s3_path = f"{S3_DATA_PATH}/{dir_name}"
+            local_path = f"{LOCAL_DATA_PATH}/datasets/{dir_name}"
+            s3_path = f"{S3_DATA_PATH}/datasets/{dir_name}"
             subprocess.run(["aws", "s3", "sync", s3_path, local_path], check=True)
             ds = datasets.load_from_disk(local_path)
         else:

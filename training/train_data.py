@@ -24,8 +24,6 @@ from utility import (
     set_padding_side_left,
 )
 
-DEFAULT_PROMPT = "Describe the image:\n"
-
 
 @dataclass
 class SamplingSettings:
@@ -52,8 +50,8 @@ class ImageDataset:
 
     def _get_paths(self) -> tuple[str, str]:
         dir_name = f"{self.name}-{self.split}"
-        s3_path = f"{S3_DATA_PATH}/{dir_name}"
-        local_path = f"{LOCAL_DATA_PATH}/{dir_name}"
+        s3_path = f"{S3_DATA_PATH}/datasets/{dir_name}"
+        local_path = f"{LOCAL_DATA_PATH}/datasets/{dir_name}"
         return s3_path, local_path
 
     def download(self, sync: bool = True) -> None:
@@ -346,9 +344,21 @@ def generate_data(
     batch_size: int = 128,
     dtype: str = "bfloat16",
     world_size: int = torch.cuda.device_count(),
-    data_path: str = LOCAL_DATA_PATH,
+    dir_name: str | None = None,
     sync_to_s3: bool = True,
 ) -> str:
+    def _get_dir_path(dir_name: str) -> str:
+        dir_name = dir_name or config.to_hash()
+        model = config.model_name.removeprefix("meta-llama/").lower()
+        dataset = f"{config.dataset_name}-{config.split}"
+        return f"generation/{model}/{dataset}/{dir_name}"
+
+    # Sync dataset before spawning workers
+    _ = IMAGE_DATASETS[config.dataset_name](split=config.split).data(
+        prompt_fn=None,
+        seed=config.seed,
+    )
+
     n_examples = config.data_range[1] - config.data_range[0]
     if n_examples % batch_size != 0:
         orig_range = config.data_range
@@ -365,8 +375,8 @@ def generate_data(
 
     ctx = mp.get_context("spawn")
 
-    dir_path = f"{config.dataset_name}-{config.split}-generation/{config.to_hash()}"
-    path = f"{data_path}/{dir_path}"
+    dir_path = _get_dir_path(dir_name)
+    path = f"{LOCAL_DATA_PATH}/{dir_path}"
     out_path = path + "/out/out{}.jsonl"
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
 
@@ -488,49 +498,73 @@ class Dataset:
             yield Datum(**x)
 
 
-def join_data(paths: list[str | Path], out_path: str | Path) -> None:
+def join_data(
+    paths: list[str | Path], out_path: str | Path, sync_s3: bool = True
+) -> None:
     """Join generated data from a distributed process and write to a new path.
     Requires:
     - config fields for each path should match (apart from data_range)
     - data_range fields should be joinable
     (such as [0, 16] and [16, 32], but not [0, 16], [14, 32])
     """
+    local_paths = [Path(LOCAL_DATA_PATH) / p for p in paths]
+
+    if sync_s3:
+        check_s3_access()
+        s3_paths = [f"{S3_DATA_PATH}/{p}" for p in paths]
+        for local_path, s3_path in zip(local_paths, s3_paths):
+            subprocess.run(["aws", "s3", "sync", s3_path, str(local_path)], check=True)
+
+    # Check if all shards were created successfully
+    for path in local_paths:
+        success_path = path / "log" / "_SUCCESS"
+        if not success_path.is_file():
+            raise FileNotFoundError(f"{success_path} not found")
+
     # Load configs, check if they can be joined
-    configs = []
-    for p in paths:
-        configs.append(load_config(p))
-    configs.sort(key=lambda x: x.data_range[0])
+    items = [(load_config(p), p) for p in local_paths]
+    items.sort(key=lambda x: x[0].data_range[0])
+    configs = [x[0] for x in items]
+    local_paths = [x[1] for x in items]
 
     # Check if metadata matches and data ranges are joinable
     for c1, c2 in zip(configs[:-1], configs[1:]):
         d1 = c1.to_dict()
         d2 = c2.to_dict()
-        if d1.pop("data_range")[1] != d2.pop("data_range")[0]:
-            return
+        range1 = d1.pop("data_range")
+        range2 = d2.pop("data_range")
+        if range1[1] != range2[0]:
+            raise ValueError(f"Data ranges {range1} and {range2} are not continuous")
         if d1 != d2:
-            return
+            raise ValueError(f"Config mismatch:\n{d1}\n!=\n{d2}")
 
     config = deepcopy(configs[0])
     config.data_range = (configs[0].data_range[0], configs[-1].data_range[1])
 
-    out_path = Path(out_path)
-    out_path.mkdir(parents=True, exist_ok=True)
+    local_out_path = Path(LOCAL_DATA_PATH) / out_path
+    local_out_path.mkdir(parents=True, exist_ok=True)
 
     # Save config info
     d = config.to_dict()
     d["created at"] = datetime.now().isoformat(timespec="seconds")
-    with open(out_path / "config.json", "w") as f:
+    with open(local_out_path / "config.json", "w") as f:
         json.dump(d, f, indent=2)
 
-    json_path = out_path / "out" / "out.jsonl"
-    json_path.parent.mkdir()
+    json_path = local_out_path / "out" / "out.jsonl"
+    json_path.parent.mkdir(parents=True, exist_ok=True)
     with open(json_path, "w") as f:
-        for p in paths:
-            for in_json_path in (p / "out").iterdir():
+        for p in local_paths:
+            for in_json_path in sorted((p / "out").iterdir()):
                 with open(in_json_path, "r") as g:
                     for line in g:
                         f.write(line)
 
-    success_path = out_path / "log" / "_SUCCESS"
-    success_path.parent.mkdir()
+    success_path = local_out_path / "log" / "_SUCCESS"
+    success_path.parent.mkdir(parents=True, exist_ok=True)
     success_path.touch()
+
+    if sync_s3:
+        s3_out_path = f"{S3_DATA_PATH}/{out_path}"
+        subprocess.run(
+            ["aws", "s3", "sync", str(local_out_path), s3_out_path], check=True
+        )
