@@ -137,11 +137,11 @@ class Settings:
             data=DataSettings(
                 train=[
                     DataShard(
-                        f"{gen_path}/imagenet-train/17-11-25-all-examples",
+                        f"{gen_path}/imagenet-train/default-1280k",
                         None,
                     )
                 ],
-                validation=[DataShard(f"{gen_path}/coco-validation/0d5e0f", 4096)],
+                validation=[DataShard(f"{gen_path}/coco-validation/default-4k", 4096)],
             ),
             quantisation=QuantisationSettings(
                 fmt=Q.LinearScalingFormat(
