@@ -18,6 +18,7 @@ import torch.distributed.fsdp as fsdp
 import torch.multiprocessing as mp
 import transformers
 import wandb
+import weight_formats.fit as F
 import weight_formats.quantisation as Q
 import weight_formats.quantisation_training as QT
 from tqdm import tqdm
@@ -93,7 +94,7 @@ class ExecutionSettings:
 
 @dataclass
 class QuantisationSettings:
-    fmt: Q.TensorFormat
+    fmt: Q.TensorFormat | F.Scaled
     exclude: list[str] = field(default_factory=list)
     scaling_mode: QT.ScalingMode = "dynamic"
     clip_gradient: bool = False
