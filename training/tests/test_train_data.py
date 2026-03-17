@@ -34,6 +34,7 @@ def test_dataset() -> None:
     dummy.name_or_path = "meta-llama/Llama-3.2-11B-Vision-Instruct"
     dummy.generate.return_value = torch.tensor([[0], [0]], device=dummy.device)
 
+    out_dir: str | None = None
     try:
         with um.patch("train_data.mp.get_context", return_value=InlineCtx()), um.patch(
             "train_data.transformers.MllamaForConditionalGeneration.from_pretrained",
@@ -50,16 +51,15 @@ def test_dataset() -> None:
         config_read = train_data.load_config(out_dir)
         assert config == config_read
 
-        # Last batch is dropped as n_examples % batch_size != 0
-        assert config.data_range == (0, 2)
+        assert config.data_range == (0, 3)
 
         # # Check if joining works
         ds = train_data.Dataset([out_dir] * 2, n_examples=[None] * 2)
 
-        assert len(ds.data) == 4
+        assert len(ds.data) == 6
         for x in ds.get_datums():
             assert isinstance(x, train_data.Datum)
             assert x.out == "!"  # token_idx = 0
     finally:
-        if Path(out_dir).exists():
+        if out_dir is not None and Path(out_dir).exists():
             shutil.rmtree(out_dir)

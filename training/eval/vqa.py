@@ -220,7 +220,7 @@ class VQA(Task):
         ds = ds.select_columns(cols)
 
         # NOTE: Images re-appear in consequtive questions, best to shuffle
-        if shuffle_seed:
+        if shuffle_seed is not None:
             ds = ds.shuffle(shuffle_seed)
 
         if limit is not None:
@@ -295,7 +295,7 @@ class ChartQA(Task):
         ds = ds.add_column("id", column=range(len(ds)))
 
         # NOTE: Images re-appear consequtive questions, best to shuffle
-        if shuffle_seed:
+        if shuffle_seed is not None:
             ds = ds.shuffle(shuffle_seed)
 
         if limit is not None:
@@ -410,7 +410,7 @@ class DocVQA(Task):
     ) -> datasets.Dataset:
         ds = datasets.load_dataset("lmms-lab/DocVQA", name="DocVQA", split=split)
 
-        if shuffle_seed:
+        if shuffle_seed is not None:
             ds = ds.shuffle(shuffle_seed)
 
         if limit is not None:
@@ -503,7 +503,7 @@ class AI2D(Task):
         # Add an ID column
         ds = ds.add_column("id", column=range(len(ds)))
 
-        if shuffle_seed:
+        if shuffle_seed is not None:
             ds = ds.shuffle(shuffle_seed)
 
         if limit is not None:

@@ -43,7 +43,7 @@ def evaluate(
     if n_examples % batch_size != 0:
         print(
             f"Warning: Number of examples {n_examples}"
-            " is not divisible by {batch_size}. Dropping last batch."
+            f" is not divisible by {batch_size}. Dropping last batch."
         )
     n_batches = n_examples // batch_size
 

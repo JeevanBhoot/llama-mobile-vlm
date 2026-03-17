@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import subprocess
 import sys
 import time
@@ -260,7 +261,7 @@ def _generate(
     processor = transformers.AutoProcessor.from_pretrained(model.name_or_path)
 
     start_t = time.time()
-    n_batches = len(data) // batch_size
+    n_batches = math.ceil(len(data) / batch_size)
     with open(log_path, "w") as g:
         for i, batch in enumerate(data.iter(batch_size), start=1):
             t0 = time.time()
@@ -318,9 +319,6 @@ def _generate_worker(
     if config.data_range is not None:
         data = data.select(range(*config.data_range))
 
-    # Drop last global batch
-    data = data.select(range(len(data) - len(data) % batch_size))
-
     # Shard data across devices
     data = data.shard(world_size, rank)
 
@@ -343,7 +341,7 @@ def generate_data(
     config: GenerationConfig,
     batch_size: int = 128,
     dtype: str = "bfloat16",
-    world_size: int = torch.cuda.device_count(),
+    world_size: int | None = None,
     dir_name: str | None = None,
     sync_to_s3: bool = True,
 ) -> str:
@@ -359,18 +357,7 @@ def generate_data(
         seed=config.seed,
     )
 
-    n_examples = config.data_range[1] - config.data_range[0]
-    if n_examples % batch_size != 0:
-        orig_range = config.data_range
-        config.data_range = (orig_range[0], orig_range[1] - n_examples % batch_size)
-
-        print(
-            f"Warning: Requested data range {orig_range} is not divisible "
-            f"by batch size {batch_size}. Changing to {config.data_range}.",
-            file=sys.stderr,
-            flush=True,
-        )
-
+    world_size = world_size if world_size is not None else torch.cuda.device_count()
     assert world_size <= torch.cuda.device_count()
 
     ctx = mp.get_context("spawn")
@@ -459,18 +446,16 @@ class Dataset:
             config = load_config(local_path)
             self._configs.append(config)
 
-            data = (
-                IMAGE_DATASETS[config.dataset_name](split=config.split)
-                .data(
-                    prompt_fn=(
-                        (lambda n: (get_prompts(n, **asdict(config.prompt_config))))
-                        if config.prompt_config
-                        else None
-                    ),
-                    seed=config.seed,
-                )
-                .select(range(*config.data_range))
+            data = IMAGE_DATASETS[config.dataset_name](split=config.split).data(
+                prompt_fn=(
+                    (lambda n: (get_prompts(n, **asdict(config.prompt_config))))
+                    if config.prompt_config
+                    else None
+                ),
+                seed=config.seed,
             )
+            if config.data_range is not None:
+                data = data.select(range(*config.data_range))
 
             if n is None:
                 n = len(data)

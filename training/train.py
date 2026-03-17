@@ -329,7 +329,7 @@ def run_downstream(
                 os.fsync(f.fileno())
 
         results[task.name] = {}
-        metrics = vqa.TASKS[task.name].METRICS
+        metrics = list(vqa.TASKS[task.name].METRICS)
         if include_relaxed_metrics:
             metrics += vqa.TASKS[task.name].RELAXED_METRICS
         for metric in metrics:
@@ -590,7 +590,7 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                         out["train/toks_per_step"] / out["perf/step_time"]
                     )
                     out["train/loss"] = loss.item()
-                    if val_loss:
+                    if val_loss is not None:
                         out["val/loss"] = val_loss
                         out["perf/val_step_time"] = val_step_t
                     wandb.log(out, step=step)
