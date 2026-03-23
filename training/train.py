@@ -138,7 +138,7 @@ class Settings:
             data=DataSettings(
                 train=[
                     DataShard(
-                        f"{gen_path}/imagenet-train/default-1280k",
+                        f"{gen_path}/imagenet-train/new-prompts-1280k",
                         None,
                     )
                 ],
