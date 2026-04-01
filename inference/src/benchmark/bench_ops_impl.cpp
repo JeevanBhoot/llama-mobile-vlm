@@ -145,6 +145,8 @@ REGISTER_BENCHMARK(_dot_product_small)(const benchmarking::Report& report) {
 ///////////////////////////////////////////////////////////////////////////////
 // Dot product instructions
 
+#ifdef __ARM_NEON
+
 REGISTER_BENCHMARK(_dot_inst_throughput)(const benchmarking::Report& report) {
     auto outerReps = 100u;
     auto innerReps = 1u << 18;
@@ -316,5 +318,7 @@ REGISTER_BENCHMARK(_dot_inst_throughput)(const benchmarking::Report& report) {
         }
     }
 }
+
+#endif  // __ARM_NEON
 
 }  // namespace

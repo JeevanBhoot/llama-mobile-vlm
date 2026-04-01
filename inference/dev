@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import os
+import platform as host_platform
 import shutil
 import subprocess
 import sys
@@ -129,6 +130,14 @@ def clean(platforms: List[str]) -> None:
         BUILD.rmdir()
 
 
+def _native_arch_flag(platform: str) -> str | None:
+    if platform == "android":
+        return None
+    if host_platform.machine().lower().startswith(("arm", "aarch64")):
+        return "-mcpu=native"
+    return "-march=native"
+
+
 def _generate_build_ninja(w: Any, platform: str, gprof: bool) -> None:
     cxx = (
         ANDROID_NDK / "toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
@@ -144,15 +153,13 @@ def _generate_build_ninja(w: Any, platform: str, gprof: bool) -> None:
     cxxflags += ["-fdata-sections", "-ffunction-sections"]
     linkflags += ["$flags"]
     linkflags += ["-Wl,--gc-sections", "-Wl,--fatal-warnings", "-Wl,--no-undefined"]
-    if platform != "android":
-        cxxflags += [f"-mcpu=native"]
+    if native_arch_flag := _native_arch_flag(platform):
+        cxxflags += [native_arch_flag]
     if platform == "android":
         flags += ["--target=aarch64-linux-android35"]
         cxxflags += ["-DANDROID"]
         linkflags += ["-static-libstdc++"]
         libs += ["-llog", "-static-openmp"]
-    if "clang++" in cxx:
-        flags += ["-stdlib=libc++"]
     flags += ["-fopenmp"]
     if gprof:
         flags += ["-pg"]

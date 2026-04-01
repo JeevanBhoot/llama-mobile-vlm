@@ -4,6 +4,9 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <memory>
+#include <numbers>
+#include <tuple>
 
 #ifdef __ARM_NEON
 #include <arm_neon.h>
@@ -68,11 +71,11 @@ void broadcastAddInPlace(bf16* __restrict__ x, const bf16* __restrict__ y, uint 
 
 void geluInPlace(bf16* x, uint n) {
     // As per torch's 'approximate' GELU
-    const float c0 = std::sqrtf(2.0f / M_PIf);
+    const float c0 = std::sqrt(2.0f / std::numbers::pi_v<float>);
     const float c1 = 0.044715f;
     for (auto i = 0u; i < n; ++i) {
         float xi = float(x[i]);
-        float z = std::tanhf(c0 * (xi + c1 * xi * xi * xi));
+        float z = std::tanh(c0 * (xi + c1 * xi * xi * xi));
         x[i] = bf16(0.5f * xi * (1.0f + z));
     }
 }
@@ -142,7 +145,7 @@ void gather(const bf16* __restrict__ weight,
 
 namespace {
 
-#if defined(__ARM_NEON)
+#ifdef __ARM_NEON
 
 float _dot_product_bf16(const bf16* __restrict__ a, const bf16* __restrict__ b, const uint dK) {
     float32x4_t acc = vmovq_n_f32(0.0f);

@@ -5,6 +5,7 @@
 #include <numeric>
 #include <regex>
 #include <sstream>
+#include <unordered_map>
 
 namespace squash::tensor {
 

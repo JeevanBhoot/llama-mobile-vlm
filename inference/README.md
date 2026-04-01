@@ -20,7 +20,7 @@ echo "What colour shirt is the person to the left of the laptop wearing?" | ./de
 
 ```sh
 ./dev setup
-sudo apt install clang clang-format gdb libc++-dev libopenmp-dev ninja-build
+sudo apt install clang clang-format gdb libomp-dev ninja-build
 # If android: install NDK to /opt/android-sdk/ndk/latest
 ```
 

@@ -1,5 +1,6 @@
 #include "tokenizer.hpp"
 
+#include <limits>
 #include <regex>
 #include <sstream>
 #include <unordered_map>
