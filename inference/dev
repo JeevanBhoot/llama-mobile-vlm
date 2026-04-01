@@ -157,6 +157,8 @@ def _generate_build_ninja(w: Any, platform: str, gprof: bool) -> None:
         cxxflags += [native_arch_flag]
     if platform == "android":
         flags += ["--target=aarch64-linux-android35"]
+        flags += ["-march=armv9-a+bf16+i8mm"]
+        # flags += ["-mcpu=cortex-x3"]
         cxxflags += ["-DANDROID"]
         linkflags += ["-static-libstdc++"]
         libs += ["-llog", "-static-openmp"]

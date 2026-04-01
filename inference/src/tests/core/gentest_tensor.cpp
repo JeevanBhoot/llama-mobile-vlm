@@ -20,7 +20,7 @@ struct TestCase {
         REQUIRE(info.at("type").template get<std::string>() == "tensor");
         return TensorV{
             .data = _data::Flat<float>(
-                reinterpret_cast<float*>(payload.get() + info.at("offset").template get<ulong>())),
+                reinterpret_cast<float*>(payload.get() + info.at("offset").template get<squash::ulong>())),
             .shape = info.at("shape").template get<Shape>(),
         };
     }

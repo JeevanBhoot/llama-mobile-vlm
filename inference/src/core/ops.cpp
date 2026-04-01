@@ -8,7 +8,7 @@
 #include <numbers>
 #include <tuple>
 
-#ifdef __ARM_NEON
+#if defined(__ARM_NEON) && defined(__ARM_FEATURE_BF16_VECTOR_ARITHMETIC)
 #include <arm_neon.h>
 #endif  // __ARM_NEON
 
@@ -205,10 +205,10 @@ void _matmulT_chunk_bfmmla(const __bf16* __restrict__ a,
         for (auto m = 0u; m < (BlockM / 2); ++m) {
             for (auto n = 0u; n < (BlockN / 2); ++n) {
                 auto& acc = accs[m * (BlockN / 2) + n];
-                float a0 = float(a[(2 * m + 0) * dK + k]);
-                float a1 = float(a[(2 * m + 1) * dK + k]);
-                float b0 = float(b[(2 * n + 0) * dK + k]);
-                float b1 = float(b[(2 * n + 1) * dK + k]);
+                float a0 = vcvtah_f32_bf16(a[(2 * m + 0) * dK + k]);
+                float a1 = vcvtah_f32_bf16(a[(2 * m + 1) * dK + k]);
+                float b0 = vcvtah_f32_bf16(b[(2 * n + 0) * dK + k]);
+                float b1 = vcvtah_f32_bf16(b[(2 * n + 1) * dK + k]);
                 acc = vmlaq_f32(acc, float32x4_t{a0, a0, a1, a1}, float32x4_t{b0, b1, b0, b1});
             }
         }
@@ -281,7 +281,7 @@ void _matmulT(const bf16* __restrict__ a,
     }
 }
 
-#else  // !__ARM_NEON
+#else  // !(__ARM_NEON && __ARM_FEATURE_BF16_VECTOR_ARITHMETIC)
 
 float _dot_product_bf16(const bf16* __restrict__ a, const bf16* __restrict__ b, const uint n) {
     float result = 0;
@@ -305,7 +305,7 @@ void _matmulT(const bf16* __restrict__ lhs,
     }
 }
 
-#endif  // __ARM_NEON
+#endif  // __ARM_NEON && __ARM_FEATURE_BF16_VECTOR_ARITHMETIC
 
 }  // namespace
 

@@ -3,7 +3,7 @@
 using namespace squash;
 using Approx = Catch::Approx;
 
-#ifdef __ARM_NEON
+#if defined(__ARM_NEON) && defined(__ARM_FEATURE_BF16_VECTOR_ARITHMETIC)
 #include <arm_neon.h>
 
 std::vector<bf16> vtobf16(const std::vector<float>& input) {
@@ -35,4 +35,4 @@ TEST_CASE("ops_impl::arm::bf16") {
     REQUIRE(vgetq_lane_f32(acc, 3) == Approx(13.0f));  // a[6:8] . b[6:8]
 }
 
-#endif  // __ARM_NEON
+#endif  // __ARM_NEON && __ARM_FEATURE_BF16_VECTOR_ARITHMETIC
