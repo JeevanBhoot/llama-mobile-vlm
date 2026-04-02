@@ -40,6 +40,51 @@ perf report
 perf report -d benchmark
 ```
 
+### VSCode C++ configuration
+
+<details markdown>
+
+<summary>Example `.vscode/c_cpp_properties.json`</summary>
+
+```json
+{
+    "configurations": [
+        {
+            "name": "linux-host",
+            "cppStandard": "c++20",
+            "intelliSenseMode": "linux-clang-x64",
+            "compilerPath": "/usr/bin/clang++",
+            "includePath": [
+                "${workspaceFolder}/third-party",
+                "${workspaceFolder}/src"
+            ]
+        },
+        {
+            "name": "android-arm64",
+            "cppStandard": "c++20",
+            "intelliSenseMode": "linux-clang-arm64",
+            "compilerPath": "/opt/android-sdk/ndk/latest/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++",
+            "compilerArgs": [
+                "--target=aarch64-linux-android35",
+                "-march=armv9-a+bf16+i8mm"
+            ],
+            "includePath": [
+                "${workspaceFolder}/third-party",
+                "${workspaceFolder}/src",
+                "/opt/android-sdk/ndk/latest/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include",
+                "/opt/android-sdk/ndk/latest/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/c++/v1"
+            ],
+            "defines": [
+                "ANDROID"
+            ]
+        }
+    ],
+    "version": 4
+}
+```
+
+</details>
+
 ## License information
 
  - Clang (compiler), Apache 2.0
