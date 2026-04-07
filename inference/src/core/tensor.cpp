@@ -29,10 +29,14 @@ std::ostream& operator<<(std::ostream& out, const Shape& shape) {
 
 /// Buffer ///
 
+// Note: round up allocated size to a multiple of `alignment`, required on Android
 Buffer::Buffer(ulong size, ulong alignment)
-    : _data(reinterpret_cast<char*>(std::aligned_alloc(alignment, size))) {
+    : _data(reinterpret_cast<char*>(
+          std::aligned_alloc(alignment, (size + alignment - 1) / alignment * alignment))) {
     if (!_data) {
-        throw std::runtime_error("Allocation failed");
+        std::ostringstream err;
+        err << "Buffer allocation failed, size: " << size << ", alignment: " << alignment;
+        throw std::runtime_error(err.str());
     }
 }
 

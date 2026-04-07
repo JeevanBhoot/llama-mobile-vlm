@@ -50,12 +50,13 @@ def _run_on_device(command: Iterable[Any], env: dict[str, str]) -> None:
     program, *args = command
     program = _push_to_device(Path(program))
     args_str = " ".join(str(arg) for arg in args if arg is not None)
+    env = {"LD_LIBRARY_PATH": program.parent, **env}
+    env_str = " ".join(f"{k}={v}" for k, v in env.items())
     _run(
         [
             "adb",
             "shell",
-            f"cd {program.parent} && env LD_LIBRARY_PATH={program.parent}"
-            f" ./{program.name} {args_str}",
+            f"cd {program.parent} && env {env_str} ./{program.name} {args_str}",
         ],
         env=env,
     )
