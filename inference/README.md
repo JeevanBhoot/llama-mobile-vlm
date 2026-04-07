@@ -14,6 +14,10 @@ echo "I don't much like" | ./dev run cli -- ../models/Llama-3.2-1B-Instruct-BF16
 
 # E.g. vision model
 echo "What colour shirt is the person to the left of the laptop wearing?" | ./dev run cli -- ../models/Llama-3.2-11B-Vision-Instruct-BF16.sqt -g 64 --image ../models/test.jpg
+
+# E.g. on Android
+adb push ../models/Llama-3.2-1B-Instruct-BF16.sqt /data/local/tmp/Llama-3.2-1B-Instruct-BF16.sqt
+./dev -p android run cli -- Llama-3.2-1B-Instruct-BF16.sqt -g 16
 ```
 
 ## Setup
