@@ -23,6 +23,10 @@ import weight_formats.quantisation as Q
 import weight_formats.quantisation_training as QT
 from tqdm import tqdm
 from transformers import MllamaForConditionalGeneration, MllamaProcessor
+from transformers.models.mllama.modeling_mllama import (
+    MllamaCrossAttentionDecoderLayer,
+    MllamaSelfAttentionDecoderLayer,
+)
 from weight_formats.experiments.qat import _compute_kl_loss
 
 from eval import vqa
@@ -79,6 +83,7 @@ class TrainingSettings:
     lr_schedule: LRScheduleSettings
     validation_interval: int | None = None
     freeze_params: list[str] = field(default_factory=list)
+    rotate_text_residual: bool = False
 
 
 @dataclass
@@ -95,6 +100,7 @@ class ExecutionSettings:
 @dataclass
 class QuantisationSettings:
     fmt: Q.TensorFormat | F.Scaled
+    activation_fmt: Q.TensorFormat | None = None
     exclude: list[str] = field(default_factory=list)
     scaling_mode: QT.ScalingMode = "dynamic"
     clip_gradient: bool = False
@@ -179,6 +185,23 @@ class Settings:
         return asdict(self)
 
 
+FMT_CHANNEL_INT8 = Q.LinearScalingFormat(
+    Q.IntFormat(8),
+    scale_format=Q.BFLOAT16,
+    block_shape=(1, None),
+    scaling="absmax",
+)
+
+FMT_CHANNEL_S3D8 = F.Scaled(
+    8 / 3,
+    "s3d8",
+    scale_format=Q.BFLOAT16,
+    block_shape=(1, None),
+    scaling="absmax",
+    args=dict(threshold=1e-3),
+)
+
+
 def _compile_model(model: MllamaForConditionalGeneration, mode: str) -> None:
     transformer_modules = [
         model.vision_model.transformer,
@@ -209,6 +232,88 @@ def _apply_fsdp(model: MllamaForConditionalGeneration, **kwargs) -> None:
     fsdp.fully_shard(model, **kwargs)
 
 
+@torch.inference_mode()
+def _rotate_text_residual(model: MllamaForConditionalGeneration) -> None:
+    """Apply an orthogonal rotation to the language-model residual stream.
+
+    Also merges RMSNorm scales into weights (to facilitate the rotation).
+    """
+    residual_model = model.language_model.model
+    hidden_size = model.config.text_config.hidden_size
+    with torch.random.fork_rng(devices=[model.device.index]):
+        torch.manual_seed(360)
+        rotation = torch.nn.init.orthogonal_(
+            torch.empty(hidden_size, hidden_size, device=model.device)
+        ).to(model.dtype)
+
+    # PyTorch linear layers apply `input @ weight.T`, so input-side rotations use `@ rotation`,
+    # while output-side rotations use `rotation.T @`.
+    residual_model.embed_tokens.weight.copy_(
+        residual_model.embed_tokens.weight @ rotation
+    )
+    model.language_model.lm_head.weight.copy_(
+        (model.language_model.lm_head.weight * residual_model.norm.weight[None, :])
+        @ rotation
+    )
+    residual_model.norm.weight.fill_(1)
+
+    for layer in residual_model.layers:
+        if isinstance(layer, MllamaSelfAttentionDecoderLayer):
+            attn_norm = layer.input_layernorm.weight
+            layer.self_attn.q_proj.weight.copy_(
+                (layer.self_attn.q_proj.weight * attn_norm[None, :]) @ rotation
+            )
+            layer.self_attn.k_proj.weight.copy_(
+                (layer.self_attn.k_proj.weight * attn_norm[None, :]) @ rotation
+            )
+            layer.self_attn.v_proj.weight.copy_(
+                (layer.self_attn.v_proj.weight * attn_norm[None, :]) @ rotation
+            )
+            layer.self_attn.o_proj.weight.copy_(
+                rotation.T @ layer.self_attn.o_proj.weight
+            )
+            layer.input_layernorm.weight.fill_(1)
+
+            mlp_norm = layer.post_attention_layernorm.weight
+            layer.mlp.gate_proj.weight.copy_(
+                (layer.mlp.gate_proj.weight * mlp_norm[None, :]) @ rotation
+            )
+            layer.mlp.up_proj.weight.copy_(
+                (layer.mlp.up_proj.weight * mlp_norm[None, :]) @ rotation
+            )
+            layer.mlp.down_proj.weight.copy_(rotation.T @ layer.mlp.down_proj.weight)
+            layer.post_attention_layernorm.weight.fill_(1)
+        elif isinstance(layer, MllamaCrossAttentionDecoderLayer):
+            attn_norm = layer.input_layernorm.weight
+            layer.cross_attn.q_proj.weight.copy_(
+                (layer.cross_attn.q_proj.weight * attn_norm[None, :]) @ rotation
+            )
+            layer.cross_attn.o_proj.weight.copy_(
+                rotation.T @ layer.cross_attn.o_proj.weight
+            )
+            layer.input_layernorm.weight.fill_(1)
+
+            mlp_norm = layer.post_attention_layernorm.weight
+            layer.mlp.gate_proj.weight.copy_(
+                (layer.mlp.gate_proj.weight * mlp_norm[None, :]) @ rotation
+            )
+            layer.mlp.up_proj.weight.copy_(
+                (layer.mlp.up_proj.weight * mlp_norm[None, :]) @ rotation
+            )
+            layer.mlp.down_proj.weight.copy_(rotation.T @ layer.mlp.down_proj.weight)
+            layer.post_attention_layernorm.weight.fill_(1)
+        else:
+            raise TypeError(f"Unexpected layer type: {type(layer)}")
+
+
+def _broadcast_module_state(module: torch.nn.Module, src: int) -> None:
+    with torch.no_grad():
+        for parameter in module.parameters():
+            dist.broadcast(parameter, src=src)
+        for buffer in module.buffers():
+            dist.broadcast(buffer, src=src)
+
+
 def _quantise(
     model: torch.nn.Module, settings: QuantisationSettings
 ) -> torch.nn.Module:
@@ -223,11 +328,18 @@ def _quantise(
     QT.convert(
         model,
         fmt_spec=fmt_spec,
+        activation_fmt=settings.activation_fmt,
         scaling_mode=settings.scaling_mode,
         clip_gradient=settings.clip_gradient,
         error_weight=None,
         mode=settings.mode,
+        progress=dist.get_rank() == 0,
     )
+
+    # convert() may be non-deterministic for some formats, so broadcast parameters
+    # to ensure all ranks start with the same model
+    _broadcast_module_state(model, src=0)
+
     if not settings.trainable_centroids:
         for _, p in QT.get_named_parameters(model, "centroids"):
             p.requires_grad_(False)
@@ -463,6 +575,9 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                 device_map=device,
             )
             student.to(dtype=getattr(torch, settings.execution.params_dtype))
+
+            if settings.training.rotate_text_residual:
+                _rotate_text_residual(student)
 
             student.train()
             # Sanity check to make sure dropout is disabled
