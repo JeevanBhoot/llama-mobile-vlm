@@ -101,7 +101,7 @@ class ExecutionSettings:
 class QuantisationSettings:
     fmt: Q.TensorFormat | F.Scaled
     activation_fmt: Q.TensorFormat | None = None
-    exclude: list[str] = field(default_factory=list)
+    overrides: dict[str, Q.TensorFormat] = field(default_factory=dict)
     scaling_mode: QT.ScalingMode = "dynamic"
     clip_gradient: bool = False
     trainable_centroids: bool = False
@@ -319,11 +319,19 @@ def _quantise(
 ) -> torch.nn.Module:
     fmt_spec = defaultdict(lambda: settings.fmt)
     param_names = [x[0] for x in model.named_parameters()]
-    exclude = tuple(settings.exclude)
-    if exclude:
+
+    # Longer prefixes are more specific, so apply them first
+    overrides = sorted(
+        settings.overrides.items(), key=lambda x: len(x[0]), reverse=True
+    )
+    if overrides:
         for p_name in param_names:
-            if p_name.startswith(exclude):
-                fmt_spec[p_name] = Q.TorchFormat("bfloat16")
+            match = next(
+                (fmt for prefix, fmt in overrides if p_name.startswith(prefix)),
+                None,
+            )
+            if match:
+                fmt_spec[p_name] = match
 
     QT.convert(
         model,
