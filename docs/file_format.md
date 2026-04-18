@@ -1,4 +1,4 @@
-# The squashedtensors `.sqt` format (version 0)
+# The squashedtensors `.sqt` format (version 1)
 
 Squashedtensors is a derivative of [safetensors](https://github.com/huggingface/safetensors), for saving (quantised) model weights, tokenizer and hyperparameters.
 
@@ -19,7 +19,7 @@ Data is little-endian. Tensor memory layout is row-major ('C').
 | Size (bytes) | Format | Description | Padding |
 | --- | --- | -- | --- |
 | 4 | literal | ".sqt" `[0x2e, 0x73, 0x71, 0x74]` | - |
-| 4 | uint32 | File version (0) | - |
+| 4 | uint32 | File version (1) | - |
 | 8 | uint64 | Size of header `N`, including padding | - |
 | `N` | char (JSON) | Header | `0x20` (' ') |
 | `L` | byte | Buffer | `0x00` |
@@ -49,6 +49,7 @@ Note that `data_offsets` are relative to the start of the buffer.
 | `config.*` | * | Model hyperparameters (model-dependent) |
 | `vocab.begin_of_text_id` | `INTEGER` | Special token ID for begin of text |
 | `vocab.end_of_text_id` | `INTEGER` | Special token ID for end of text |
+| `vocab.image_id` | `INTEGER` or `null` | Special token ID for image input, if the tokenizer defines one |
 | `vocab.pre_tokenizer` | `STRING` | Regex for pre-tokenization |
 | `vocab.merges` | `LIST[STRING]` | BPE merge rules |
 | `vocab.vocab` | `LIST[STRING]` | Vocabulary list, an ID-to-token mapping |

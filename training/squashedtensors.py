@@ -23,7 +23,10 @@ FILE_VERSION = 1
 
 
 def encode_bf16(tensor: Tensor) -> tuple[str, Tensor]:
-    return ("BF16", tensor.contiguous().flatten().to(torch.bfloat16).view(torch.uint8))
+    return (
+        "BF16",
+        tensor.to(torch.bfloat16).cpu().flatten().contiguous().view(torch.uint8),
+    )
 
 
 def align(n: int, alignment: int) -> int:
@@ -106,13 +109,10 @@ def prepare_parameters(
 
         # Standardise names
         for name, parameter in model.named_parameters():
-            name = re.sub(r"^model\.vision_model\.", "vision_model.", name)
             name = re.sub(
-                r"^model\.multi_modal_projector\.",
-                "vision_model.multi_modal_projector.",
-                name,
+                r"^multi_modal_projector\.", "vision_model.multi_modal_projector.", name
             )
-            name = re.sub(r"^model\.language_model\.", "text_model.", name)
+            name = re.sub(r"^language_model\.model\.", "text_model.", name)
             name = re.sub(r"^model\.", "text_model.", name)
             name = re.sub(r"^lm_head\.weight$", "text_model.lm_head.weight", name)
             name = re.sub(r"\.(cross_attn|self_attn)\.", ".attn.", name)
