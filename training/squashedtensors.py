@@ -9,28 +9,114 @@ import re
 import struct
 import tempfile
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Any, Union
+from typing import IO, Any, Literal, Optional, Union
 
 import torch
 import transformers
+import weight_formats.quantisation_training as T
 from torch import Tensor, nn
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
 from transformers.models.mllama.image_processing_mllama import MllamaImageProcessor
 from transformers.models.mllama.modeling_mllama import MllamaForConditionalGeneration
 
-FILE_VERSION = 1
-
-
-def encode_bf16(tensor: Tensor) -> tuple[str, Tensor]:
-    return (
-        "BF16",
-        tensor.to(torch.bfloat16).cpu().flatten().contiguous().view(torch.uint8),
-    )
+FILE_VERSION = 2
 
 
 def align(n: int, alignment: int) -> int:
     return n + (-n % alignment)
+
+
+def safe_div(a: Tensor, b: Tensor) -> Tensor:
+    return a / torch.where(b == 0, 1, b)
+
+
+@dataclass
+class TensorData:
+    dtype: Literal["BF16", "INT8"]
+    tensor: Tensor
+    scale: Optional["TensorData"]
+
+    def __post_init__(self) -> None:
+        if self.dtype == "BF16":
+            assert self.tensor.dtype == torch.bfloat16
+        elif self.dtype == "INT8":
+            assert self.tensor.dtype == torch.int8
+            assert self.scale is not None
+            assert self.scale.dtype == "BF16"
+
+    def __repr__(self) -> str:
+        return (
+            f"TensorData({self.dtype}, {tuple(self.tensor.shape)}, scale={self.scale})"
+        )
+
+    def size_bytes(self) -> int:
+        if self.dtype == "BF16":
+            return 2 * self.tensor.numel()
+        if self.dtype == "INT8":
+            return self.tensor.numel()
+        assert False, f"Unsupported dtype {self.dtype!r}"
+
+    def encode(self) -> bytes:
+        if self.dtype in ("BF16", "INT8"):
+            return (
+                self.tensor.cpu()
+                .flatten()
+                .contiguous()
+                .view(torch.uint8)
+                .numpy()
+                .tobytes()
+            )
+        assert False, f"Unsupported dtype {self.dtype!r}"
+
+    def to_bf16(self) -> Tensor:
+        data = self.tensor.to(torch.bfloat16)
+        if self.scale is not None:
+            data = data * self.scale.to_bf16()
+        return data
+
+    def mul_(self, t: Tensor) -> None:
+        assert (
+            t.ndim == 0 and t.dtype == torch.bfloat16
+        ), "Only scalar bfloat16 multiplication is supported"
+        if self.scale is not None:
+            assert self.scale.dtype == "BF16"
+            self.scale.tensor.mul_(t.to(self.scale.tensor.device))
+        else:
+            self.tensor.mul_(t.to(self.tensor.device))
+
+
+def to_tensor_data(t: Tensor | T.Weight) -> TensorData:
+    if isinstance(t, Tensor):
+        return TensorData(
+            dtype="BF16", tensor=t.data.to(torch.bfloat16, copy=True), scale=None
+        )
+    if isinstance(t, T.UnquantisedWeight):
+        return TensorData(
+            dtype="BF16", tensor=t.weight.data.to(torch.bfloat16, copy=True), scale=None
+        )
+
+    if isinstance(t, T.Weight):
+        # CHANNEL_INT8
+        assert not hasattr(t, "sparse_idx"), "Sparse tensors are not supported"
+        assert torch.allclose(
+            t.centroids,
+            torch.arange(-128, 128, device=t.centroids.device, dtype=t.centroids.dtype),
+        ), "Only INT8 is supported"
+        scale = t._get_scale()
+        tensor = (
+            safe_div(t.master.reshape(t._blocked_shape), scale)
+            .view(t.shape)
+            .round()
+            .clip(-128, 127)
+            .to(torch.int8)
+        )
+        return TensorData(
+            dtype="INT8",
+            tensor=tensor,
+            scale=to_tensor_data(T._squeeze_odd_dims(scale)),
+        )
 
 
 def rope_angular_frequency(config: transformers.PretrainedConfig) -> Tensor:
@@ -40,12 +126,14 @@ def rope_angular_frequency(config: transformers.PretrainedConfig) -> Tensor:
     freq = config.rope_theta ** -(
         torch.arange(0, head_dim, 2, dtype=torch.float) / head_dim
     )
-    s = config.rope_scaling
-    z = (
-        s["original_max_position_embeddings"] * freq / (2 * torch.pi)
-        - s["low_freq_factor"]
-    ) / (s["high_freq_factor"] - s["low_freq_factor"])
-    freq *= torch.lerp(torch.tensor(1 / s["factor"]), torch.tensor(1.0), z.clip(0, 1))
+    if s := config.rope_scaling:
+        z = (
+            s["original_max_position_embeddings"] * freq / (2 * torch.pi)
+            - s["low_freq_factor"]
+        ) / (s["high_freq_factor"] - s["low_freq_factor"])
+        freq *= torch.lerp(
+            torch.tensor(1 / s["factor"]), torch.tensor(1.0), z.clip(0, 1)
+        )
     return freq
 
 
@@ -100,110 +188,134 @@ def get_vocab_dict(tokenizer: transformers.PreTrainedTokenizerFast) -> dict[str,
     )
 
 
+def standardise_name(name: str) -> str:
+    name = re.sub(
+        r"^multi_modal_projector\.", "vision_model.multi_modal_projector.", name
+    )
+    name = re.sub(r"^language_model\.model\.", "text_model.", name)
+    name = re.sub(r"^language_model\.lm_head\.", "text_model.lm_head.", name)
+    name = re.sub(r"^model\.", "text_model.", name)
+    name = re.sub(r"^lm_head\.weight$", "text_model.lm_head.weight", name)
+    name = re.sub(r"\.(cross_attn|self_attn)\.", ".attn.", name)
+    name = re.sub(r"\.(fc1)\.", ".up_proj.", name)
+    name = re.sub(r"\.(fc2)\.", ".down_proj.", name)
+    name = re.sub(r"\.input_layernorm\.", ".attn.norm.", name)
+    name = re.sub(r"\.post_attention_layernorm\.", ".mlp.norm.", name)
+    name = re.sub(r"\.transformer\.layers\.", ".layers0.", name)
+    name = re.sub(r"\.global_transformer\.layers\.", ".layers1.", name)
+    return name
+
+
+@torch.no_grad()
 def prepare_parameters(
     model: LlamaForCausalLM | MllamaForConditionalGeneration,
-) -> dict[str, nn.Parameter]:
+) -> dict[str, TensorData]:
     """Rename parameters for uniform storage between models."""
-    with torch.no_grad():
-        params = {}
+    params = {}
 
-        # Standardise names
-        for name, parameter in model.named_parameters():
-            name = re.sub(
-                r"^multi_modal_projector\.", "vision_model.multi_modal_projector.", name
-            )
-            name = re.sub(r"^language_model\.model\.", "text_model.", name)
-            name = re.sub(r"^model\.", "text_model.", name)
-            name = re.sub(r"^lm_head\.weight$", "text_model.lm_head.weight", name)
-            name = re.sub(r"\.(cross_attn|self_attn)\.", ".attn.", name)
-            name = re.sub(r"\.(fc1)\.", ".up_proj.", name)
-            name = re.sub(r"\.(fc2)\.", ".down_proj.", name)
-            name = re.sub(r"\.input_layernorm\.", ".attn.norm.", name)
-            name = re.sub(r"\.post_attention_layernorm\.", ".mlp.norm.", name)
-            name = re.sub(r"\.transformer\.layers\.", ".layers0.", name)
-            name = re.sub(r"\.global_transformer\.layers\.", ".layers1.", name)
-            assert name not in params, f"duplicate parameter {name!r}"
-            params[name] = parameter
+    def _visit(m: nn.Module, prefix: tuple[str, ...] = ()) -> None:
+        for name, child in m.named_children():
+            _visit(child, prefix + (name,))
+        if isinstance(m, T.Weight):
+            params[standardise_name(".".join(prefix))] = to_tensor_data(m)
+        else:
+            for name, param in m.named_parameters(recurse=False):
+                params[standardise_name(".".join(prefix + (name,)))] = to_tensor_data(
+                    param
+                )
 
-        # Simplify downstream implementations by merging gates into linear projections
-        # and combining embeddings. Note:
-        # - Original embedding shapes are sometimes flattened, hence `unflatten()`
-        # - Original model uses 1-based indexing of aspect ratios, hence `[1:]` to
-        #   revert to 0-based indexing.
-        if isinstance(model, MllamaForConditionalGeneration):
-            # Merge cross-attention gates into output projections
-            for i in model.config.text_config.cross_attention_layers:
-                prefix = f"text_model.layers.{i}"
-                gate = f"{prefix}.cross_attn_attn_gate"
-                weight = f"{prefix}.attn.o_proj.weight"
-                params[weight] = params[weight] * params.pop(gate).view(()).tanh()
-                gate = f"{prefix}.cross_attn_mlp_gate"
-                weight = f"{prefix}.mlp.down_proj.weight"
-                params[weight] = params[weight] * params.pop(gate).view(()).tanh()
+    _visit(model)
 
-            # Merge global_transformer (layers1) gates into output projections
-            for i in range(model.config.vision_config.num_global_layers):
-                prefix = f"vision_model.layers1.{i}"
-                gate = f"{prefix}.gate_attn"
-                weight = f"{prefix}.attn.o_proj.weight"
-                params[weight] = params[weight] * params.pop(gate).view(()).tanh()
-                gate = f"{prefix}.gate_ffn"
-                gate_tensor = params.pop(gate).view(()).tanh()
-                weight = f"{prefix}.mlp.down_proj.weight"
-                params[weight] = params[weight] * gate_tensor
-                bias = f"{prefix}.mlp.down_proj.bias"
-                params[bias] = params[bias] * gate_tensor
+    # Simplify downstream implementations by merging gates into linear projections
+    # and combining embeddings. Note:
+    # - Original embedding shapes are sometimes flattened, hence `unflatten()`
+    # - Original model uses 1-based indexing of aspect ratios, hence `[1:]` to
+    #   revert to 0-based indexing.
+    if isinstance(model, MllamaForConditionalGeneration):
+        # Merge cross-attention gates into output projections
+        for i in model.config.text_config.cross_attention_layers:
+            prefix = f"text_model.layers.{i}"
+            gate = f"{prefix}.cross_attn_attn_gate"
+            weight = f"{prefix}.attn.o_proj.weight"
+            params[weight].mul_(params.pop(gate).to_bf16().view(()).tanh())
+            gate = f"{prefix}.cross_attn_mlp_gate"
+            weight = f"{prefix}.mlp.down_proj.weight"
+            params[weight].mul_(params.pop(gate).to_bf16().view(()).tanh())
 
-            n_tiles = model.config.vision_config.max_num_tiles
-            n_patches = (
-                model.config.vision_config.image_size
-                // model.config.vision_config.patch_size
-            ) ** 2
+        # Merge global_transformer (layers1) gates into output projections
+        for i in range(model.config.vision_config.num_global_layers):
+            prefix = f"vision_model.layers1.{i}"
+            gate = f"{prefix}.gate_attn"
+            weight = f"{prefix}.attn.o_proj.weight"
+            params[weight].mul_(params.pop(gate).to_bf16().view(()).tanh())
+            gate = f"{prefix}.gate_ffn"
+            gate_tensor = params.pop(gate).to_bf16().view(()).tanh()
+            weight = f"{prefix}.mlp.down_proj.weight"
+            params[weight].mul_(gate_tensor)
+            bias = f"{prefix}.mlp.down_proj.bias"
+            params[bias].mul_(gate_tensor)
 
-            # Create merged positional_embedding and class_embedding
-            prefix = "vision_model.gated_positional_embedding"
-            embedding0 = params.pop(f"{prefix}.embedding")
-            gate = params.pop(f"{prefix}.gate").view(()).tanh()
-            tile_embedding = params.pop(f"{prefix}.tile_embedding.weight")[
-                1:
-            ].unflatten(1, (n_tiles, n_patches + 1, -1))
-            embedding0 = embedding0 * (1 - gate) + tile_embedding * gate
-            prefix = "vision_model.pre_tile_positional_embedding"
-            pre_tile_embedding = params.pop(f"{prefix}.embedding.weight")[1:].unflatten(
-                1, (n_tiles, -1)
-            )
-            gate = params.pop(f"{prefix}.gate").view(()).tanh()
-            params["vision_model.positional_embedding.weight"] = (
-                pre_tile_embedding.unsqueeze(2) * gate + embedding0[:, :, 1:, :]
-            )
-            params["vision_model.class_embedding.weight"] = (
-                params.pop("vision_model.class_embedding") + embedding0[:, :, 0, :]
-            )
+        n_tiles = model.config.vision_config.max_num_tiles
+        n_patches = (
+            model.config.vision_config.image_size
+            // model.config.vision_config.patch_size
+        ) ** 2
 
-            # Merge post_tile_positional_embedding gate
-            prefix = "vision_model.post_tile_positional_embedding"
-            weight = params.pop(f"{prefix}.embedding.weight")[1:].unflatten(
-                1, (n_tiles, -1)
-            )
-            gate = params.pop(f"{prefix}.gate").view(()).tanh()
-            params[f"vision_model.tile_embedding_post.weight"] = weight * gate
+        # Create merged positional_embedding and class_embedding
+        prefix = "vision_model.gated_positional_embedding"
+        embedding0 = params.pop(f"{prefix}.embedding").to_bf16()
+        gate = params.pop(f"{prefix}.gate").to_bf16().view(()).tanh()
+        tile_embedding = (
+            params.pop(f"{prefix}.tile_embedding.weight")
+            .to_bf16()[1:]
+            .unflatten(1, (n_tiles, n_patches + 1, -1))
+        )
+        embedding0 = embedding0 * (1 - gate) + tile_embedding * gate
+        prefix = "vision_model.pre_tile_positional_embedding"
+        pre_tile_embedding = (
+            params.pop(f"{prefix}.embedding.weight")
+            .to_bf16()[1:]
+            .unflatten(1, (n_tiles, -1))
+        )
+        gate = params.pop(f"{prefix}.gate").to_bf16().view(()).tanh()
+        params["vision_model.positional_embedding.weight"] = to_tensor_data(
+            pre_tile_embedding.unsqueeze(2) * gate + embedding0[:, :, 1:, :]
+        )
+        params["vision_model.class_embedding.weight"] = to_tensor_data(
+            params.pop("vision_model.class_embedding").to_bf16()
+            + embedding0[:, :, 0, :]
+        )
 
-            # Permute the multi_modal_projector input dimensions.
-            # In the original weights, the first block of 1280 elements is the final
-            # hidden state of `layers1`, but after this, the "tapped" hidden states
-            # are interleaved. This is bothersome to implement, so instead we make things
-            # explicit with a (n_taps + 1, d_out, d_in) tensor.
-            proj = params["vision_model.multi_modal_projector.weight"]
-            hidden_size = model.config.vision_config.hidden_size
-            params["vision_model.multi_modal_projector.weight"] = torch.cat(
+        # Merge post_tile_positional_embedding gate
+        prefix = "vision_model.post_tile_positional_embedding"
+        weight = (
+            params.pop(f"{prefix}.embedding.weight")
+            .to_bf16()[1:]
+            .unflatten(1, (n_tiles, -1))
+        )
+        gate = params.pop(f"{prefix}.gate").to_bf16().view(()).tanh()
+        params[f"vision_model.tile_embedding_post.weight"] = to_tensor_data(
+            weight * gate
+        )
+
+        # Permute the multi_modal_projector input dimensions.
+        # In the original weights, the first block of 1280 elements is the final
+        # hidden state of `layers1`, but after this, the "tapped" hidden states
+        # are interleaved. This is bothersome to implement, so instead we make things
+        # explicit with a (n_taps + 1, d_out, d_in) tensor.
+        proj = params["vision_model.multi_modal_projector.weight"].to_bf16()
+        hidden_size = model.config.vision_config.hidden_size
+        params["vision_model.multi_modal_projector.weight"] = to_tensor_data(
+            torch.cat(
                 [
                     proj[:, hidden_size:].unflatten(1, (hidden_size, -1)).movedim(2, 0),
                     proj[None, :, :hidden_size],
                 ],
                 axis=0,
             )
+        )
 
-        return params
+    return params
 
 
 def get_config_dict(
@@ -275,14 +387,22 @@ def save(
 
     # Measure serialized tensors, but discard them (for sake of memory usage)
     last_offset = 0
-    for name, tensor in params.items():
-        dtype, data = encode_bf16(tensor)
-        header_dict[name] = dict(
-            dtype=dtype,
-            shape=list(tensor.shape),
-            data_offsets=[last_offset, last_offset + len(data)],
+
+    def _generate_header(t: TensorData) -> dict[str, Any]:
+        nonlocal last_offset
+        n_bytes = t.size_bytes()
+        d = dict(
+            dtype=t.dtype,
+            shape=list(t.tensor.shape),
+            data_offsets=[last_offset, last_offset + n_bytes],
         )
-        last_offset += align(len(data), alignment)
+        last_offset += align(n_bytes, alignment)
+        return d
+
+    for name, t in params.items():
+        header_dict[name] = _generate_header(t)
+        if t.scale is not None:
+            header_dict[name]["scale"] = _generate_header(t.scale)
 
     with contextlib.ExitStack() as stack:
         f = (
@@ -301,13 +421,16 @@ def save(
         # buffer
         buffer_start = f.tell()
         assert buffer_start % alignment == 0
-        for name, tensor in params.items():
-            begin, end = header_dict[name]["data_offsets"]
-            _, data = encode_bf16(tensor)
-            assert f.tell() == buffer_start + begin
-            f.write(data.numpy().tobytes())
-            assert f.tell() == buffer_start + end
-            f.write((align(len(data), alignment) - len(data)) * b"\0")
+        for name, param_t in params.items():
+            param_h = header_dict[name]
+            for t, h in [(param_t, param_h), (param_t.scale, param_h.get("scale"))]:
+                if t is not None:
+                    begin, end = h["data_offsets"]
+                    assert f.tell() == buffer_start + begin
+                    t_bytes = t.encode()
+                    f.write(t_bytes)
+                    assert f.tell() == buffer_start + end
+                    f.write((align(len(t_bytes), alignment) - len(t_bytes)) * b"\0")
 
 
 def _run() -> None:
