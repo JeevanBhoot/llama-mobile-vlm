@@ -5,6 +5,7 @@ import contextlib
 import datetime
 import io
 import json
+import math
 import re
 import struct
 import tempfile
@@ -15,11 +16,14 @@ from typing import IO, Any, Literal, Optional, Union
 
 import torch
 import transformers
+import weight_formats.quantisation as Q
 import weight_formats.quantisation_training as T
+from weight_formats.nearest_neighbour import nearest_neighbour
 from torch import Tensor, nn
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
 from transformers.models.mllama.image_processing_mllama import MllamaImageProcessor
 from transformers.models.mllama.modeling_mllama import MllamaForConditionalGeneration
+
 
 FILE_VERSION = 2
 
@@ -34,44 +38,33 @@ def safe_div(a: Tensor, b: Tensor) -> Tensor:
 
 @dataclass
 class TensorData:
-    dtype: Literal["BF16", "INT8"]
+    dtype: Literal["BF16", "INT8", "S3D8"]
+    shape: tuple[int, ...]
     tensor: Tensor
+    table: Optional["TensorData"]
     scale: Optional["TensorData"]
 
     def __post_init__(self) -> None:
         if self.dtype == "BF16":
             assert self.tensor.dtype == torch.bfloat16
+            assert self.tensor.nelement() == math.prod(self.shape)
         elif self.dtype == "INT8":
             assert self.tensor.dtype == torch.int8
-            assert self.scale is not None
+            assert self.tensor.nelement() == math.prod(self.shape)
+        elif self.dtype == "S3D8":
+            assert self.tensor.dtype == torch.uint8
+            assert self.table is not None
+            assert self.table.dtype == "INT8"
+        assert self.tensor.ndim == 1
+        if self.scale is not None:
             assert self.scale.dtype == "BF16"
 
     def __repr__(self) -> str:
-        return (
-            f"TensorData({self.dtype}, {tuple(self.tensor.shape)}, scale={self.scale})"
-        )
-
-    def size_bytes(self) -> int:
-        if self.dtype == "BF16":
-            return 2 * self.tensor.numel()
-        if self.dtype == "INT8":
-            return self.tensor.numel()
-        assert False, f"Unsupported dtype {self.dtype!r}"
-
-    def encode(self) -> bytes:
-        if self.dtype in ("BF16", "INT8"):
-            return (
-                self.tensor.cpu()
-                .flatten()
-                .contiguous()
-                .view(torch.uint8)
-                .numpy()
-                .tobytes()
-            )
-        assert False, f"Unsupported dtype {self.dtype!r}"
+        return f"TensorData({self.dtype}, {self.shape}, table={self.table}, scale={self.scale})"
 
     def to_bf16(self) -> Tensor:
-        data = self.tensor.to(torch.bfloat16)
+        assert self.dtype != "S3D8", "S3D8 tensors do not support to_bf16()"
+        data = self.tensor.to(torch.bfloat16).reshape(self.shape)
         if self.scale is not None:
             data = data * self.scale.to_bf16()
         return data
@@ -81,7 +74,6 @@ class TensorData:
             t.ndim == 0 and t.dtype == torch.bfloat16
         ), "Only scalar bfloat16 multiplication is supported"
         if self.scale is not None:
-            assert self.scale.dtype == "BF16"
             self.scale.tensor.mul_(t.to(self.scale.tensor.device))
         else:
             self.tensor.mul_(t.to(self.tensor.device))
@@ -90,12 +82,15 @@ class TensorData:
 def to_tensor_data(t: Tensor | T.Weight) -> TensorData:
     if isinstance(t, Tensor):
         return TensorData(
-            dtype="BF16", tensor=t.data.to(torch.bfloat16, copy=True), scale=None
+            dtype="BF16",
+            shape=tuple(t.shape),
+            tensor=t.data.to(torch.bfloat16, copy=True).flatten(),
+            table=None,
+            scale=None,
         )
+
     if isinstance(t, T.UnquantisedWeight):
-        return TensorData(
-            dtype="BF16", tensor=t.weight.data.to(torch.bfloat16, copy=True), scale=None
-        )
+        return to_tensor_data(t.weight)
 
     if isinstance(t, T.Weight):
         # CHANNEL_INT8
@@ -107,14 +102,43 @@ def to_tensor_data(t: Tensor | T.Weight) -> TensorData:
         scale = t._get_scale()
         tensor = (
             safe_div(t.master.reshape(t._blocked_shape), scale)
-            .view(t.shape)
             .round()
             .clip(-128, 127)
             .to(torch.int8)
+            .flatten()
         )
         return TensorData(
             dtype="INT8",
+            shape=tuple(t.shape),
             tensor=tensor,
+            table=None,
+            scale=to_tensor_data(T._squeeze_odd_dims(scale)),
+        )
+
+    if isinstance(t, T.Sign3D8Weight):
+        # CHANNEL_S3D8
+        scale = t._get_scale()
+        tensor = safe_div(t.master.reshape(t._blocked_shape), scale).reshape(t.shape)
+        tensor = Q.Sign3D8Format.vectorise(tensor)
+        idx = nearest_neighbour(tensor, t.centroids)
+        sign = tensor.lt(0)
+        tensor_data = (
+            (idx << 1)
+            | sign[:, 0].to(idx.dtype)
+            | (sign[:, 1].to(idx.dtype) << 6)
+            | ((sign[:, 0] ^ sign[:, 2]).to(idx.dtype) << 7)
+        ).to(torch.uint8)
+        return TensorData(
+            dtype="S3D8",
+            shape=tuple(t.shape),
+            tensor=tensor_data,
+            table=TensorData(
+                dtype="INT8",
+                shape=tuple(t.centroids.shape),
+                tensor=t.centroids.to(torch.int8, copy=True).flatten(),
+                table=None,
+                scale=None,
+            ),
             scale=to_tensor_data(T._squeeze_odd_dims(scale)),
         )
 
@@ -212,12 +236,19 @@ def prepare_parameters(
 ) -> dict[str, TensorData]:
     """Rename parameters for uniform storage between models."""
     params = {}
+    force_bf16 = {
+        "vision_model.multi_modal_projector.weight",
+        "vision_model.gated_positional_embedding.tile_embedding.weight",
+        "vision_model.pre_tile_positional_embedding.embedding.weight",
+        "vision_model.post_tile_positional_embedding.embedding.weight",
+    }
 
     def _visit(m: nn.Module, prefix: tuple[str, ...] = ()) -> None:
         for name, child in m.named_children():
             _visit(child, prefix + (name,))
-        if isinstance(m, T.Weight):
-            params[standardise_name(".".join(prefix))] = to_tensor_data(m)
+        if isinstance(m, (T.UnquantisedWeight, T.Weight, T.Sign3D8Weight)):
+            full_name = standardise_name(".".join(prefix))
+            params[full_name] = to_tensor_data(m() if full_name in force_bf16 else m)
         else:
             for name, param in m.named_parameters(recurse=False):
                 params[standardise_name(".".join(prefix + (name,)))] = to_tensor_data(
@@ -390,17 +421,20 @@ def save(
 
     def _generate_header(t: TensorData) -> dict[str, Any]:
         nonlocal last_offset
-        n_bytes = t.size_bytes()
+        n_bytes = t.tensor.element_size() * t.tensor.numel()
         d = dict(
             dtype=t.dtype,
-            shape=list(t.tensor.shape),
+            shape=list(t.shape),
             data_offsets=[last_offset, last_offset + n_bytes],
         )
         last_offset += align(n_bytes, alignment)
         return d
 
     for name, t in params.items():
+        # Note: order MUST match the buffer write below
         header_dict[name] = _generate_header(t)
+        if t.table is not None:
+            header_dict[name]["table"] = _generate_header(t.table)
         if t.scale is not None:
             header_dict[name]["scale"] = _generate_header(t.scale)
 
@@ -423,11 +457,17 @@ def save(
         assert buffer_start % alignment == 0
         for name, param_t in params.items():
             param_h = header_dict[name]
-            for t, h in [(param_t, param_h), (param_t.scale, param_h.get("scale"))]:
+            for t, h in [
+                (param_t, param_h),
+                (param_t.table, param_h.get("table")),
+                (param_t.scale, param_h.get("scale")),
+            ]:
                 if t is not None:
                     begin, end = h["data_offsets"]
                     assert f.tell() == buffer_start + begin
-                    t_bytes = t.encode()
+                    t_bytes = (
+                        t.tensor.cpu().contiguous().view(torch.uint8).numpy().tobytes()
+                    )
                     f.write(t_bytes)
                     assert f.tell() == buffer_start + end
                     f.write((align(len(t_bytes), alignment) - len(t_bytes)) * b"\0")

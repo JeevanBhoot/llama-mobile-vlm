@@ -3,15 +3,40 @@ import json
 import struct
 
 import torch
-from transformers import LlamaConfig
-from transformers.models.llama.modeling_llama import LlamaForCausalLM
 import weight_formats.quantisation as Q
 import weight_formats.quantisation_training as QT
+from transformers import LlamaConfig
+from transformers.models.llama.modeling_llama import LlamaForCausalLM
 
 import squashedtensors
 
+INT_FMT = Q.LinearScalingFormat(
+    Q.IntFormat(8),
+    scale_format=Q.BFLOAT16,
+    block_shape=(1, None),
+    scaling="absmax",
+)
 
-def make_qat_model(scaling_mode: str) -> LlamaForCausalLM:
+S3D8_FMT = Q.LinearScalingFormat(
+    Q.Sign3D8Format(
+        Q.VectorLUTFormat.create(
+            torch.cartesian_prod(
+                torch.linspace(0, 127, 4),
+                torch.linspace(0, 127, 4),
+                torch.linspace(0, 127, 2),
+            ),
+            Q.TorchFormat(torch.int8),
+            "S3D8",
+            range=(0, 127),
+        )
+    ),
+    scale_format=Q.BFLOAT16,
+    block_shape=(1, None),
+    scaling="absmax",
+)
+
+
+def make_qat_model(scaling_mode: str, fmt: Q.TensorFormat) -> LlamaForCausalLM:
     model = LlamaForCausalLM(
         LlamaConfig(
             hidden_size=16,
@@ -22,12 +47,6 @@ def make_qat_model(scaling_mode: str) -> LlamaForCausalLM:
             vocab_size=32,
             max_position_embeddings=64,
         )
-    )
-    fmt = Q.LinearScalingFormat(
-        Q.IntFormat(8),
-        scale_format=Q.BFLOAT16,
-        block_shape=(1, None),
-        scaling="absmax",
     )
     QT.convert(
         model,
@@ -56,7 +75,7 @@ def read_header(buffer: io.BytesIO) -> tuple[int, dict[str, object]]:
 def test_save_channel_int8_qat_dynamic(monkeypatch) -> None:
     monkeypatch.setattr(squashedtensors, "get_vocab_dict", lambda _: {})
     buffer = io.BytesIO()
-    squashedtensors.save(make_qat_model("dynamic"), None, None, buffer)
+    squashedtensors.save(make_qat_model("dynamic", INT_FMT), None, None, buffer)
 
     version, header = read_header(buffer)
     entry = header["text_model.layers.0.attn.q_proj.weight"]
@@ -73,11 +92,35 @@ def test_save_channel_int8_qat_dynamic(monkeypatch) -> None:
 def test_save_channel_int8_qat_parameter(monkeypatch) -> None:
     monkeypatch.setattr(squashedtensors, "get_vocab_dict", lambda _: {})
     buffer = io.BytesIO()
-    squashedtensors.save(make_qat_model("parameter"), None, None, buffer)
+    squashedtensors.save(make_qat_model("parameter", INT_FMT), None, None, buffer)
 
     _, header = read_header(buffer)
     entry = header["text_model.layers.0.attn.q_proj.weight"]
 
     assert entry["dtype"] == "INT8"
     assert entry["data_offsets"][1] - entry["data_offsets"][0] == 16 * 16
-    assert entry["scale"]["data_offsets"][1] - entry["scale"]["data_offsets"][0] == 16 * 2
+    assert (
+        entry["scale"]["data_offsets"][1] - entry["scale"]["data_offsets"][0] == 16 * 2
+    )
+
+
+@torch.inference_mode()
+def test_save_channel_s3d8_qat_dynamic(monkeypatch) -> None:
+    monkeypatch.setattr(squashedtensors, "get_vocab_dict", lambda _: {})
+    buffer = io.BytesIO()
+    squashedtensors.save(make_qat_model("dynamic", S3D8_FMT), None, None, buffer)
+
+    _, header = read_header(buffer)
+    entry = header["text_model.layers.0.attn.q_proj.weight"]
+
+    assert entry["dtype"] == "S3D8"
+    assert entry["shape"] == [16, 16]
+    assert entry["data_offsets"][1] - entry["data_offsets"][0] == 16 * 6
+    assert entry["table"]["dtype"] == "INT8"
+    assert entry["table"]["shape"] == [32, 3]
+    assert (
+        entry["table"]["data_offsets"][1] - entry["table"]["data_offsets"][0] == 32 * 3
+    )
+    assert entry["scale"]["dtype"] == "BF16"
+    assert entry["scale"]["shape"] == [16, 1]
+    assert all(not key.endswith((".master", ".centroids", ".scale")) for key in header)
