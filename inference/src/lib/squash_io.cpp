@@ -48,7 +48,7 @@ std::string regexUnicodeToModifiedECMA(const std::string& original) {
 
 namespace {
 constexpr auto Magic = 0x7471732eu;
-constexpr auto Version = 1u;
+constexpr auto Version = 2u;
 constexpr auto MaxRamProportion = 0.75f;
 constexpr auto BufferChunkSize = 4096u;
 
@@ -56,6 +56,21 @@ using json = nlohmann::json;
 
 ulong align(ulong index, ulong alignment) {
     return alignment * ((index + alignment - 1) / alignment);
+}
+
+ulong maxTensorEndOffset(const json& entry, ulong alignment) {
+    auto maxEnd = ulong(0);
+    for (const auto& p : entry.items()) {
+        const auto& tensor = p.value();
+        for (const auto* t : {&tensor, tensor.contains("scale") ? &tensor.at("scale") : nullptr,
+                              tensor.contains("table") ? &tensor.at("table") : nullptr}) {
+            if (t && t->contains("data_offsets")) {
+                auto end = (*t).at("data_offsets")[1].template get<ulong>();
+                maxEnd = std::max(maxEnd, align(end, alignment));
+            }
+        }
+    }
+    return maxEnd;
 }
 
 void checkRAM(ulong bufferSize) {
@@ -105,25 +120,52 @@ struct TensorLoader {
     }
 
     // Load the given named tensor (full name "{prefix}.{name}")
-    tensor::TensorV operator()(const std::string& name) const {
-        auto fullName = this->fullName(name);
-        auto& entry = header.at(fullName);
+    tensor::TensorV loadTensor(const json& entry, const std::string& fullName) const {
         auto dtype = entry.at("dtype").template get<std::string>();
-        if (dtype != "BF16") {
-            std::ostringstream err;
-            err << "Tensor " << fullName << " has unsupported dtype = " << dtype;
-            throw std::runtime_error(err.str());
-        }
         auto offset = entry.at("data_offsets")[0].template get<ulong>();
         if (offset % alignment) {
             std::ostringstream err;
             err << "Tensor " << fullName << " is misaligned, offset = " << offset;
             throw std::runtime_error(err.str());
         }
-        return {
-            tensor::_data::Flat(reinterpret_cast<bf16*>(buffer.get() + offset)),
-            entry.at("shape").template get<std::vector<uint>>(),
-        };
+        auto shape = entry.at("shape").template get<std::vector<uint>>();
+        if (dtype == "BF16") {
+            return {
+                tensor::_data::Flat(reinterpret_cast<bf16*>(buffer.get() + offset)),
+                std::move(shape),
+            };
+        }
+        if (dtype == "INT8") {
+            auto scaleTensor = loadTensor(entry.at("scale"), fullName + "#scale");
+            if (scaleTensor.shape != std::vector<uint>({shape[0], 1u})) {
+                std::ostringstream err;
+                err << "INT8 Tensor " << fullName
+                    << " has bad scale shape = " << dump(scaleTensor.shape) << ", expected {"
+                    << shape[0] << ", 1}";
+                throw std::runtime_error(err.str());
+            }
+            if (!std::holds_alternative<tensor::_data::Flat<bf16>>(scaleTensor.data)) {
+                std::ostringstream err;
+                err << "INT8 Tensor " << fullName
+                    << " expected BF16 scale, actual type_index = " << scaleTensor.data.index();
+                throw std::runtime_error(err.str());
+            }
+            return {
+                tensor::_data::ChannelInt8(
+                    reinterpret_cast<int8_t*>(buffer.get() + offset),
+                    std::get<tensor::_data::Flat<bf16>>(scaleTensor.data).data),
+                std::move(shape),
+            };
+        }
+        std::ostringstream err;
+        err << "Tensor " << fullName << " has unsupported dtype = " << dtype;
+        throw std::runtime_error(err.str());
+    }
+
+    // Load the given named tensor (full name "{prefix}.{name}")
+    tensor::TensorV operator()(const std::string& name) const {
+        auto fullName = this->fullName(name);
+        return loadTensor(header.at(fullName), fullName);
     }
 };
 
@@ -283,11 +325,7 @@ Model loadSquashedTensors(std::istream& in) {
     auto alignment = metadata.at("alignment").template get<ulong>();
 
     // Buffer
-    auto bufferLength = ulong(0);
-    for (auto& x : header) {
-        bufferLength =
-            std::max(bufferLength, align(x.at("data_offsets")[1].template get<ulong>(), alignment));
-    }
+    auto bufferLength = maxTensorEndOffset(header, alignment);
     checkRAM(bufferLength);
     tensor::Buffer _data(bufferLength, alignment);
     for (auto i = ulong(0); i < bufferLength; i += BufferChunkSize) {

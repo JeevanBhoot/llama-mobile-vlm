@@ -5,6 +5,7 @@
 #define JSON_USE_IMPLICIT_CONVERSIONS 0
 #include <json.hpp>
 
+using namespace squash;
 using namespace squash::tensor;
 using json = nlohmann::json;
 
@@ -18,12 +19,56 @@ struct TestCase {
     TensorV tensor(const std::string& name) const {
         auto info = data.at(name);
         REQUIRE(info.at("type").template get<std::string>() == "tensor");
+        auto dtype = info.at("dtype").template get<std::string>();
+        auto shape = info.at("shape").template get<Shape>();
+        auto offset = info.at("offset").template get<squash::ulong>();
+        if (dtype == "float32") {
+            return TensorV{
+                .data = _data::Flat<float>(reinterpret_cast<float*>(payload.get() + offset)),
+                .shape = std::move(shape),
+            };
+        } else if (dtype == "bfloat16") {
+            return TensorV{
+                .data = _data::Flat<bf16>(reinterpret_cast<bf16*>(payload.get() + offset)),
+                .shape = std::move(shape),
+            };
+        } else if (dtype == "int8") {
+            auto scale = info.at("scale");
+            REQUIRE(scale.at("dtype").template get<std::string>() == "bfloat16");
+            auto scaleShape = scale.at("shape").template get<Shape>();
+            auto scaleOffset = scale.at("offset").template get<squash::ulong>();
+            REQUIRE(shape.size() == 2);
+            REQUIRE(scaleShape == Shape({shape[0]}));
+            return TensorV{
+                .data = _data::ChannelInt8(
+                    reinterpret_cast<int8_t*>(payload.get() + offset),
+                    reinterpret_cast<squash::bf16*>(payload.get() + scaleOffset)),
+                .shape = std::move(shape),
+            };
+        } else {
+            std::ostringstream err;
+            err << "Unsupported tensor dtype: " << dtype;
+            throw std::runtime_error(err.str());
+        }
+    }
+
+    TensorV tensor_channel_int8(const std::string& name) const {
+        auto info = data.at(name);
+        REQUIRE(info.at("type").template get<std::string>() == "tensor_channel_int8");
+        auto shape = info.at("shape").template get<Shape>();
+        auto scaleShape = info.at("scale_shape").template get<Shape>();
+        REQUIRE(shape.size() == 2);
+        REQUIRE(scaleShape == Shape({shape[0]}));
         return TensorV{
-            .data = _data::Flat<float>(
-                reinterpret_cast<float*>(payload.get() + info.at("offset").template get<squash::ulong>())),
-            .shape = info.at("shape").template get<Shape>(),
+            .data = _data::ChannelInt8(
+                reinterpret_cast<int8_t*>(payload.get() +
+                                          info.at("offset").template get<squash::ulong>()),
+                reinterpret_cast<squash::bf16*>(
+                    payload.get() + info.at("scale_offset").template get<squash::ulong>())),
+            .shape = std::move(shape),
         };
     }
+
     Tensor tensor_bf16(const std::string& name) const { return castBf16(tensor(name)); }
 
     template <typename T>
@@ -47,10 +92,7 @@ void runTest(const TestCase& test) {
         // dummy
 
     } else if (test.op == "cast") {
-        auto xFloat = test.tensor("float");
-        auto xBf16 = test.tensor("bf16");
-        REQUIRE_TENSOR_APPROX_EQUALS(castFloat(castBf16(xBf16)), xBf16, 0.0);
-        REQUIRE_TENSOR_APPROX_EQUALS(castFloat(castBf16(xFloat)), xBf16, 0.0);
+        REQUIRE_TENSOR_APPROX_EQUALS(castBf16(test.tensor("float")), test.tensor("bf16"), 0.0);
 
     } else if (test.op == "concat2") {
         auto output =
@@ -88,12 +130,12 @@ void runTest(const TestCase& test) {
         REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor_bf16("output"), 0.1);  // extreme value
 
     } else if (test.op == "embeddingLookup") {
-        auto output = embeddingLookup(test.tensor_bf16("weight"), test.list<uint>("tokens"));
-        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor_bf16("output"), DefaultTol);
+        auto output = embeddingLookup(test.tensor("weight"), test.list<uint>("tokens"));
+        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), DefaultTol);
 
     } else if (test.op == "projection") {
-        auto output = projection(test.tensor_bf16("weight"), test.tensor_bf16("x"));
-        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor_bf16("output"), DefaultTol);
+        auto output = projection(test.tensor("weight"), test.tensor("x"));
+        REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), DefaultTol);
 
     } else if (test.op == "rotate") {
         auto output =

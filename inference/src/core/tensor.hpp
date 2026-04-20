@@ -34,11 +34,17 @@ struct Flat {
     T* data;
     Flat(T* data = nullptr) : data(data) {}
 };
+
+struct ChannelInt8 {
+    int8_t* data;
+    bf16* scale;
+    ChannelInt8(int8_t* data, bf16* scale) : data(data), scale(scale) {}
+};
 }  // namespace _data
 
 // A non-owning Tensor view
 struct TensorV {
-    using DataT = std::variant<_data::Flat<bf16>, _data::Flat<float>>;
+    using DataT = std::variant<_data::Flat<bf16>, _data::Flat<float>, _data::ChannelInt8>;
     DataT data;
     Shape shape;
 };

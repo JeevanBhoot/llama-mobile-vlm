@@ -143,6 +143,22 @@ void gather(const bf16* __restrict__ weight,
     }
 }
 
+void gather(const int8_t* __restrict__ weight,
+            const bf16* __restrict__ weightScale,
+            const uint* __restrict__ indices,
+            const uint nIndices,
+            const uint dim,
+            bf16* __restrict__ out) {
+#pragma omp parallel for
+    for (auto n = 0u; n < nIndices; ++n) {
+        auto row = indices[n];
+        auto rowScale = float(weightScale[row]);
+        for (auto i = 0u; i < dim; ++i) {
+            out[n * dim + i] = bf16(float(weight[row * dim + i]) * rowScale);
+        }
+    }
+}
+
 namespace {
 
 #ifdef __ARM_NEON
@@ -307,6 +323,17 @@ void _matmulT(const bf16* __restrict__ lhs,
 
 #endif  // __ARM_NEON && __ARM_FEATURE_BF16_VECTOR_ARITHMETIC
 
+float _dot_product_bf16_int8(const bf16* __restrict__ a,
+                             const int8_t* __restrict__ b,
+                             const uint n) {
+    float result = 0;
+#pragma omp simd reduction(+ : result)
+    for (auto i = 0u; i < n; ++i) {
+        result += float(a[i]) * float(b[i]);
+    }
+    return result;
+}
+
 }  // namespace
 
 void matmulT(const bf16* __restrict__ lhs,
@@ -316,6 +343,23 @@ void matmulT(const bf16* __restrict__ lhs,
              const uint dN,
              bf16* __restrict__ out) {
     _matmulT(lhs, rhs, dM, dK, dN, out);
+}
+
+void matmulT(const bf16* __restrict__ lhs,
+             const int8_t* __restrict__ rhs,
+             const bf16* __restrict__ rhsScale,
+             const uint dM,
+             const uint dK,
+             const uint dN,
+             bf16* __restrict__ out) {
+#pragma omp parallel for
+    for (auto n = 0u; n < dN; ++n) {
+        auto scale = float(rhsScale[n]);
+        for (auto m = 0u; m < dM; ++m) {
+            auto dot = _dot_product_bf16_int8(&lhs[m * dK], &rhs[n * dK], dK);
+            out[m * dN + n] = bf16(dot * scale);
+        }
+    }
 }
 
 void rotateInPlace(bf16* __restrict__ x,

@@ -245,6 +245,10 @@ std::vector<uint> strides(const TensorV& tensor) {
 // Operations
 
 TensorV reshape(const TensorV& tensor, const Shape& shape) {
+    if (!((std::holds_alternative<_data::Flat<float>>(tensor.data) ||
+           std::holds_alternative<_data::Flat<bf16>>(tensor.data)))) {
+        throw std::invalid_argument("reshape requires Flat tensor data");
+    }
     if (prod(tensor.shape) != prod(shape)) {
         std::ostringstream msg;
         msg << "Cannot reshape " << tensor.shape << " to " << shape;
@@ -270,7 +274,14 @@ TensorV indexLeading(const TensorV& tensor, const std::vector<uint>& indices) {
         offset += stride[i] * indices[i];
     }
     auto data = std::visit(
-        [offset](auto& d) { return TensorV::DataT(std::decay_t<decltype(d)>(d.data + offset)); },
+        [offset](auto& d) -> TensorV::DataT {
+            using T = std::decay_t<decltype(d)>;
+            if constexpr (std::is_same_v<T, _data::ChannelInt8>) {
+                throw std::invalid_argument("indexLeading does not support ChannelInt8 tensors");
+            } else {
+                return T(d.data + offset);
+            }
+        },
         tensor.data);
     return TensorV{
         data, {tensor.shape.begin() + static_cast<ptrdiff_t>(indices.size()), tensor.shape.end()}};
@@ -285,7 +296,14 @@ TensorV slice0(const TensorV& tensor, uint start, uint end) {
     }
     auto offset = start * (prod(tensor.shape) / tensor.shape[0]);
     auto data = std::visit(
-        [offset](auto& d) { return TensorV::DataT(std::decay_t<decltype(d)>(d.data + offset)); },
+        [offset](auto& d) -> TensorV::DataT {
+            using T = std::decay_t<decltype(d)>;
+            if constexpr (std::is_same_v<T, _data::ChannelInt8>) {
+                throw std::invalid_argument("slice0 does not support ChannelInt8 tensors");
+            } else {
+                return T(d.data + offset);
+            }
+        },
         tensor.data);
     auto shape = tensor.shape;
     shape[0] = end - start;
@@ -293,6 +311,10 @@ TensorV slice0(const TensorV& tensor, uint start, uint end) {
 }
 
 TensorV unsqueeze(const TensorV& tensor, const std::vector<uint>& indices) {
+    if (!((std::holds_alternative<_data::Flat<float>>(tensor.data) ||
+           std::holds_alternative<_data::Flat<bf16>>(tensor.data)))) {
+        throw std::invalid_argument("unsqueeze requires Flat tensor data");
+    }
     auto shape = tensor.shape;
     for (auto i : indices) {
         shape.insert(shape.begin() + i, 1u);
@@ -308,7 +330,7 @@ Tensor randn(Shape shape, float stddev, ulong seed) {
 
 Tensor clone(const TensorV& tensor) {
     return std::visit(
-        [&](auto& d) {
+        [&](auto& d) -> Tensor {
             if constexpr (std::is_same_v<std::decay_t<decltype(d)>, _data::Flat<float>>) {
                 auto out = empty<float>(tensor.shape);
                 ops::copy(d.data, prod(tensor.shape), data<float>(out));
@@ -481,8 +503,14 @@ Tensor embeddingLookup(const TensorV& weight, const std::vector<uint>& tokens) {
         throw std::invalid_argument(err.str());
     }
     auto out = empty<bf16>({uint(tokens.size()), weight.shape[1]});
-    ops::gather(data<bf16>(weight), tokens.data(), uint(tokens.size()), weight.shape[1],
-                data<bf16>(out));
+    if (std::holds_alternative<_data::ChannelInt8>(weight.data)) {
+        auto weight_ = std::get<_data::ChannelInt8>(weight.data);
+        ops::gather(weight_.data, weight_.scale, tokens.data(), uint(tokens.size()),
+                    weight.shape[1], data<bf16>(out));
+    } else {
+        ops::gather(data<bf16>(weight), tokens.data(), uint(tokens.size()), weight.shape[1],
+                    data<bf16>(out));
+    }
     return out;
 }
 
@@ -494,8 +522,14 @@ Tensor projection(const TensorV& weight, const TensorV& x) {
         throw std::invalid_argument(err.str());
     }
     auto out = empty<bf16>({x.shape[0], weight.shape[0]});
-    ops::matmulT(data<bf16>(x), data<bf16>(weight), x.shape[0], x.shape[1], weight.shape[0],
-                 data<bf16>(out));
+    if (std::holds_alternative<_data::ChannelInt8>(weight.data)) {
+        auto weight_ = std::get<_data::ChannelInt8>(weight.data);
+        ops::matmulT(data<bf16>(x), weight_.data, weight_.scale, x.shape[0], x.shape[1],
+                     weight.shape[0], data<bf16>(out));
+    } else {
+        ops::matmulT(data<bf16>(x), data<bf16>(weight), x.shape[0], x.shape[1], weight.shape[0],
+                     data<bf16>(out));
+    }
     return out;
 }
 
