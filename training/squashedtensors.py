@@ -16,7 +16,6 @@ from typing import IO, Any, Literal, Optional, Union
 
 import torch
 import transformers
-import weight_formats.quantisation as Q
 import weight_formats.quantisation_training as T
 from weight_formats.nearest_neighbour import nearest_neighbour
 from torch import Tensor, nn
@@ -119,7 +118,15 @@ def to_tensor_data(t: Tensor | T.Weight) -> TensorData:
         # CHANNEL_S3D8
         scale = t._get_scale()
         tensor = safe_div(t.master.reshape(t._blocked_shape), scale).reshape(t.shape)
-        tensor = Q.Sign3D8Format.vectorise(tensor)
+        # Pad output channels to multiple of 3, input channels to multiple of 16
+        # Each vector is of 3 output channels, but after this it's output-major
+        d_out, d_in = t.shape
+        tensor = (
+            torch.nn.functional.pad(tensor, (0, -(d_in % -16), 0, -(d_out % -3)))
+            .unflatten(0, (-1, 3))
+            .permute(0, 2, 1)
+            .flatten(end_dim=1)
+        )
         idx = nearest_neighbour(tensor, t.centroids)
         sign = tensor.lt(0)
         tensor_data = (
