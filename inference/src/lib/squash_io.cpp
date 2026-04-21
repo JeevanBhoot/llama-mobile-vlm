@@ -4,6 +4,7 @@
 #include <json.hpp>
 #include <regex>
 #include <sstream>
+#include <unordered_map>
 
 #include "squash.hpp"
 
@@ -73,6 +74,16 @@ ulong maxTensorEndOffset(const json& entry, ulong alignment) {
     return maxEnd;
 }
 
+ulong s3d8LutStorageSize(const json& entry, ulong alignment) {
+    ulong total = 0;
+    for (const auto& p : entry.items()) {
+        if (p.value().at("dtype").template get<std::string>() == "S3D8") {
+            total += align(3 * 64 * sizeof(int8_t), alignment);
+        }
+    }
+    return total;
+}
+
 void checkRAM(ulong bufferSize) {
     struct sysinfo info;
     if (sysinfo(&info)) {
@@ -97,10 +108,16 @@ Tokenizer loadTokenizer(const json& j) {
     return Tokenizer(preTokenizer, merges, std::move(vocab));
 }
 
-struct TensorLoader {
-    const json& header;
+struct ParamBuffer {
     ulong alignment;
     const tensor::Buffer& buffer;
+    ulong nextS3D8LutOffset;
+    std::unordered_map<std::string, int8_t*> s3d8Luts;
+};
+
+struct TensorLoader {
+    const json& header;
+    ParamBuffer& params;
     std::string prefix;
 
     std::string fullName(const std::string& name) const {
@@ -116,14 +133,58 @@ struct TensorLoader {
 
     // Create a scoped TensorLoader with `name` appended to the `prefix`
     TensorLoader operator[](const std::string& name) const {
-        return TensorLoader{header, alignment, buffer, this->fullName(name)};
+        return TensorLoader{header, params, this->fullName(name)};
+    }
+
+    int8_t* loadLut(const json& entry, const std::string& fullName) const {
+        if (auto dtype = entry.at("dtype").template get<std::string>(); dtype != "INT8") {
+            std::ostringstream err;
+            err << "S3D8 Tensor " << fullName << " expected INT8 table, actual dtype = " << dtype;
+            throw std::runtime_error(err.str());
+        }
+        if (auto shape = entry.at("shape").template get<std::vector<uint>>();
+            shape != std::vector<uint>({32u, 3u})) {
+            std::ostringstream err;
+            err << "S3D8 Tensor " << fullName << " has bad table shape = " << dump(shape)
+                << ", expected {32, 3}";
+            throw std::runtime_error(err.str());
+        }
+        if (auto it = params.s3d8Luts.find(fullName); it != params.s3d8Luts.end()) {
+            return it->second;
+        }
+        auto* lut = reinterpret_cast<int8_t*>(params.buffer.get() + params.nextS3D8LutOffset);
+        const auto offset = entry.at("data_offsets")[0].template get<ulong>();
+        tensor::_data::ChannelS3D8::expandLut(
+            reinterpret_cast<int8_t*>(params.buffer.get() + offset), lut);
+        params.s3d8Luts.emplace(fullName, lut);
+        params.nextS3D8LutOffset += align(3 * 64 * sizeof(int8_t), params.alignment);
+        return lut;
+    }
+
+    bf16* loadScale(const json& entry,
+                    const std::string& fullName,
+                    const std::vector<uint>& shape) const {
+        auto scaleTensor = loadTensor(entry, fullName + "#scale");
+        if (scaleTensor.shape != std::vector<uint>({shape[0], 1u})) {
+            std::ostringstream err;
+            err << "Tensor " << fullName << " has bad scale shape = " << dump(scaleTensor.shape)
+                << ", expected {" << shape[0] << ", 1}";
+            throw std::runtime_error(err.str());
+        }
+        if (!std::holds_alternative<tensor::_data::Flat<bf16>>(scaleTensor.data)) {
+            std::ostringstream err;
+            err << "Tensor " << fullName
+                << " expected BF16 scale, actual type_index = " << scaleTensor.data.index();
+            throw std::runtime_error(err.str());
+        }
+        return std::get<tensor::_data::Flat<bf16>>(scaleTensor.data).data;
     }
 
     // Load the given named tensor (full name "{prefix}.{name}")
     tensor::TensorV loadTensor(const json& entry, const std::string& fullName) const {
         auto dtype = entry.at("dtype").template get<std::string>();
         auto offset = entry.at("data_offsets")[0].template get<ulong>();
-        if (offset % alignment) {
+        if (offset % params.alignment) {
             std::ostringstream err;
             err << "Tensor " << fullName << " is misaligned, offset = " << offset;
             throw std::runtime_error(err.str());
@@ -131,29 +192,22 @@ struct TensorLoader {
         auto shape = entry.at("shape").template get<std::vector<uint>>();
         if (dtype == "BF16") {
             return {
-                tensor::_data::Flat(reinterpret_cast<bf16*>(buffer.get() + offset)),
+                tensor::_data::Flat(reinterpret_cast<bf16*>(params.buffer.get() + offset)),
                 std::move(shape),
             };
         }
         if (dtype == "INT8") {
-            auto scaleTensor = loadTensor(entry.at("scale"), fullName + "#scale");
-            if (scaleTensor.shape != std::vector<uint>({shape[0], 1u})) {
-                std::ostringstream err;
-                err << "INT8 Tensor " << fullName
-                    << " has bad scale shape = " << dump(scaleTensor.shape) << ", expected {"
-                    << shape[0] << ", 1}";
-                throw std::runtime_error(err.str());
-            }
-            if (!std::holds_alternative<tensor::_data::Flat<bf16>>(scaleTensor.data)) {
-                std::ostringstream err;
-                err << "INT8 Tensor " << fullName
-                    << " expected BF16 scale, actual type_index = " << scaleTensor.data.index();
-                throw std::runtime_error(err.str());
-            }
             return {
-                tensor::_data::ChannelInt8(
-                    reinterpret_cast<int8_t*>(buffer.get() + offset),
-                    std::get<tensor::_data::Flat<bf16>>(scaleTensor.data).data),
+                tensor::_data::ChannelInt8(reinterpret_cast<int8_t*>(params.buffer.get() + offset),
+                                           loadScale(entry.at("scale"), fullName, shape)),
+                std::move(shape),
+            };
+        }
+        if (dtype == "S3D8") {
+            return {
+                tensor::_data::ChannelS3D8(reinterpret_cast<uint8_t*>(params.buffer.get() + offset),
+                                           loadLut(entry.at("table"), fullName),
+                                           loadScale(entry.at("scale"), fullName, shape)),
                 std::move(shape),
             };
         }
@@ -169,11 +223,8 @@ struct TensorLoader {
     }
 };
 
-TextModel loadTextModel(const json& header,
-                        const json& metadata,
-                        ulong alignment,
-                        const tensor::Buffer& buffer) {
-    TensorLoader model{header, alignment, buffer, "text_model"};
+TextModel loadTextModel(const json& header, const json& metadata, ParamBuffer& params) {
+    TensorLoader model{header, params, "text_model"};
     auto& c = metadata.at("config").at("text");
     auto& v = metadata.at("vocab");
     auto dLayers = c.at("d_layers").template get<uint>();
@@ -231,10 +282,7 @@ TextModel loadTextModel(const json& header,
     };
 }
 
-VisionModel loadVisionModel(const json& header,
-                            const json& metadata,
-                            ulong alignment,
-                            const tensor::Buffer& buffer) {
+VisionModel loadVisionModel(const json& header, const json& metadata, ParamBuffer& params) {
     auto loadAffine = [](const TensorLoader& m) {
         return VisionModel::Affine{.weight = m("weight"), .bias = m("bias")};
     };
@@ -260,7 +308,7 @@ VisionModel loadVisionModel(const json& header,
         return layers;
     };
 
-    TensorLoader model{header, alignment, buffer, "vision_model"};
+    TensorLoader model{header, params, "vision_model"};
     auto& c = metadata.at("config").at("vision");
     auto dLayers0 = c.at("d_layers0").template get<uint>();
     auto dLayers1 = c.at("d_layers1").template get<uint>();
@@ -326,18 +374,24 @@ Model loadSquashedTensors(std::istream& in) {
 
     // Buffer
     auto bufferLength = maxTensorEndOffset(header, alignment);
-    checkRAM(bufferLength);
-    tensor::Buffer _data(bufferLength, alignment);
+    auto s3d8LutBytes = s3d8LutStorageSize(header, alignment);
+    checkRAM(bufferLength + s3d8LutBytes);
+    tensor::Buffer _data(bufferLength + s3d8LutBytes, alignment);
     for (auto i = ulong(0); i < bufferLength; i += BufferChunkSize) {
         in.read(_data.get() + i,
                 static_cast<std::streamsize>(std::min(i + BufferChunkSize, bufferLength) - i));
     }
-
+    ParamBuffer params{
+        .alignment = alignment,
+        .buffer = _data,
+        .nextS3D8LutOffset = bufferLength,
+        .s3d8Luts = {},
+    };
     return Model{
-        .textModel = loadTextModel(header, metadata, alignment, _data),
+        .textModel = loadTextModel(header, metadata, params),
         .visionModel = metadata.at("config").at("vision").is_null()
                            ? std::optional<VisionModel>{}
-                           : loadVisionModel(header, metadata, alignment, _data),
+                           : loadVisionModel(header, metadata, params),
 
         // Metadata & data buffer
         .source = metadata.at("source").template get<std::string>(),

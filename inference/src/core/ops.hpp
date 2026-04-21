@@ -31,13 +31,25 @@ void layerNorm(const bf16* weight,
                uint dim,
                float epsilon,
                bf16* out);
+
+// weight {N, dim}, indices {nIndices}, out {nIndices, dim}
 void gather(const bf16* weight, const uint* indices, uint nIndices, uint dim, bf16* out);
+// weight {N, dim}, weightScale {N}, indices {nIndices}, out {nIndices, dim}
 void gather(const int8_t* weight,
             const bf16* weightScale,
             const uint* indices,
             uint nIndices,
             uint dim,
             bf16* out);
+// weight {N/3, dim}, weightLut {3, 64}, weightScale {N}, indices {nIndices}, out {nIndices, dim}
+void gather(const uint8_t* weight,
+            const int8_t* weightLut,
+            const bf16* weightScale,
+            const uint* indices,
+            uint nIndices,
+            uint dim,
+            bf16* out);
+
 // lhs {dM, dK}, rhs {dN, dK}, out {dM, dN}
 void matmulT(const bf16* lhs, const bf16* rhs, uint dM, uint dK, uint dN, bf16* out);
 // lhs {dM, dK}, rhs {dN, dK}, rhsScale {dN}, out {dM, dN}
@@ -48,6 +60,16 @@ void matmulT(const bf16* lhs,
              uint dK,
              uint dN,
              bf16* out);
+// lhs {dM, dK}, rhs {dN/3, dK}, rhsLut {3, 64}, rhsScale {dN}, out {dM, dN}
+void matmulT(const bf16* lhs,
+             const uint8_t* rhs,
+             const int8_t* rhsLut,
+             const bf16* rhsScale,
+             uint dM,
+             uint dK,
+             uint dN,
+             bf16* out);
+
 void rotateInPlace(bf16* x, const float* freq, uint offsetS, uint dS, uint dH, uint dim);
 void attentionInPlace(bf16* queryOut,
                       const bf16* key,

@@ -23,6 +23,49 @@ class ChannelInt8Data:
         assert self.scale.shape == (self.data.shape[0],)
 
 
+@dataclass
+class ChannelS3D8Data:
+    shape: tuple[int, ...]
+    data: Tensor
+    table: Tensor
+    scale: Tensor
+
+    def __post_init__(self) -> None:
+        assert self.data.dtype == torch.uint8
+        assert self.table.dtype == torch.int8
+        assert self.table.shape == (32, 3)
+        assert self.scale.dtype == torch.bfloat16
+        assert self.scale.shape[0] == self.shape[0]
+
+    @staticmethod
+    def pack(
+        shape: tuple[int, ...], idx: Tensor, sign: Tensor, table: Tensor, scale: Tensor
+    ) -> "ChannelS3D8Data":
+        packed = (
+            (idx << 1)
+            | sign[..., 0].to(torch.uint8)
+            | (sign[..., 1].to(torch.uint8) << 6)
+            | ((sign[..., 0] ^ sign[..., 2]).to(torch.uint8) << 7)
+        )
+        return ChannelS3D8Data(
+            shape,
+            packed.contiguous(),
+            table.contiguous(),
+            scale.contiguous(),
+        )
+
+
+def _s3d8_value(idx: Tensor, sign: Tensor, table: Tensor, scale: Tensor) -> Tensor:
+    return (
+        table[idx.long()]
+        .bfloat16()
+        .mul(1 - 2 * sign.to(torch.bfloat16))
+        .movedim(-1, 1)
+        .flatten(end_dim=1)[: scale.shape[0]]
+        .mul(scale[:, None])
+    )
+
+
 class TestFile:
     def __init__(self) -> None:
         self.offset = 0
@@ -46,13 +89,21 @@ class TestFile:
             type="tensor", dtype=dtype, shape=list(t.shape), offset=start_offset
         )
 
-    def store(self, t: int | float | list | Tensor | ChannelInt8Data) -> dict[str, Any]:
+    def store(
+        self, t: int | float | list | Tensor | ChannelInt8Data | ChannelS3D8Data
+    ) -> dict[str, Any]:
         if isinstance(t, (int, float)):
             return dict(type="scalar", data=t)
         if isinstance(t, list):
             return dict(type="list", data=t)
         if isinstance(t, ChannelInt8Data):
             out = self._store_tensor(t.data)
+            out["scale"] = self._store_tensor(t.scale)
+            return out
+        if isinstance(t, ChannelS3D8Data):
+            out = self._store_tensor(t.data)
+            out["shape"] = list(t.shape)  # note: different from t.data.shape
+            out["table"] = self._store_tensor(t.table)
             out["scale"] = self._store_tensor(t.scale)
             return out
         if isinstance(t, Tensor):
@@ -210,6 +261,20 @@ class Tests:
             output=output,
         )
 
+        torch.manual_seed(0xD75F8D286F1C90C1)
+        centroids = torch.randint(-128, 128, (32, 3), dtype=torch.int8)
+        scale = (0.05 + 0.2 * torch.rand(91)).to(torch.bfloat16)
+        idx = torch.randint(0, 32, ((91 + 2) // 3, 32), dtype=torch.uint8)
+        sign_bits = torch.randint(0, 2, (*idx.shape, 3), dtype=torch.bool)
+        output = _s3d8_value(idx, sign_bits, centroids, scale)[tensor(tokens)]
+        tests.add(
+            "embeddingLookup",
+            "channel_s3d8",
+            weight=ChannelS3D8Data.pack((91, 32), idx, sign_bits, centroids, scale),
+            tokens=tokens,
+            output=output,
+        )
+
     @staticmethod
     def projection(tests: TestFile) -> None:
         torch.manual_seed(0x19DFB9E938DCE261)
@@ -251,6 +316,21 @@ class Tests:
             "projection",
             "channel_int8",
             weight=ChannelInt8Data(weight_i8, scale),
+            x=x,
+            output=output,
+        )
+
+        torch.manual_seed(0xF8E639A52E2C81D4)
+        centroids = torch.randint(-128, 128, (32, 3), dtype=torch.int8)
+        scale = (0.02 + 0.3 * torch.rand(53)).to(torch.bfloat16)
+        x = torch.randn(17, 41).to(torch.bfloat16)
+        idx = torch.randint(0, 32, ((53 + 2) // 3, 41), dtype=torch.uint8)
+        sign_bits = torch.randint(0, 2, (*idx.shape, 3), dtype=torch.bool)
+        output = x @ _s3d8_value(idx, sign_bits, centroids, scale).T
+        tests.add(
+            "projection",
+            "channel_s3d8",
+            weight=ChannelS3D8Data.pack((53, 41), idx, sign_bits, centroids, scale),
             x=x,
             output=output,
         )

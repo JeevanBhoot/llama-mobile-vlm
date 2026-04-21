@@ -68,6 +68,22 @@ Buffer Buffer::copy(ulong size, ulong alignment) const {
     return result;
 }
 
+void _data::ChannelS3D8::expandLut(const int8_t* src, int8_t* dest) {
+    for (auto idx = 0u; idx < 32u; ++idx) {
+        int8_t v0 = src[idx * 3u + 0u];
+        dest[0u * 64u + 2u * idx + 0u] = v0;
+        dest[0u * 64u + 2u * idx + 1u] = int8_t(-v0);
+
+        int8_t v1 = src[idx * 3u + 1u];
+        dest[1u * 64u + idx] = v1;
+        dest[1u * 64u + 32u + idx] = int8_t(-v1);
+
+        int8_t v2 = src[idx * 3u + 2u];
+        dest[2u * 64u + 2u * idx + 0u] = v2;
+        dest[2u * 64u + 2u * idx + 1u] = int8_t(-v2);
+    }
+}
+
 /// Tensor ///
 
 namespace {
@@ -276,8 +292,9 @@ TensorV indexLeading(const TensorV& tensor, const std::vector<uint>& indices) {
     auto data = std::visit(
         [offset](auto& d) -> TensorV::DataT {
             using T = std::decay_t<decltype(d)>;
-            if constexpr (std::is_same_v<T, _data::ChannelInt8>) {
-                throw std::invalid_argument("indexLeading does not support ChannelInt8 tensors");
+            if constexpr (std::is_same_v<T, _data::ChannelInt8> ||
+                          std::is_same_v<T, _data::ChannelS3D8>) {
+                throw std::invalid_argument("indexLeading does not support quantized tensors");
             } else {
                 return T(d.data + offset);
             }
@@ -298,8 +315,9 @@ TensorV slice0(const TensorV& tensor, uint start, uint end) {
     auto data = std::visit(
         [offset](auto& d) -> TensorV::DataT {
             using T = std::decay_t<decltype(d)>;
-            if constexpr (std::is_same_v<T, _data::ChannelInt8>) {
-                throw std::invalid_argument("slice0 does not support ChannelInt8 tensors");
+            if constexpr (std::is_same_v<T, _data::ChannelInt8> ||
+                          std::is_same_v<T, _data::ChannelS3D8>) {
+                throw std::invalid_argument("slice0 does not support quantized tensors");
             } else {
                 return T(d.data + offset);
             }
@@ -507,6 +525,10 @@ Tensor embeddingLookup(const TensorV& weight, const std::vector<uint>& tokens) {
         auto weight_ = std::get<_data::ChannelInt8>(weight.data);
         ops::gather(weight_.data, weight_.scale, tokens.data(), uint(tokens.size()),
                     weight.shape[1], data<bf16>(out));
+    } else if (std::holds_alternative<_data::ChannelS3D8>(weight.data)) {
+        auto weight_ = std::get<_data::ChannelS3D8>(weight.data);
+        ops::gather(weight_.data, weight_.lut, weight_.scale, tokens.data(), uint(tokens.size()),
+                    weight.shape[1], data<bf16>(out));
     } else {
         ops::gather(data<bf16>(weight), tokens.data(), uint(tokens.size()), weight.shape[1],
                     data<bf16>(out));
@@ -526,6 +548,10 @@ Tensor projection(const TensorV& weight, const TensorV& x) {
         auto weight_ = std::get<_data::ChannelInt8>(weight.data);
         ops::matmulT(data<bf16>(x), weight_.data, weight_.scale, x.shape[0], x.shape[1],
                      weight.shape[0], data<bf16>(out));
+    } else if (std::holds_alternative<_data::ChannelS3D8>(weight.data)) {
+        auto weight_ = std::get<_data::ChannelS3D8>(weight.data);
+        ops::matmulT(data<bf16>(x), weight_.data, weight_.lut, weight_.scale, x.shape[0],
+                     x.shape[1], weight.shape[0], data<bf16>(out));
     } else {
         ops::matmulT(data<bf16>(x), data<bf16>(weight), x.shape[0], x.shape[1], weight.shape[0],
                      data<bf16>(out));

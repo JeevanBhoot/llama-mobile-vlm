@@ -15,6 +15,7 @@ struct TestCase {
     std::string op;
     json data;
     Buffer& payload;
+    mutable std::vector<Buffer> s3d8Luts;
 
     TensorV tensor(const std::string& name) const {
         auto info = data.at(name);
@@ -34,14 +35,33 @@ struct TestCase {
             };
         } else if (dtype == "int8") {
             auto scale = info.at("scale");
-            REQUIRE(scale.at("dtype").template get<std::string>() == "bfloat16");
-            auto scaleShape = scale.at("shape").template get<Shape>();
             auto scaleOffset = scale.at("offset").template get<squash::ulong>();
             REQUIRE(shape.size() == 2);
-            REQUIRE(scaleShape == Shape({shape[0]}));
+            REQUIRE(scale.at("dtype").template get<std::string>() == "bfloat16");
+            REQUIRE(scale.at("shape").template get<Shape>() == Shape({shape[0]}));
             return TensorV{
                 .data = _data::ChannelInt8(
                     reinterpret_cast<int8_t*>(payload.get() + offset),
+                    reinterpret_cast<squash::bf16*>(payload.get() + scaleOffset)),
+                .shape = std::move(shape),
+            };
+        } else if (dtype == "uint8") {
+            auto scale = info.at("scale");
+            auto table = info.at("table");
+            auto scaleOffset = scale.at("offset").template get<squash::ulong>();
+            auto tableOffset = table.at("offset").template get<squash::ulong>();
+            REQUIRE(shape.size() == 2);
+            REQUIRE(scale.at("dtype").template get<std::string>() == "bfloat16");
+            REQUIRE(scale.at("shape").template get<Shape>() == Shape({shape[0]}));
+            REQUIRE(table.at("dtype").template get<std::string>() == "int8");
+            REQUIRE(table.at("shape").template get<Shape>() == Shape({32, 3}));
+            s3d8Luts.emplace_back(3u * 64u * sizeof(int8_t));
+            auto lut = s3d8Luts.back().get<int8_t>();
+            _data::ChannelS3D8::expandLut(reinterpret_cast<int8_t*>(payload.get() + tableOffset),
+                                          lut);
+            return TensorV{
+                .data = _data::ChannelS3D8(
+                    reinterpret_cast<uint8_t*>(payload.get() + offset), lut,
                     reinterpret_cast<squash::bf16*>(payload.get() + scaleOffset)),
                 .shape = std::move(shape),
             };
@@ -50,23 +70,6 @@ struct TestCase {
             err << "Unsupported tensor dtype: " << dtype;
             throw std::runtime_error(err.str());
         }
-    }
-
-    TensorV tensor_channel_int8(const std::string& name) const {
-        auto info = data.at(name);
-        REQUIRE(info.at("type").template get<std::string>() == "tensor_channel_int8");
-        auto shape = info.at("shape").template get<Shape>();
-        auto scaleShape = info.at("scale_shape").template get<Shape>();
-        REQUIRE(shape.size() == 2);
-        REQUIRE(scaleShape == Shape({shape[0]}));
-        return TensorV{
-            .data = _data::ChannelInt8(
-                reinterpret_cast<int8_t*>(payload.get() +
-                                          info.at("offset").template get<squash::ulong>()),
-                reinterpret_cast<squash::bf16*>(
-                    payload.get() + info.at("scale_offset").template get<squash::ulong>())),
-            .shape = std::move(shape),
-        };
     }
 
     Tensor tensor_bf16(const std::string& name) const { return castBf16(tensor(name)); }
@@ -181,6 +184,6 @@ TEST_CASE("squash::tensor::generated") {
         auto op = test.at("op").template get<std::string>();
         auto name = test.at("name").template get<std::string>();
         INFO("test: " + op + "::" + name);
-        runTest(TestCase{op, test.at("data"), payload});
+        runTest(TestCase{op, test.at("data"), payload, {}});
     }
 }

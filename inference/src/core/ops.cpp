@@ -161,6 +161,41 @@ void gather(const int8_t* __restrict__ weight,
 
 namespace {
 
+int8_t _decode_s3d8(const uint8_t pack, const int8_t* __restrict__ lut, const uint vIdx) {
+    switch (vIdx) {
+        case 0:
+            return lut[0 * 64u + (pack & 0x3Fu)];
+        case 1:
+            return lut[1 * 64u + ((pack >> 1) & 0x3Fu)];
+        case 2:
+            return lut[2 * 64u + ((pack & 0x3Fu) ^ (pack >> 7))];
+        default:
+            return 0;
+    }
+}
+
+}  // namespace
+
+void gather(const uint8_t* __restrict__ weight,
+            const int8_t* __restrict__ weightLut,
+            const bf16* __restrict__ weightScale,
+            const uint* __restrict__ indices,
+            const uint nIndices,
+            const uint dim,
+            bf16* __restrict__ out) {
+#pragma omp parallel for
+    for (auto n = 0u; n < nIndices; ++n) {
+        const auto row = indices[n];
+        auto rowScale = float(weightScale[row]);
+        for (auto k = 0u; k < dim; ++k) {
+            auto v = _decode_s3d8(weight[(row / 3) * dim + k], weightLut, row % 3);
+            out[n * dim + k] = bf16(float(v) * rowScale);
+        }
+    }
+}
+
+namespace {
+
 #ifdef __ARM_NEON
 
 float _dot_product_bf16(const bf16* __restrict__ a, const bf16* __restrict__ b, const uint dK) {
@@ -334,6 +369,18 @@ float _dot_product_bf16_int8(const bf16* __restrict__ a,
     return result;
 }
 
+float _dot_product_bf16_s3d8(const bf16* __restrict__ a,
+                             const uint8_t* __restrict__ b,
+                             const int8_t* __restrict__ bLut,
+                             const uint n,
+                             const uint dK) {
+    float result = 0;
+    for (auto k = 0u; k < dK; ++k) {
+        result += float(a[k]) * float(_decode_s3d8(b[k], bLut, n % 3));
+    }
+    return result;
+}
+
 }  // namespace
 
 void matmulT(const bf16* __restrict__ lhs,
@@ -357,6 +404,24 @@ void matmulT(const bf16* __restrict__ lhs,
         auto scale = float(rhsScale[n]);
         for (auto m = 0u; m < dM; ++m) {
             auto dot = _dot_product_bf16_int8(&lhs[m * dK], &rhs[n * dK], dK);
+            out[m * dN + n] = bf16(dot * scale);
+        }
+    }
+}
+
+void matmulT(const bf16* __restrict__ lhs,
+             const uint8_t* __restrict__ rhs,
+             const int8_t* __restrict__ rhsLut,
+             const bf16* __restrict__ rhsScale,
+             const uint dM,
+             const uint dK,
+             const uint dN,
+             bf16* __restrict__ out) {
+#pragma omp parallel for
+    for (auto n = 0u; n < dN; ++n) {
+        const auto scale = float(rhsScale[n]);
+        for (auto m = 0u; m < dM; ++m) {
+            auto dot = _dot_product_bf16_s3d8(&lhs[m * dK], &rhs[(n / 3) * dK], rhsLut, n, dK);
             out[m * dN + n] = bf16(dot * scale);
         }
     }
