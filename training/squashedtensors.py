@@ -127,7 +127,7 @@ def to_tensor_data(t: Tensor | T.Weight) -> TensorData:
             .permute(0, 2, 1)
             .flatten(end_dim=1)
         )
-        idx = nearest_neighbour(tensor, t.centroids)
+        idx = nearest_neighbour(tensor.abs(), t.centroids)
         sign = tensor.lt(0)
         tensor_data = (
             (idx << 1)
