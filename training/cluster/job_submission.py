@@ -4,7 +4,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 import regex as re
 
@@ -43,6 +43,7 @@ class Submission:
     job: Job
     commit: str = field(default_factory=_default_commit)
     gpu_clique: str | None = None
+    priority: Literal["", "low-priority", "high-priority"] = ""
     n_gpus: int = 4
     n_cpus_per_gpu: int = 20
     mem_per_cpu: int = 8
@@ -69,6 +70,7 @@ def _generate_yaml(sub: Submission) -> Path:
     replacements = dict(
         __TEMPLATE_USER__=sub.user,
         __TEMPLATE_PROJECT__=sub.project,
+        __TEMPLATE_PRIORITY_CLASS__=sub.priority,
         __TEMPLATE_ENV__=[dict(name=k, value=v) for k, v in sub.env.items()]
         + [
             dict(name="GIT_COMMIT", value=sub.commit),

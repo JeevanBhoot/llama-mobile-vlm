@@ -6,6 +6,7 @@ metadata:
   generateName: __TEMPLATE_USER__-__TEMPLATE_PROJECT__-
   labels:
     kueue.x-k8s.io/queue-name: unified
+    kueue.x-k8s.io/priority-class: __TEMPLATE_PRIORITY_CLASS__
     user: __TEMPLATE_USER__
     email: __TEMPLATE_USER___at_graphcore.ai
     project: __TEMPLATE_PROJECT__
