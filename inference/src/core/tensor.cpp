@@ -13,6 +13,31 @@ uint prod(const Shape& x) {
     return std::accumulate(x.begin(), x.end(), 1u, std::multiplies<uint>());
 }
 
+ulong align(ulong offset, ulong alignment) {
+    return alignment * ((offset + alignment - 1) / alignment);
+}
+
+ulong countBytes(const TensorV& tensor) {
+    return std::visit(
+        [&tensor](const auto& data) -> ulong {
+            using T = std::decay_t<decltype(data)>;
+            if constexpr (std::is_same_v<T, _data::Flat<float>>) {
+                return sizeof(float) * ulong(prod(tensor.shape));
+            } else if constexpr (std::is_same_v<T, _data::Flat<bf16>>) {
+                return sizeof(bf16) * ulong(prod(tensor.shape));
+            } else if constexpr (std::is_same_v<T, _data::ChannelInt8>) {
+                return sizeof(int8_t) * ulong(prod(tensor.shape)) +
+                       sizeof(bf16) * ulong(tensor.shape[0]);
+            } else if constexpr (std::is_same_v<T, _data::ChannelS3D8>) {
+                return sizeof(uint8_t) * ulong((tensor.shape[0] + 2) / 3) * ulong(tensor.shape[1]) +
+                       3u * 64u * sizeof(int8_t) + sizeof(bf16) * ulong(tensor.shape[0]);
+            } else {
+                return 0u;
+            }
+        },
+        tensor.data);
+}
+
 std::ostream& operator<<(std::ostream& out, const Shape& shape) {
     out << "(";
     for (size_t i = 0; i < shape.size(); i++) {
@@ -31,8 +56,7 @@ std::ostream& operator<<(std::ostream& out, const Shape& shape) {
 
 // Note: round up allocated size to a multiple of `alignment`, required on Android
 Buffer::Buffer(ulong size, ulong alignment)
-    : _data(reinterpret_cast<char*>(
-          std::aligned_alloc(alignment, (size + alignment - 1) / alignment * alignment))) {
+    : _data(reinterpret_cast<char*>(std::aligned_alloc(alignment, align(size, alignment)))) {
     if (!_data) {
         std::ostringstream err;
         err << "Buffer allocation failed, size: " << size << ", alignment: " << alignment;

@@ -55,10 +55,6 @@ constexpr auto BufferChunkSize = 4096u;
 
 using json = nlohmann::json;
 
-ulong align(ulong index, ulong alignment) {
-    return alignment * ((index + alignment - 1) / alignment);
-}
-
 ulong maxTensorEndOffset(const json& entry, ulong alignment) {
     auto maxEnd = ulong(0);
     for (const auto& p : entry.items()) {
@@ -67,7 +63,7 @@ ulong maxTensorEndOffset(const json& entry, ulong alignment) {
                               tensor.contains("table") ? &tensor.at("table") : nullptr}) {
             if (t && t->contains("data_offsets")) {
                 auto end = (*t).at("data_offsets")[1].template get<ulong>();
-                maxEnd = std::max(maxEnd, align(end, alignment));
+                maxEnd = std::max(maxEnd, tensor::align(end, alignment));
             }
         }
     }
@@ -78,7 +74,7 @@ ulong s3d8LutStorageSize(const json& entry, ulong alignment) {
     ulong total = 0;
     for (const auto& p : entry.items()) {
         if (p.value().at("dtype").template get<std::string>() == "S3D8") {
-            total += align(3 * 64 * sizeof(int8_t), alignment);
+            total += tensor::align(3 * 64 * sizeof(int8_t), alignment);
         }
     }
     return total;
@@ -157,7 +153,7 @@ struct TensorLoader {
         tensor::_data::ChannelS3D8::expandLut(
             reinterpret_cast<int8_t*>(params.buffer.get() + offset), lut);
         params.s3d8Luts.emplace(fullName, lut);
-        params.nextS3D8LutOffset += align(3 * 64 * sizeof(int8_t), params.alignment);
+        params.nextS3D8LutOffset += tensor::align(3 * 64 * sizeof(int8_t), params.alignment);
         return lut;
     }
 

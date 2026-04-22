@@ -64,9 +64,77 @@ REGISTER_BENCHMARK(_tensor_copy)(const benchmarking::Report& report) {
     benchmark.dump(report, {{"nelement", nelement}});
 }
 
-REGISTER_BENCHMARK(_tensor_proj)(const benchmarking::Report& report) {
+// ### _tensor_proj benchmarks
+
+namespace {
+tensor::Tensor randnBf16Tensor(uint dOut, uint dIn, ulong seed) {
+    return tensor::randn({dOut, dIn}, 1.0f, seed);
+}
+
+tensor::Tensor randnChannelInt8Tensor(uint dOut, uint dIn, ulong seed) {
+    const auto scaleOffset = tensor::align(ulong(dOut) * ulong(dIn) * sizeof(int8_t));
+    auto buffer = tensor::Buffer(scaleOffset + sizeof(bf16) * ulong(dOut));
+
+    std::mt19937_64 rng(seed);
+    std::uniform_int_distribution<int8_t> valueDist(-128, 127);
+    std::uniform_real_distribution<float> uniformDist(0.0f, 1.0f);
+    auto* data = reinterpret_cast<int8_t*>(buffer.get<char>());
+    auto* scale = reinterpret_cast<bf16*>(buffer.get<char>() + scaleOffset);
+#pragma omp parallel for
+    for (auto n = 0u; n < dOut; ++n) {
+        scale[n] = bf16(0.02f + 0.3f * uniformDist(rng));
+        for (auto k = 0u; k < dIn; ++k) {
+            data[n * dIn + k] = valueDist(rng);
+        }
+    }
+    return tensor::Tensor{{.data = tensor::_data::ChannelInt8(data, scale), .shape = {dOut, dIn}},
+                          std::move(buffer)};
+}
+
+tensor::Tensor randnChannelS3D8Tensor(uint dOut, uint dIn, ulong seed) {
+    const auto packedRows = (dOut + 2) / 3;
+    const auto lutOffset = tensor::align(ulong(packedRows) * ulong(dIn) * sizeof(uint8_t));
+    const auto scaleOffset = tensor::align(lutOffset + 3u * 64u * sizeof(int8_t));
+
+    auto buffer = tensor::Buffer(scaleOffset + sizeof(bf16) * ulong(dOut));
+    auto* data = reinterpret_cast<uint8_t*>(buffer.get<char>());
+    auto* lut = reinterpret_cast<int8_t*>(buffer.get<char>() + lutOffset);
+    auto* scale = reinterpret_cast<bf16*>(buffer.get<char>() + scaleOffset);
+
+    std::mt19937_64 rng(seed);
+    std::uniform_int_distribution<int8_t> centroidDist(-128, 127);
+    std::uniform_int_distribution<int> indexDist(0, 31);
+    std::uniform_int_distribution<int8_t> signDist(0, 1);
+    std::uniform_real_distribution<float> uniformDist(0.0f, 1.0f);
+    std::vector<int8_t> centroids(32u * 3u);
+    for (auto& centroid : centroids) {
+        centroid = centroidDist(rng);
+    }
+    tensor::_data::ChannelS3D8::expandLut(centroids.data(), lut);
+#pragma omp parallel for
+    for (auto row = 0u; row < packedRows; ++row) {
+        for (auto k = 0u; k < dIn; ++k) {
+            auto idx = indexDist(rng);
+            auto sign0 = signDist(rng), sign1 = signDist(rng), sign2 = signDist(rng);
+            data[row * dIn + k] =
+                static_cast<uint8_t>((idx << 1) | sign0 | (sign1 << 6) | ((sign0 ^ sign2) << 7));
+        }
+    }
+#pragma omp parallel for
+    for (auto n = 0u; n < dOut; ++n) {
+        scale[n] = bf16(0.02f + 0.3f * uniformDist(rng));
+    }
+    return tensor::Tensor{
+        {.data = tensor::_data::ChannelS3D8(data, lut, scale), .shape = {dOut, dIn}},
+        std::move(buffer)};
+}
+
+template <class MakeWeight>
+void runProjectionBenchmark(const benchmarking::Report& report,
+                            MakeWeight&& makeWeight,
+                            ulong weightSeed) {
     selectOmpNumThreads();
-    std::vector<std::tuple<uint, uint, uint, std::string>> cases = {
+    const std::vector<std::tuple<uint, uint, uint, const char*>> cases = {
         // Sizes for 11B (batchSize, dIn, dOut) == (dM, dK, dN)
         {1, 4096, 14336, "text.generate.mlp.up"},     //
         {1, 14336, 4096, "text.generate.mlp.down"},   //
@@ -83,13 +151,13 @@ REGISTER_BENCHMARK(_tensor_proj)(const benchmarking::Report& report) {
         {1601, 5120, 1280, "vision.mlp.down"},        //
         {1601, 1280, 1280, "vision.attn.[q,k,v,o]"},  //
     };
-    for (auto [batchSize, dIn, dOut, name] : cases) {
-        auto weight = tensor::randn({dOut, dIn}, 1.0f, 0x23f3ac651617c540);
+    for (const auto& [batchSize, dIn, dOut, name] : cases) {
+        auto weight = makeWeight(dOut, dIn, weightSeed);
         auto x = tensor::randn({batchSize, dIn}, 0.02f, 0x6f5d77f384975947);
 
         ComputeAndTransferBenchmark benchmark{
-            .macCount = ulong(batchSize) * ulong(dIn * dOut),
-            .byteCount = sizeof(bf16) * (batchSize * dIn + batchSize * dOut + dOut * dIn),
+            .macCount = ulong(batchSize) * ulong(dIn) * ulong(dOut),
+            .byteCount = sizeof(bf16) * ulong(batchSize) * ulong(dIn + dOut) + countBytes(weight),
         };
         auto reps = std::clamp(uint(1e11 / double(benchmark.macCount)), 20u, 200u);
 
@@ -100,6 +168,19 @@ REGISTER_BENCHMARK(_tensor_proj)(const benchmarking::Report& report) {
         benchmark.dump(report[name], {{"batch_size", batchSize}, {"d_in", dIn}, {"d_out", dOut}});
     }
 }
+}  // namespace
+
+REGISTER_BENCHMARK(_tensor_proj_bf16)(const benchmarking::Report& report) {
+    runProjectionBenchmark(report, randnBf16Tensor, 0x23f3ac651617c540);
+}
+REGISTER_BENCHMARK(_tensor_proj_int8)(const benchmarking::Report& report) {
+    runProjectionBenchmark(report, randnChannelInt8Tensor, 0xeb4852bba3aeb1d0);
+}
+REGISTER_BENCHMARK(_tensor_proj_s3d8)(const benchmarking::Report& report) {
+    runProjectionBenchmark(report, randnChannelS3D8Tensor, 0x24bec62971dd9ca1);
+}
+
+// ### other benchmarks
 
 REGISTER_BENCHMARK(_tensor_attention)(const benchmarking::Report& report) {
     selectOmpNumThreads();

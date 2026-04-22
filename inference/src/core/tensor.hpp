@@ -66,6 +66,8 @@ struct Tensor : TensorV {
 };
 
 uint prod(const Shape&);
+ulong align(ulong offset, ulong alignment = DefaultAlignment);
+ulong countBytes(const TensorV& tensor);
 std::ostream& operator<<(std::ostream&, const Shape&);
 std::ostream& operator<<(std::ostream&, const TensorV&);
 void saveNpy(std::ostream&, const TensorV&);
