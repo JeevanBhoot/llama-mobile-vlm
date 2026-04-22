@@ -43,7 +43,7 @@ class Submission:
     job: Job
     commit: str = field(default_factory=_default_commit)
     gpu_clique: str | None = None
-    priority: Literal["", "low-priority", "high-priority"] = ""
+    priority: Literal["", "low", "high"] = ""
     n_gpus: int = 4
     n_cpus_per_gpu: int = 20
     mem_per_cpu: int = 8
