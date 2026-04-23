@@ -8,7 +8,7 @@
 #include <numbers>
 #include <tuple>
 
-#if defined(__ARM_NEON) && defined(__ARM_FEATURE_BF16_VECTOR_ARITHMETIC)
+#if defined(__ARM_NEON)
 #include <arm_neon.h>
 #endif  // __ARM_NEON
 
@@ -196,7 +196,7 @@ void gather(const uint8_t* __restrict__ weight,
 
 namespace {
 
-#ifdef __ARM_NEON
+#if defined(__ARM_NEON) && defined(__ARM_FEATURE_BF16_VECTOR_ARITHMETIC)
 
 float _dot_product_bf16(const bf16* __restrict__ a, const bf16* __restrict__ b, const uint dK) {
     float32x4_t acc = vmovq_n_f32(0.0f);
