@@ -420,6 +420,28 @@ Tensor castBf16(const TensorV& tensor) {
     return out;
 }
 
+Tensor castChannelInt8(const TensorV& tensor) {
+    if (tensor.shape.size() != 2) {
+        std::ostringstream err;
+        err << "castChannelInt8: expected 2D tensor, tensor.shape: " << tensor.shape;
+        throw std::invalid_argument(err.str());
+    }
+    if (std::holds_alternative<_data::Flat<float>>(tensor.data)) {
+        return castChannelInt8(castBf16(tensor));
+    }
+    if (!std::holds_alternative<_data::Flat<bf16>>(tensor.data)) {
+        throw std::invalid_argument("castChannelInt8 requires float or bf16 tensor data");
+    }
+
+    auto scaleOffset = align(ulong(prod(tensor.shape)) * sizeof(int8_t));
+    auto buffer = Buffer(scaleOffset + ulong(tensor.shape[0]) * sizeof(bf16));
+    auto* outData = reinterpret_cast<int8_t*>(buffer.get<char>());
+    auto* outScale = reinterpret_cast<bf16*>(buffer.get<char>() + scaleOffset);
+    ops::castChannelInt8(data<bf16>(tensor), tensor.shape[0], tensor.shape[1], outData, outScale);
+    return Tensor{{.data = _data::ChannelInt8(outData, outScale), .shape = tensor.shape},
+                  std::move(buffer)};
+}
+
 Tensor concat(const std::vector<TensorV>& tensors, uint dim) {
     // Compute summary dimensions
     auto dConcat = 0u;
@@ -560,21 +582,23 @@ Tensor embeddingLookup(const TensorV& weight, const std::vector<uint>& tokens) {
     return out;
 }
 
-Tensor projection(const TensorV& weight, const TensorV& x) {
+Tensor matmulT(const TensorV& x, const TensorV& weight) {
     if (weight.shape.size() != 2 || x.shape.size() != 2 || weight.shape[1] != x.shape[1]) {
         std::ostringstream err;
-        err << "projection: bad shapes " << weight.shape << " and " << x.shape
+        err << "matmulT: bad shapes " << weight.shape << " and " << x.shape
             << ", expected (dOut, dIn) and (batch, dIn)";
         throw std::invalid_argument(err.str());
     }
     auto out = empty<bf16>({x.shape[0], weight.shape[0]});
     if (std::holds_alternative<_data::ChannelInt8>(weight.data)) {
+        auto x_ = std::get<_data::ChannelInt8>(x.data);
         auto weight_ = std::get<_data::ChannelInt8>(weight.data);
-        ops::matmulT(data<bf16>(x), weight_.data, weight_.scale, x.shape[0], x.shape[1],
+        ops::matmulT(x_.data, x_.scale, weight_.data, weight_.scale, x.shape[0], x.shape[1],
                      weight.shape[0], data<bf16>(out));
     } else if (std::holds_alternative<_data::ChannelS3D8>(weight.data)) {
+        auto x_ = std::get<_data::ChannelInt8>(x.data);
         auto weight_ = std::get<_data::ChannelS3D8>(weight.data);
-        ops::matmulT(data<bf16>(x), weight_.data, weight_.lut, weight_.scale, x.shape[0],
+        ops::matmulT(x_.data, x_.scale, weight_.data, weight_.lut, weight_.scale, x.shape[0],
                      x.shape[1], weight.shape[0], data<bf16>(out));
     } else {
         ops::matmulT(data<bf16>(x), data<bf16>(weight), x.shape[0], x.shape[1], weight.shape[0],

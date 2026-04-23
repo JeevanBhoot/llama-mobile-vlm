@@ -10,6 +10,7 @@ namespace squash::ops {
 void copy(const float* src, uint n, float* dest);
 void castFloat(const bf16* in, float* out, uint n);
 void castBf16(const float* in, bf16* out, uint n);
+void castChannelInt8(const bf16* in, uint dN, uint dK, int8_t* out_data, bf16* out_scale);
 
 // Data movement
 
@@ -52,16 +53,18 @@ void gather(const uint8_t* weight,
 
 // lhs {dM, dK}, rhs {dN, dK}, out {dM, dN}
 void matmulT(const bf16* lhs, const bf16* rhs, uint dM, uint dK, uint dN, bf16* out);
-// lhs {dM, dK}, rhs {dN, dK}, rhsScale {dN}, out {dM, dN}
-void matmulT(const bf16* lhs,
+// lhs {dM, dK}, lhsScale {dM}, rhs {dN, dK}, rhsScale {dN}, out {dM, dN}
+void matmulT(const int8_t* lhs,
+             const bf16* lhsScale,
              const int8_t* rhs,
              const bf16* rhsScale,
              uint dM,
              uint dK,
              uint dN,
              bf16* out);
-// lhs {dM, dK}, rhs {dN/3, dK}, rhsLut {3, 64}, rhsScale {dN}, out {dM, dN}
-void matmulT(const bf16* lhs,
+// lhs {dM, dK}, lhsScale {dM}, rhs {dN/3, dK}, rhsLut {3, 64}, rhsScale {dN}, out {dM, dN}
+void matmulT(const int8_t* lhs,
+             const bf16* lhsScale,
              const uint8_t* rhs,
              const int8_t* rhsLut,
              const bf16* rhsScale,

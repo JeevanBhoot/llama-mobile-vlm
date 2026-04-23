@@ -129,12 +129,13 @@ tensor::Tensor randnChannelS3D8Tensor(uint dOut, uint dIn, ulong seed) {
         std::move(buffer)};
 }
 
-template <class MakeWeight>
-void runProjectionBenchmark(const benchmarking::Report& report,
-                            MakeWeight&& makeWeight,
-                            ulong weightSeed) {
+template <class MakeInput, class MakeWeight>
+void benchmarkMatmulT(const benchmarking::Report& report,
+                      MakeInput&& makeInput,
+                      MakeWeight&& makeWeight,
+                      ulong seed) {
     selectOmpNumThreads();
-    const std::vector<std::tuple<uint, uint, uint, const char*>> cases = {
+    std::vector<std::tuple<uint, uint, uint, std::string>> cases = {
         // Sizes for 11B (batchSize, dIn, dOut) == (dM, dK, dN)
         {1, 4096, 14336, "text.generate.mlp.up"},     //
         {1, 14336, 4096, "text.generate.mlp.down"},   //
@@ -152,32 +153,34 @@ void runProjectionBenchmark(const benchmarking::Report& report,
         {1601, 1280, 1280, "vision.attn.[q,k,v,o]"},  //
     };
     for (const auto& [batchSize, dIn, dOut, name] : cases) {
-        auto weight = makeWeight(dOut, dIn, weightSeed);
-        auto x = tensor::randn({batchSize, dIn}, 0.02f, 0x6f5d77f384975947);
+        auto caseSeed = seed ^ std::hash<std::string>{}(name);
+        auto weight = makeWeight(dOut, dIn, caseSeed ^ 0x7a9dc59745b7b3db);
+        auto x = makeInput(batchSize, dIn, caseSeed ^ 0xe3e1ecf114d26aa1);
 
         ComputeAndTransferBenchmark benchmark{
             .macCount = ulong(batchSize) * ulong(dIn) * ulong(dOut),
-            .byteCount = sizeof(bf16) * ulong(batchSize) * ulong(dIn + dOut) + countBytes(weight),
+            .byteCount =
+                countBytes(x) + countBytes(weight) + sizeof(bf16) * ulong(batchSize) * ulong(dOut),
         };
         auto reps = std::clamp(uint(1e11 / double(benchmark.macCount)), 20u, 200u);
 
         for (auto rep = 0u; rep < reps; ++rep) {
             auto timer = benchmark.record();
-            tensor::projection(weight, x);
+            tensor::matmulT(x, weight);
         }
         benchmark.dump(report[name], {{"batch_size", batchSize}, {"d_in", dIn}, {"d_out", dOut}});
     }
 }
 }  // namespace
 
-REGISTER_BENCHMARK(_tensor_proj_bf16)(const benchmarking::Report& report) {
-    runProjectionBenchmark(report, randnBf16Tensor, 0x23f3ac651617c540);
+REGISTER_BENCHMARK(_tensor_matmulT_bf16)(const benchmarking::Report& report) {
+    benchmarkMatmulT(report, randnBf16Tensor, randnBf16Tensor, 0x23f3ac651617c540);
 }
-REGISTER_BENCHMARK(_tensor_proj_int8)(const benchmarking::Report& report) {
-    runProjectionBenchmark(report, randnChannelInt8Tensor, 0xeb4852bba3aeb1d0);
+REGISTER_BENCHMARK(_tensor_matmulT_int8)(const benchmarking::Report& report) {
+    benchmarkMatmulT(report, randnChannelInt8Tensor, randnChannelInt8Tensor, 0xeb4852bba3aeb1d0);
 }
-REGISTER_BENCHMARK(_tensor_proj_s3d8)(const benchmarking::Report& report) {
-    runProjectionBenchmark(report, randnChannelS3D8Tensor, 0x24bec62971dd9ca1);
+REGISTER_BENCHMARK(_tensor_matmulT_s3d8)(const benchmarking::Report& report) {
+    benchmarkMatmulT(report, randnChannelInt8Tensor, randnChannelS3D8Tensor, 0x24bec62971dd9ca1);
 }
 
 // ### other benchmarks
@@ -234,10 +237,10 @@ REGISTER_BENCHMARK(tensor_mlp)(const benchmarking::Report& report) {
     for (auto rep = 0u; rep < 100u; ++rep) {
         auto timer = benchmark.record();
 
-        auto up = tensor::projection(wUp, inputs);
-        auto gate = tensor::projection(wGate, inputs);
+        auto up = tensor::matmulT(inputs, wUp);
+        auto gate = tensor::matmulT(inputs, wGate);
         up = tensor::swiGlu(std::move(up), gate);
-        auto outputs = tensor::projection(wDown, up);
+        auto outputs = tensor::matmulT(up, wDown);
     }
     benchmark.dump(report, {{"batch_size", batchSize}, {"d_model", dModel}, {"d_ffn", dFFN}});
 }

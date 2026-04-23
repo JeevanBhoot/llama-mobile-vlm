@@ -24,14 +24,33 @@ void copy(const float* src, uint n, float* dest) {
 }
 
 void castFloat(const bf16* in, float* out, uint n) {
-    for (uint i = 0; i < n; ++i) {
+#pragma omp parallel for
+    for (auto i = 0u; i < n; ++i) {
         out[i] = float(in[i]);
     }
 }
 
 void castBf16(const float* in, bf16* out, uint n) {
-    for (uint i = 0; i < n; ++i) {
+#pragma omp parallel for
+    for (auto i = 0u; i < n; ++i) {
         out[i] = bf16(in[i]);
+    }
+}
+
+void castChannelInt8(const bf16* in, uint dN, uint dK, int8_t* out_data, bf16* out_scale) {
+#pragma omp parallel for
+    for (auto n = 0u; n < dN; ++n) {
+        auto amax = 0.0f;
+        for (auto k = 0u; k < dK; ++k) {
+            amax = std::max(amax, std::abs(float(in[n * dK + k])));
+        }
+        amax = (amax == 0) ? 1.0f : amax;
+
+        auto scale = out_scale[n] = bf16(amax / 127.0f);
+        for (auto k = 0u; k < dK; ++k) {
+            auto q = std::nearbyint(float(in[n * dK + k]) / float(scale));
+            out_data[n * dK + k] = static_cast<int8_t>(std::clamp(q, -127.0f, 127.0f));
+        }
     }
 }
 
@@ -358,25 +377,25 @@ void _matmulT(const bf16* __restrict__ lhs,
 
 #endif  // __ARM_NEON && __ARM_FEATURE_BF16_VECTOR_ARITHMETIC
 
-float _dot_product_bf16_int8(const bf16* __restrict__ a,
-                             const int8_t* __restrict__ b,
-                             const uint n) {
-    float result = 0;
+int32_t _dot_product_int8(const int8_t* __restrict__ a,
+                          const int8_t* __restrict__ b,
+                          const uint n) {
+    int32_t result = 0;
 #pragma omp simd reduction(+ : result)
     for (auto i = 0u; i < n; ++i) {
-        result += float(a[i]) * float(b[i]);
+        result += int32_t(a[i]) * int32_t(b[i]);
     }
     return result;
 }
 
-float _dot_product_bf16_s3d8(const bf16* __restrict__ a,
-                             const uint8_t* __restrict__ b,
-                             const int8_t* __restrict__ bLut,
-                             const uint n,
-                             const uint dK) {
-    float result = 0;
+int32_t _dot_product_int8_s3d8(const int8_t* __restrict__ a,
+                               const uint8_t* __restrict__ b,
+                               const int8_t* __restrict__ bLut,
+                               const uint n,
+                               const uint dK) {
+    int32_t result = 0;
     for (auto k = 0u; k < dK; ++k) {
-        result += float(a[k]) * float(_decode_s3d8(b[k], bLut, n % 3));
+        result += int32_t(a[k]) * int32_t(_decode_s3d8(b[k], bLut, n % 3));
     }
     return result;
 }
@@ -392,7 +411,8 @@ void matmulT(const bf16* __restrict__ lhs,
     _matmulT(lhs, rhs, dM, dK, dN, out);
 }
 
-void matmulT(const bf16* __restrict__ lhs,
+void matmulT(const int8_t* __restrict__ lhs,
+             const bf16* __restrict__ lhsScale,
              const int8_t* __restrict__ rhs,
              const bf16* __restrict__ rhsScale,
              const uint dM,
@@ -401,15 +421,16 @@ void matmulT(const bf16* __restrict__ lhs,
              bf16* __restrict__ out) {
 #pragma omp parallel for
     for (auto n = 0u; n < dN; ++n) {
-        auto scale = float(rhsScale[n]);
+        auto nScale = float(rhsScale[n]);
         for (auto m = 0u; m < dM; ++m) {
-            auto dot = _dot_product_bf16_int8(&lhs[m * dK], &rhs[n * dK], dK);
-            out[m * dN + n] = bf16(dot * scale);
+            auto dot = _dot_product_int8(&lhs[m * dK], &rhs[n * dK], dK);
+            out[m * dN + n] = bf16(float(dot) * float(lhsScale[m]) * nScale);
         }
     }
 }
 
-void matmulT(const bf16* __restrict__ lhs,
+void matmulT(const int8_t* __restrict__ lhs,
+             const bf16* __restrict__ lhsScale,
              const uint8_t* __restrict__ rhs,
              const int8_t* __restrict__ rhsLut,
              const bf16* __restrict__ rhsScale,
@@ -419,10 +440,10 @@ void matmulT(const bf16* __restrict__ lhs,
              bf16* __restrict__ out) {
 #pragma omp parallel for
     for (auto n = 0u; n < dN; ++n) {
-        const auto scale = float(rhsScale[n]);
+        const auto nScale = float(rhsScale[n]);
         for (auto m = 0u; m < dM; ++m) {
-            auto dot = _dot_product_bf16_s3d8(&lhs[m * dK], &rhs[(n / 3) * dK], rhsLut, n, dK);
-            out[m * dN + n] = bf16(dot * scale);
+            auto dot = _dot_product_int8_s3d8(&lhs[m * dK], &rhs[(n / 3) * dK], rhsLut, n, dK);
+            out[m * dN + n] = bf16(float(dot) * float(lhsScale[m]) * nScale);
         }
     }
 }

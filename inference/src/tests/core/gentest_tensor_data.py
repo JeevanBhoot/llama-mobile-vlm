@@ -22,6 +22,23 @@ class ChannelInt8Data:
         assert self.data.ndim == 2
         assert self.scale.shape == (self.data.shape[0],)
 
+    def to_bf16(self) -> Tensor:
+        return self.data.bfloat16() * self.scale[:, None]
+
+    @staticmethod
+    def quantise(x: Tensor) -> "ChannelInt8Data":
+        amax = x.abs().amax(dim=1)
+        amax = torch.where(amax == 0, torch.ones_like(amax), amax)
+        scale = amax.div(127.0).to(torch.bfloat16)
+        data = (
+            x.float()
+            .div(scale[:, None].float())
+            .round()
+            .clamp(-127, 127)
+            .to(torch.int8)
+        )
+        return ChannelInt8Data(data.contiguous(), scale.contiguous())
+
 
 @dataclass
 class ChannelS3D8Data:
@@ -276,44 +293,44 @@ class Tests:
         )
 
     @staticmethod
-    def projection(tests: TestFile) -> None:
+    def matmulT(tests: TestFile) -> None:
         torch.manual_seed(0x19DFB9E938DCE261)
         weight = torch.randn(128, 256).bfloat16() / (256**0.5)
         x = torch.randn(64, 256).bfloat16()
         output = x @ weight.T
-        tests.add("projection", "regular", weight=weight, x=x, output=output)
+        tests.add("matmulT", "regular", weight=weight, x=x, output=output)
 
         torch.manual_seed(0x73DAB3442659F0EE)
         weight = torch.randn(64, 143).bfloat16() / (143**0.5)
         x = torch.randn(32, 143).bfloat16()
         output = x @ weight.T
-        tests.add("projection", "odd-k", weight=weight, x=x, output=output)
+        tests.add("matmulT", "odd-k", weight=weight, x=x, output=output)
 
         torch.manual_seed(0x73DAB3442659F0EE)
         weight = torch.randn(79, 64).bfloat16() / (64**0.5)
         x = torch.randn(47, 64).bfloat16()
         output = x @ weight.T
-        tests.add("projection", "odd-mn", weight=weight, x=x, output=output)
+        tests.add("matmulT", "odd-mn", weight=weight, x=x, output=output)
 
         torch.manual_seed(0x5BA87BB13DF4F97)
         weight = torch.randn(3, 5).bfloat16() / (5**0.5)
         x = torch.randn(7, 5).bfloat16()
         output = x @ weight.T
-        tests.add("projection", "small", weight=weight, x=x, output=output)
+        tests.add("matmulT", "small", weight=weight, x=x, output=output)
 
         torch.manual_seed(0x796C93DFEDE7751A)
         weight = torch.randn(137, 79).bfloat16() / (79**0.5)
         x = torch.randn(37, 79).bfloat16()
         output = x @ weight.T
-        tests.add("projection", "prime", weight=weight, x=x, output=output)
+        tests.add("matmulT", "prime", weight=weight, x=x, output=output)
 
         torch.manual_seed(0x54CD9CD9B9E8CD2E)
         weight_i8 = torch.randint(-9, 9, (53, 41), dtype=torch.int8)
         scale = (0.02 + 0.3 * torch.rand(53)).bfloat16()
-        x = torch.randn(17, 41).bfloat16()
-        output = x @ (weight_i8.bfloat16() * scale[:, None]).T
+        x = ChannelInt8Data.quantise(torch.randn(17, 41))
+        output = x.to_bf16() @ (weight_i8.bfloat16() * scale[:, None]).T
         tests.add(
-            "projection",
+            "matmulT",
             "channel_int8",
             weight=ChannelInt8Data(weight_i8, scale),
             x=x,
@@ -323,12 +340,12 @@ class Tests:
         torch.manual_seed(0xF8E639A52E2C81D4)
         centroids = torch.randint(-128, 128, (32, 3), dtype=torch.int8)
         scale = (0.02 + 0.3 * torch.rand(53)).to(torch.bfloat16)
-        x = torch.randn(17, 41).to(torch.bfloat16)
+        x = ChannelInt8Data.quantise(torch.randn(17, 41))
         idx = torch.randint(0, 32, ((53 + 2) // 3, 41), dtype=torch.uint8)
         sign_bits = torch.randint(0, 2, (*idx.shape, 3), dtype=torch.bool)
-        output = x @ _s3d8_value(idx, sign_bits, centroids, scale).T
+        output = x.to_bf16() @ _s3d8_value(idx, sign_bits, centroids, scale).T
         tests.add(
-            "projection",
+            "matmulT",
             "channel_s3d8",
             weight=ChannelS3D8Data.pack((53, 41), idx, sign_bits, centroids, scale),
             x=x,

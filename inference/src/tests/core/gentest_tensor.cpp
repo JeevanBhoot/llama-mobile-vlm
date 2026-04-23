@@ -136,8 +136,8 @@ void runTest(const TestCase& test) {
         auto output = embeddingLookup(test.tensor("weight"), test.list<uint>("tokens"));
         REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), DefaultTol);
 
-    } else if (test.op == "projection") {
-        auto output = projection(test.tensor("weight"), test.tensor("x"));
+    } else if (test.op == "matmulT") {
+        auto output = matmulT(test.tensor("x"), test.tensor("weight"));
         REQUIRE_TENSOR_APPROX_EQUALS(output, test.tensor("output"), DefaultTol);
 
     } else if (test.op == "rotate") {

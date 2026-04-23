@@ -102,6 +102,7 @@ Tensor clone(const TensorV& tensor);
 void assign(const TensorV& tensor, const TensorV& src);
 Tensor castFloat(const TensorV& tensor);
 Tensor castBf16(const TensorV& tensor);
+Tensor castChannelInt8(const TensorV& tensor);
 Tensor concat(const std::vector<TensorV>& tensors, uint dim);
 Tensor tile(const TensorV& tensor, const std::vector<uint>& reps);
 
@@ -114,9 +115,9 @@ Tensor rmsNorm(const TensorV& weight, const TensorV& x, float epsilon);
 Tensor layerNorm(const TensorV& weight, const TensorV& bias, const TensorV& x, float epsilon);
 Tensor embeddingLookup(const TensorV& weight, const std::vector<uint>& tokens);
 
-// weight :: (dOut, dIn)
 // x      :: (batch, dIn)
-Tensor projection(const TensorV& weight, const TensorV& x);
+// weight :: (dOut, dIn)
+Tensor matmulT(const TensorV& x, const TensorV& weight);
 
 // tensor :: (dS, ..., dim)
 // freq   :: (dim/2)
