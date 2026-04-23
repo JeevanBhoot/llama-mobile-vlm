@@ -49,7 +49,7 @@ int main(int argc, char** argv) {
         timer = squash::Timer();
         auto prefillOut = generator.prefill(prompt, image, generatorOptions);
         std::cout << prefillOut.back();
-        auto prefillRate = double(prefillOut.size()) / timer.elapsed();
+        auto prefillTime = timer.elapsed();
         timer = squash::Timer();
         auto step = 0u;
         while (true) {
@@ -62,8 +62,8 @@ int main(int argc, char** argv) {
         }
         std::cout << "\n";
         auto generateRate = step / timer.elapsed();
-        std::cerr << "-- Prefill " << prefillRate << " tok/s; Generate " << generateRate
-                  << " tok/s\n\n";
+        std::cerr << "-- Prefill (" << prefillOut.size() << " tok) " << prefillTime
+              << " s; Generate " << generateRate << " tok/s\n\n";
     }
     return 0;
 }
