@@ -137,7 +137,7 @@ void _mv_chunk_bf16(const bf16* __restrict__ a,
 
 float _dot_bf16(const bf16* __restrict__ a, const bf16* __restrict__ b, const uint dK) {
     bf16 result;
-    _mv_chunk_bf16<1, 16>(a, b, dK, &result);
+    _mv_chunk_bf16<1, 64>(a, b, dK, &result);
     return float(result);
 }
 
@@ -152,20 +152,26 @@ void _matmulT_chunk_bfmmla(const __bf16* __restrict__ a,
 
     // Each accumulator holds a 2x2 result, accumulated over the full `k` dimension
     float32x4_t accs[(BlockM / 2) * (BlockN / 2)];
+#pragma unroll
     for (auto i = 0u; i < (BlockM / 2) * (BlockN / 2); ++i) {
         accs[i] = vmovq_n_f32(0.0f);
     }
+
     // Main loop, process `(m, k, n) = (BlockM, 8, BlockN)` elements per iteration
     const auto kStop = (dK / 8) * 8;
     for (auto k = 0u; k < kStop; k += 8) {
         bfloat16x8_t aa[BlockM], bb[BlockN];
+#pragma unroll
         for (auto m = 0u; m < BlockM; ++m) {
             aa[m] = vld1q_bf16(&a[m * dK + k]);
         }
+#pragma unroll
         for (auto n = 0u; n < BlockN; ++n) {
             bb[n] = vld1q_bf16(&b[n * dK + k]);
         }
+#pragma unroll
         for (auto m = 0u; m < (BlockM / 2); ++m) {
+#pragma unroll
             for (auto n = 0u; n < (BlockN / 2); ++n) {
                 auto& acc = accs[m * (BlockN / 2) + n];
                 acc = vbfmmlaq_f32(
@@ -177,9 +183,12 @@ void _matmulT_chunk_bfmmla(const __bf16* __restrict__ a,
             }
         }
     }
+
     // Handle remainder when dK is not a multiple of 8
     for (auto k = kStop; k < dK; ++k) {
+#pragma unroll
         for (auto m = 0u; m < (BlockM / 2); ++m) {
+#pragma unroll
             for (auto n = 0u; n < (BlockN / 2); ++n) {
                 auto& acc = accs[m * (BlockN / 2) + n];
                 float a0 = vcvtah_f32_bf16(a[(2 * m + 0) * dK + k]);
@@ -190,8 +199,11 @@ void _matmulT_chunk_bfmmla(const __bf16* __restrict__ a,
             }
         }
     }
+
     // Store out results, a BlockM x BlockN matrix
+#pragma unroll
     for (auto m = 0u; m < (BlockM / 2); ++m) {
+#pragma unroll
         for (auto n = 0u; n < (BlockN / 2); ++n) {
             auto acc_bf16 = vcvt_bf16_f32(accs[m * (BlockN / 2) + n]);
             vst1_lane_bf16(&out[(2 * m + 0) * dN + (2 * n + 0)], acc_bf16, 0);
@@ -218,23 +230,21 @@ void _matmulT_bf16(const bf16* __restrict__ a,  // {dM, dK}
             _mv_chunk_bf16<BN, BK>(a, &b[n * dK], dK, &out[n]);
         }
         for (auto n = nStop; n < dN; ++n) {
-            _mv_chunk_bf16<1, BK>(a, &b[n * dK], dK, &out[n]);
+            _mv_chunk_bf16<1, 64>(a, &b[n * dK], dK, &out[n]);
         }
         return;
     }
     if (dN == 1) {
         // Cannot transpose & use BN since it would require a strided output write
-        constexpr auto BK = 16;
 #pragma omp parallel for
         for (auto m = 0u; m < dM; ++m) {
-            _mv_chunk_bf16<1, BK>(&a[m * dK], b, dK, &out[m]);
+            _mv_chunk_bf16<1, 64>(&a[m * dK], b, dK, &out[m]);
         }
         return;
     }
 
     constexpr auto G0 = 16u;  // block size
     constexpr auto G1 = 8u;   // inner block size
-    constexpr auto BK = 16;
 
     const auto blocksM = (dM + G0 - 1) / G0;
     const auto blocksN = (dN + G0 - 1) / G0;
@@ -259,14 +269,14 @@ void _matmulT_bf16(const bf16* __restrict__ a,  // {dM, dK}
         // Handle remainder when dN is not a multiple of G1, `out[m0:m1, nStop:n1]`
         for (auto n = nStop; n < n1; ++n) {
             for (auto m = m0; m < m1; ++m) {
-                _mv_chunk_bf16<1, BK>(&a[m * dK], &b[n * dK], dK, &out[m * dN + n]);
+                _mv_chunk_bf16<1, 64>(&a[m * dK], &b[n * dK], dK, &out[m * dN + n]);
             }
         }
         // Handle remainder when dM is not a multiple of G1, `out[mStop:m1, n0:nStop]`
         // (note: excludes the bottom-right corner which is handled in the loop above)
         for (auto m = mStop; m < m1; ++m) {
             for (auto n = n0; n < nStop; ++n) {
-                _mv_chunk_bf16<1, BK>(&a[m * dK], &b[n * dK], dK, &out[m * dN + n]);
+                _mv_chunk_bf16<1, 64>(&a[m * dK], &b[n * dK], dK, &out[m * dN + n]);
             }
         }
     }
