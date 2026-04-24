@@ -14,12 +14,28 @@
 
 namespace squash::ops {
 
-// Float type
+// -----------------------------------------------------------------------------------------------
+// Data copy/convert
 
 void copy(const float* src, uint n, float* dest) {
 #pragma omp parallel for
     for (auto i = 0u; i < n; ++i) {
         dest[i] = src[i];
+    }
+}
+
+void copy(const bf16* src, uint n, bf16* dest) {
+#pragma omp parallel for
+    for (auto i = 0u; i < n; ++i) {
+        dest[i] = src[i];
+    }
+}
+
+void copyStrided(const bf16* src, uint n, uint d, uint sSrc, uint sDest, bf16* dest) {
+    for (uint i = 0; i < n; ++i) {
+        for (uint j = 0; j < d; ++j) {
+            dest[i * sDest + j] = src[i * sSrc + j];
+        }
     }
 }
 
@@ -54,129 +70,8 @@ void castChannelInt8(const bf16* in, uint dN, uint dK, int8_t* out_data, bf16* o
     }
 }
 
-// Data movement and type conversion
-
-void copy(const bf16* src, uint n, bf16* dest) {
-#pragma omp parallel for
-    for (auto i = 0u; i < n; ++i) {
-        dest[i] = src[i];
-    }
-}
-
-void copyStrided(const bf16* src, uint n, uint d, uint sSrc, uint sDest, bf16* dest) {
-    for (uint i = 0; i < n; ++i) {
-        for (uint j = 0; j < d; ++j) {
-            dest[i * sDest + j] = src[i * sSrc + j];
-        }
-    }
-}
-
-// Maths/NN ops
-
-void addInPlace(bf16* __restrict__ x, const bf16* __restrict__ y, const uint n) {
-    for (auto i = 0u; i < n; ++i) {
-        x[i] = bf16(float(x[i]) + float(y[i]));
-    }
-}
-
-void broadcastAddInPlace(bf16* __restrict__ x, const bf16* __restrict__ y, uint n, uint d) {
-    for (auto i = 0u; i < n; ++i) {
-        for (auto j = 0u; j < d; ++j) {
-            auto idx = i * d + j;
-            x[idx] = bf16(float(x[idx]) + float(y[j]));
-        }
-    }
-}
-
-void geluInPlace(bf16* x, uint n) {
-    // As per torch's 'approximate' GELU
-    const float c0 = std::sqrt(2.0f / std::numbers::pi_v<float>);
-    const float c1 = 0.044715f;
-    for (auto i = 0u; i < n; ++i) {
-        float xi = float(x[i]);
-        float z = std::tanh(c0 * (xi + c1 * xi * xi * xi));
-        x[i] = bf16(0.5f * xi * (1.0f + z));
-    }
-}
-
-void swiGluInPlace(bf16* __restrict__ x, const bf16* __restrict__ gate, const uint n) {
-    for (auto i = 0u; i < n; ++i) {
-        auto gi = float(gate[i]);
-        x[i] = bf16(float(x[i]) * gi / (1 + std::exp(-gi)));
-    }
-}
-
-void rmsNorm(const bf16* __restrict__ weight,
-             const bf16* __restrict__ x,
-             const uint batch,
-             const uint dim,
-             float epsilon,
-             bf16* __restrict__ out) {
-    for (auto n = 0u; n < batch; ++n) {
-        auto xn = x + n * dim;
-        float sumSq = 0;
-        for (auto i = 0u; i < dim; ++i) {
-            auto xi = float(xn[i]);
-            sumSq += xi * xi;
-        }
-        float scale = 1 / std::sqrt(sumSq / float(dim) + epsilon);
-        for (auto i = 0u; i < dim; ++i) {
-            out[n * dim + i] = bf16(float(xn[i]) * scale * float(weight[i]));
-        }
-    }
-}
-
-void layerNorm(const bf16* __restrict__ weight,
-               const bf16* __restrict__ bias,
-               const bf16* __restrict__ x,
-               uint batch,
-               uint dim,
-               float epsilon,
-               bf16* __restrict__ out) {
-    for (auto n = 0u; n < batch; ++n) {
-        auto xn = x + n * dim;
-        float sum = 0, sumSq = 0;
-        for (auto i = 0u; i < dim; ++i) {
-            auto xi = float(xn[i]);
-            sum += xi;
-            sumSq += xi * xi;
-        }
-        float mean = sum / float(dim);
-        float scale = 1 / std::sqrt(sumSq / float(dim) - mean * mean + epsilon);
-        for (auto i = 0u; i < dim; ++i) {
-            float normed = (float(xn[i]) - mean) * scale;
-            out[n * dim + i] = bf16(normed * float(weight[i]) + float(bias[i]));
-        }
-    }
-}
-
-void gather(const bf16* __restrict__ weight,
-            const uint* __restrict__ indices,
-            const uint nIndices,
-            const uint dim,
-            bf16* __restrict__ out) {
-    for (auto n = 0u; n < nIndices; ++n) {
-        for (auto i = 0u; i < dim; ++i) {
-            out[n * dim + i] = weight[indices[n] * dim + i];
-        }
-    }
-}
-
-void gather(const int8_t* __restrict__ weight,
-            const bf16* __restrict__ weightScale,
-            const uint* __restrict__ indices,
-            const uint nIndices,
-            const uint dim,
-            bf16* __restrict__ out) {
-#pragma omp parallel for
-    for (auto n = 0u; n < nIndices; ++n) {
-        auto row = indices[n];
-        auto rowScale = float(weightScale[row]);
-        for (auto i = 0u; i < dim; ++i) {
-            out[n * dim + i] = bf16(float(weight[row * dim + i]) * rowScale);
-        }
-    }
-}
+// -----------------------------------------------------------------------------------------------
+// Matmuls
 
 namespace {
 
@@ -193,29 +88,10 @@ int8_t _decode_s3d8(const uint8_t pack, const int8_t* __restrict__ lut, const ui
     }
 }
 
-}  // namespace
-
-void gather(const uint8_t* __restrict__ weight,
-            const int8_t* __restrict__ weightLut,
-            const bf16* __restrict__ weightScale,
-            const uint* __restrict__ indices,
-            const uint nIndices,
-            const uint dim,
-            bf16* __restrict__ out) {
-#pragma omp parallel for
-    for (auto n = 0u; n < nIndices; ++n) {
-        const auto row = indices[n];
-        auto rowScale = float(weightScale[row]);
-        for (auto k = 0u; k < dim; ++k) {
-            auto v = _decode_s3d8(weight[(row / 3) * dim + k], weightLut, row % 3);
-            out[n * dim + k] = bf16(float(v) * rowScale);
-        }
-    }
-}
-
-namespace {
-
 #if defined(__ARM_NEON) && defined(__ARM_FEATURE_BF16_VECTOR_ARITHMETIC)
+
+// -----------------------------------------------------------------------------------------------
+// ARM BF16 matmul
 
 template <uint BlockN, uint BlockK>
 void _mv_chunk_bf16(const bf16* __restrict__ a,
@@ -396,7 +272,16 @@ void _matmulT_bf16(const bf16* __restrict__ a,  // {dM, dK}
     }
 }
 
+// -----------------------------------------------------------------------------------------------
+// ARM INT8 matmul
+
+// -----------------------------------------------------------------------------------------------
+// ARM S3D8 matmul
+
 #else  // !(__ARM_NEON && __ARM_FEATURE_BF16_VECTOR_ARITHMETIC)
+
+// -----------------------------------------------------------------------------------------------
+// Generic matmul
 
 float _dot_bf16(const bf16* __restrict__ a, const bf16* __restrict__ b, const uint n) {
     float result = 0;
@@ -491,6 +376,135 @@ void matmulT(const int8_t* __restrict__ lhs,
     }
 }
 
+// -----------------------------------------------------------------------------------------------
+// Gathers
+
+void gather(const bf16* __restrict__ weight,
+            const uint* __restrict__ indices,
+            const uint nIndices,
+            const uint dim,
+            bf16* __restrict__ out) {
+    for (auto n = 0u; n < nIndices; ++n) {
+        for (auto i = 0u; i < dim; ++i) {
+            out[n * dim + i] = weight[indices[n] * dim + i];
+        }
+    }
+}
+
+void gather(const int8_t* __restrict__ weight,
+            const bf16* __restrict__ weightScale,
+            const uint* __restrict__ indices,
+            const uint nIndices,
+            const uint dim,
+            bf16* __restrict__ out) {
+#pragma omp parallel for
+    for (auto n = 0u; n < nIndices; ++n) {
+        auto row = indices[n];
+        auto rowScale = float(weightScale[row]);
+        for (auto i = 0u; i < dim; ++i) {
+            out[n * dim + i] = bf16(float(weight[row * dim + i]) * rowScale);
+        }
+    }
+}
+
+void gather(const uint8_t* __restrict__ weight,
+            const int8_t* __restrict__ weightLut,
+            const bf16* __restrict__ weightScale,
+            const uint* __restrict__ indices,
+            const uint nIndices,
+            const uint dim,
+            bf16* __restrict__ out) {
+#pragma omp parallel for
+    for (auto n = 0u; n < nIndices; ++n) {
+        const auto row = indices[n];
+        auto rowScale = float(weightScale[row]);
+        for (auto k = 0u; k < dim; ++k) {
+            auto v = _decode_s3d8(weight[(row / 3) * dim + k], weightLut, row % 3);
+            out[n * dim + k] = bf16(float(v) * rowScale);
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------------------------
+// Maths/NN ops
+
+void addInPlace(bf16* __restrict__ x, const bf16* __restrict__ y, const uint n) {
+    for (auto i = 0u; i < n; ++i) {
+        x[i] = bf16(float(x[i]) + float(y[i]));
+    }
+}
+
+void broadcastAddInPlace(bf16* __restrict__ x, const bf16* __restrict__ y, uint n, uint d) {
+    for (auto i = 0u; i < n; ++i) {
+        for (auto j = 0u; j < d; ++j) {
+            auto idx = i * d + j;
+            x[idx] = bf16(float(x[idx]) + float(y[j]));
+        }
+    }
+}
+
+void geluInPlace(bf16* x, uint n) {
+    // As per torch's 'approximate' GELU
+    const float c0 = std::sqrt(2.0f / std::numbers::pi_v<float>);
+    const float c1 = 0.044715f;
+    for (auto i = 0u; i < n; ++i) {
+        float xi = float(x[i]);
+        float z = std::tanh(c0 * (xi + c1 * xi * xi * xi));
+        x[i] = bf16(0.5f * xi * (1.0f + z));
+    }
+}
+
+void swiGluInPlace(bf16* __restrict__ x, const bf16* __restrict__ gate, const uint n) {
+    for (auto i = 0u; i < n; ++i) {
+        auto gi = float(gate[i]);
+        x[i] = bf16(float(x[i]) * gi / (1 + std::exp(-gi)));
+    }
+}
+
+void rmsNorm(const bf16* __restrict__ weight,
+             const bf16* __restrict__ x,
+             const uint batch,
+             const uint dim,
+             float epsilon,
+             bf16* __restrict__ out) {
+    for (auto n = 0u; n < batch; ++n) {
+        auto xn = x + n * dim;
+        float sumSq = 0;
+        for (auto i = 0u; i < dim; ++i) {
+            auto xi = float(xn[i]);
+            sumSq += xi * xi;
+        }
+        float scale = 1 / std::sqrt(sumSq / float(dim) + epsilon);
+        for (auto i = 0u; i < dim; ++i) {
+            out[n * dim + i] = bf16(float(xn[i]) * scale * float(weight[i]));
+        }
+    }
+}
+
+void layerNorm(const bf16* __restrict__ weight,
+               const bf16* __restrict__ bias,
+               const bf16* __restrict__ x,
+               uint batch,
+               uint dim,
+               float epsilon,
+               bf16* __restrict__ out) {
+    for (auto n = 0u; n < batch; ++n) {
+        auto xn = x + n * dim;
+        float sum = 0, sumSq = 0;
+        for (auto i = 0u; i < dim; ++i) {
+            auto xi = float(xn[i]);
+            sum += xi;
+            sumSq += xi * xi;
+        }
+        float mean = sum / float(dim);
+        float scale = 1 / std::sqrt(sumSq / float(dim) - mean * mean + epsilon);
+        for (auto i = 0u; i < dim; ++i) {
+            float normed = (float(xn[i]) - mean) * scale;
+            out[n * dim + i] = bf16(normed * float(weight[i]) + float(bias[i]));
+        }
+    }
+}
+
 void rotateInPlace(bf16* __restrict__ x,
                    const float* __restrict__ freq,
                    const uint offsetS,
@@ -572,7 +586,8 @@ void attentionInPlace(bf16* __restrict__ queryOut,
     }
 }
 
-// Special ops
+// -----------------------------------------------------------------------------------------------
+// Sampling ops
 
 void randn(bf16* out, ulong n, float stddev, ulong seed) {
 #pragma omp parallel
