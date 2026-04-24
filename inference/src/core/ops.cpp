@@ -88,16 +88,17 @@ int8_t _decode_s3d8(const uint8_t pack, const int8_t* __restrict__ lut, const ui
     }
 }
 
-#if defined(__ARM_NEON) && defined(__ARM_FEATURE_BF16_VECTOR_ARITHMETIC)
+#if defined(__ARM_NEON) && defined(__ARM_FEATURE_BF16_VECTOR_ARITHMETIC) && \
+    defined(__ARM_FEATURE_MATMUL_INT8) && defined(__ARM_FEATURE_DOTPROD)
 
 // -----------------------------------------------------------------------------------------------
 // ARM BF16 matmul
 
 template <uint BlockN, uint BlockK>
-void _mv_chunk_bf16(const bf16* __restrict__ a,
-                    const bf16* __restrict__ b,
+void _mv_chunk_bf16(const __bf16* __restrict__ a,
+                    const __bf16* __restrict__ b,
                     const uint dK,
-                    bf16* __restrict__ out) {
+                    __bf16* __restrict__ out) {
     static_assert(BlockK % 8 == 0, "BlockK must be a multiple of 8");
 
     float32x4_t accs[BlockN * (BlockK / 8)];
@@ -111,10 +112,10 @@ void _mv_chunk_bf16(const bf16* __restrict__ a,
     for (auto k = 0u; k < kStop; k += BlockK) {
 #pragma unroll
         for (auto iK = 0u; iK < BlockK / 8; ++iK) {
-            auto ak = vld1q_bf16(reinterpret_cast<const __bf16*>(&a[k + iK * 8]));
+            bfloat16x8_t ak = vld1q_bf16(&a[k + iK * 8]);
 #pragma unroll
             for (auto n = 0u; n < BlockN; ++n) {
-                auto bk = vld1q_bf16(reinterpret_cast<const __bf16*>(&b[n * dK + k + iK * 8]));
+                bfloat16x8_t bk = vld1q_bf16(&b[n * dK + k + iK * 8]);
                 accs[n * (BlockK / 8) + iK] = vbfdotq_f32(accs[n * (BlockK / 8) + iK], ak, bk);
             }
         }
@@ -122,22 +123,23 @@ void _mv_chunk_bf16(const bf16* __restrict__ a,
 
 #pragma unroll
     for (auto n = 0u; n < BlockN; ++n) {
-        auto& acc_n = accs[n * (BlockK / 8)];
+        float32x4_t& acc_n = accs[n * (BlockK / 8)];
 #pragma unroll
         for (auto i = 1u; i < BlockK / 8; ++i) {
             acc_n = vaddq_f32(acc_n, accs[n * (BlockK / 8) + i]);
         }
         float result = vaddvq_f32(acc_n);
         for (auto k = kStop; k < dK; ++k) {
-            result += float(a[k]) * float(b[n * dK + k]);
+            result += vcvtah_f32_bf16(a[k]) * vcvtah_f32_bf16(b[n * dK + k]);
         }
-        out[n] = bf16(result);
+        out[n] = vcvth_bf16_f32(result);
     }
 }
 
 float _dot_bf16(const bf16* __restrict__ a, const bf16* __restrict__ b, const uint dK) {
     bf16 result;
-    _mv_chunk_bf16<1, 64>(a, b, dK, &result);
+    _mv_chunk_bf16<1, 64>(reinterpret_cast<const __bf16*>(a), reinterpret_cast<const __bf16*>(b),
+                          dK, reinterpret_cast<__bf16*>(&result));
     return float(result);
 }
 
@@ -173,7 +175,7 @@ void _matmulT_chunk_bfmmla(const __bf16* __restrict__ a,
         for (auto m = 0u; m < (BlockM / 2); ++m) {
 #pragma unroll
             for (auto n = 0u; n < (BlockN / 2); ++n) {
-                auto& acc = accs[m * (BlockN / 2) + n];
+                float32x4_t& acc = accs[m * (BlockN / 2) + n];
                 acc = vbfmmlaq_f32(
                     acc, vcombine_bf16(vget_low_bf16(aa[2 * m]), vget_low_bf16(aa[2 * m + 1])),
                     vcombine_bf16(vget_low_bf16(bb[2 * n]), vget_low_bf16(bb[2 * n + 1])));
@@ -190,7 +192,7 @@ void _matmulT_chunk_bfmmla(const __bf16* __restrict__ a,
         for (auto m = 0u; m < (BlockM / 2); ++m) {
 #pragma unroll
             for (auto n = 0u; n < (BlockN / 2); ++n) {
-                auto& acc = accs[m * (BlockN / 2) + n];
+                float32x4_t& acc = accs[m * (BlockN / 2) + n];
                 float a0 = vcvtah_f32_bf16(a[(2 * m + 0) * dK + k]);
                 float a1 = vcvtah_f32_bf16(a[(2 * m + 1) * dK + k]);
                 float b0 = vcvtah_f32_bf16(b[(2 * n + 0) * dK + k]);
@@ -205,7 +207,7 @@ void _matmulT_chunk_bfmmla(const __bf16* __restrict__ a,
     for (auto m = 0u; m < (BlockM / 2); ++m) {
 #pragma unroll
         for (auto n = 0u; n < (BlockN / 2); ++n) {
-            auto acc_bf16 = vcvt_bf16_f32(accs[m * (BlockN / 2) + n]);
+            bfloat16x4_t acc_bf16 = vcvt_bf16_f32(accs[m * (BlockN / 2) + n]);
             vst1_lane_bf16(&out[(2 * m + 0) * dN + (2 * n + 0)], acc_bf16, 0);
             vst1_lane_bf16(&out[(2 * m + 0) * dN + (2 * n + 1)], acc_bf16, 1);
             vst1_lane_bf16(&out[(2 * m + 1) * dN + (2 * n + 0)], acc_bf16, 2);
@@ -214,12 +216,16 @@ void _matmulT_chunk_bfmmla(const __bf16* __restrict__ a,
     }
 }
 
-void _matmulT_bf16(const bf16* __restrict__ a,  // {dM, dK}
-                   const bf16* __restrict__ b,  // {dN, dK}
+void _matmulT_bf16(const bf16* __restrict__ a_,  // {dM, dK}
+                   const bf16* __restrict__ b_,  // {dN, dK}
                    const uint dM,
                    const uint dK,
                    const uint dN,
-                   bf16* __restrict__ out) {  // {dM, dN}
+                   bf16* __restrict__ out_) {  // {dM, dN}
+    auto a = reinterpret_cast<const __bf16*>(a_);
+    auto b = reinterpret_cast<const __bf16*>(b_);
+    auto out = reinterpret_cast<__bf16*>(out_);
+
     // Matrix-vector cases
     if (dM == 1) {
         constexpr auto BN = 4;
@@ -261,9 +267,7 @@ void _matmulT_bf16(const bf16* __restrict__ a,  // {dM, dK}
         auto nStop = (n1 / G1) * G1;
         for (auto n = n0; n < nStop; n += G1) {
             for (auto m = m0; m < mStop; m += G1) {
-                _matmulT_chunk_bfmmla<G1, G1>(reinterpret_cast<const __bf16*>(&a[m * dK]),
-                                              reinterpret_cast<const __bf16*>(&b[n * dK]), dK, dN,
-                                              reinterpret_cast<__bf16*>(&out[m * dN + n]));
+                _matmulT_chunk_bfmmla<G1, G1>(&a[m * dK], &b[n * dK], dK, dN, &out[m * dN + n]);
             }
         }
         // Handle remainder when dN is not a multiple of G1, `out[m0:m1, nStop:n1]`
@@ -285,16 +289,224 @@ void _matmulT_bf16(const bf16* __restrict__ a,  // {dM, dK}
 // -----------------------------------------------------------------------------------------------
 // ARM INT8 matmul
 
+template <uint BlockN, uint BlockK>
+void _mv_chunk_int8(const int8_t* __restrict__ a,
+                    const __bf16 aScale,
+                    const int8_t* __restrict__ b,
+                    const __bf16* __restrict__ bScale,
+                    const uint dK,
+                    __bf16* __restrict__ out) {
+    static_assert(BlockK % 16 == 0, "BlockK must be a multiple of 16");
+
+    int32x4_t accs[BlockN * (BlockK / 16)];
+#pragma unroll
+    for (auto i = 0u; i < BlockN * (BlockK / 16); ++i) {
+        accs[i] = vmovq_n_s32(0);
+    }
+
+    // Main loop, process [BlockN, BlockK] elements of `b` per iteration.
+    const auto kStop = (dK / BlockK) * BlockK;
+    for (auto k = 0u; k < kStop; k += BlockK) {
+#pragma unroll
+        for (auto iK = 0u; iK < BlockK / 16; ++iK) {
+            int8x16_t ak = vld1q_s8(&a[k + iK * 16]);
+#pragma unroll
+            for (auto n = 0u; n < BlockN; ++n) {
+                int8x16_t bk = vld1q_s8(&b[n * dK + k + iK * 16]);
+                accs[n * (BlockK / 16) + iK] = vdotq_s32(accs[n * (BlockK / 16) + iK], ak, bk);
+            }
+        }
+    }
+
+#pragma unroll
+    for (auto n = 0u; n < BlockN; ++n) {
+        int32x4_t& acc_n = accs[n * (BlockK / 16)];
+#pragma unroll
+        for (auto i = 1u; i < BlockK / 16; ++i) {
+            acc_n = vaddq_s32(acc_n, accs[n * (BlockK / 16) + i]);
+        }
+        int32_t result = vaddvq_s32(acc_n);
+        for (auto k = kStop; k < dK; ++k) {
+            result += int32_t(a[k]) * int32_t(b[n * dK + k]);
+        }
+        out[n] =
+            vcvth_bf16_f32(float(result) * vcvtah_f32_bf16(aScale) * vcvtah_f32_bf16(bScale[n]));
+    }
+}
+
+template <uint BlockM, uint BlockN>
+void _matmulT_chunk_smmla(const int8_t* __restrict__ a,
+                          const __bf16* __restrict__ aScale,
+                          const int8_t* __restrict__ b,
+                          const __bf16* __restrict__ bScale,
+                          const uint dK,
+                          const uint dN,
+                          __bf16* __restrict__ out) {
+    // Note: we expect all BlockM, BlockN loops to be unrolled
+    static_assert(BlockM % 2 == 0 && BlockN % 2 == 0, "BlockM and BlockN must be even");
+
+    // Each accumulator holds a 2x2 result, accumulated over the full `k` dimension
+    int32x4_t accs[(BlockM / 2) * (BlockN / 2)];
+#pragma unroll
+    for (auto i = 0u; i < (BlockM / 2) * (BlockN / 2); ++i) {
+        accs[i] = vmovq_n_s32(0);
+    }
+
+    // Main loop, process `(m, k, n) = (BlockM, 16, BlockN)` elements per iteration
+    const auto kStop = (dK / 16) * 16;
+    for (auto k = 0u; k < kStop; k += 16) {
+        int8x16_t aa0[BlockM / 2], aa1[BlockM / 2], bb0[BlockN / 2], bb1[BlockN / 2];
+#pragma unroll
+        for (auto m = 0u; m < (BlockM / 2); ++m) {
+            int8x16_t am0 = vld1q_s8(&a[(2 * m + 0) * dK + k]);
+            int8x16_t am1 = vld1q_s8(&a[(2 * m + 1) * dK + k]);
+            aa0[m] = vcombine_s8(vget_low_s8(am0), vget_low_s8(am1));
+            aa1[m] = vcombine_s8(vget_high_s8(am0), vget_high_s8(am1));
+        }
+#pragma unroll
+        for (auto n = 0u; n < (BlockN / 2); ++n) {
+            int8x16_t bn0 = vld1q_s8(&b[(2 * n + 0) * dK + k]);
+            int8x16_t bn1 = vld1q_s8(&b[(2 * n + 1) * dK + k]);
+            bb0[n] = vcombine_s8(vget_low_s8(bn0), vget_low_s8(bn1));
+            bb1[n] = vcombine_s8(vget_high_s8(bn0), vget_high_s8(bn1));
+        }
+#pragma unroll
+        for (auto m = 0u; m < (BlockM / 2); ++m) {
+#pragma unroll
+            for (auto n = 0u; n < (BlockN / 2); ++n) {
+                int32x4_t& acc = accs[m * (BlockN / 2) + n];
+                acc = vmmlaq_s32(acc, aa0[m], bb0[n]);
+                acc = vmmlaq_s32(acc, aa1[m], bb1[n]);
+            }
+        }
+    }
+
+    // Handle remainder when dK is not a multiple of 16
+    for (auto k = kStop; k < dK; ++k) {
+#pragma unroll
+        for (auto m = 0u; m < (BlockM / 2); ++m) {
+#pragma unroll
+            for (auto n = 0u; n < (BlockN / 2); ++n) {
+                int32x4_t& acc = accs[m * (BlockN / 2) + n];
+                int32_t a0 = int32_t(a[(2 * m + 0) * dK + k]);
+                int32_t a1 = int32_t(a[(2 * m + 1) * dK + k]);
+                int32_t b0 = int32_t(b[(2 * n + 0) * dK + k]);
+                int32_t b1 = int32_t(b[(2 * n + 1) * dK + k]);
+                acc = vaddq_s32(acc, int32x4_t{a0 * b0, a0 * b1, a1 * b0, a1 * b1});
+            }
+        }
+    }
+
+    // Store out results, a BlockM x BlockN matrix
+#pragma unroll
+    for (auto m = 0u; m < (BlockM / 2); ++m) {
+        float aScale0 = vcvtah_f32_bf16(aScale[2 * m + 0]);
+        float aScale1 = vcvtah_f32_bf16(aScale[2 * m + 1]);
+#pragma unroll
+        for (auto n = 0u; n < (BlockN / 2); ++n) {
+            int32_t acc[4];
+            vst1q_s32(acc, accs[m * (BlockN / 2) + n]);
+            float bScale0 = vcvtah_f32_bf16(bScale[2 * n + 0]);
+            float bScale1 = vcvtah_f32_bf16(bScale[2 * n + 1]);
+            out[(2 * m + 0) * dN + (2 * n + 0)] = vcvth_bf16_f32(float(acc[0]) * aScale0 * bScale0);
+            out[(2 * m + 0) * dN + (2 * n + 1)] = vcvth_bf16_f32(float(acc[1]) * aScale0 * bScale1);
+            out[(2 * m + 1) * dN + (2 * n + 0)] = vcvth_bf16_f32(float(acc[2]) * aScale1 * bScale0);
+            out[(2 * m + 1) * dN + (2 * n + 1)] = vcvth_bf16_f32(float(acc[3]) * aScale1 * bScale1);
+        }
+    }
+}
+
+void _matmulT_int8(const int8_t* __restrict__ lhs,
+                   const bf16* __restrict__ lhsScale_,
+                   const int8_t* __restrict__ rhs,
+                   const bf16* __restrict__ rhsScale_,
+                   const uint dM,
+                   const uint dK,
+                   const uint dN,
+                   bf16* __restrict__ out_) {
+    auto lhsScale = reinterpret_cast<const __bf16*>(lhsScale_);
+    auto rhsScale = reinterpret_cast<const __bf16*>(rhsScale_);
+    auto out = reinterpret_cast<__bf16*>(out_);
+
+    if (dM == 1) {
+        constexpr auto BN = 4u;
+        constexpr auto BK = 16u;
+        const auto nStop = (dN / BN) * BN;
+#pragma omp parallel for
+        for (auto n = 0u; n < nStop; n += BN) {
+            _mv_chunk_int8<BN, BK>(lhs, lhsScale[0], &rhs[n * dK], &rhsScale[n], dK, &out[n]);
+        }
+        for (auto n = nStop; n < dN; ++n) {
+            _mv_chunk_int8<1, 64>(lhs, lhsScale[0], &rhs[n * dK], &rhsScale[n], dK, &out[n]);
+        }
+        return;
+    }
+    if (dN == 1) {
+#pragma omp parallel for
+        for (auto m = 0u; m < dM; ++m) {
+            _mv_chunk_int8<1, 64>(&lhs[m * dK], lhsScale[m], rhs, rhsScale, dK, &out[m]);
+        }
+        return;
+    }
+
+    constexpr auto G0 = 16u;
+    constexpr auto G1 = 8u;
+
+    const auto blocksM = (dM + G0 - 1) / G0;
+    const auto blocksN = (dN + G0 - 1) / G0;
+
+#pragma omp parallel for
+    for (auto i0 = 0u; i0 < blocksM * blocksN; ++i0) {
+        auto m0 = G0 * (i0 / blocksN);
+        auto m1 = std::min(m0 + G0, dM);
+        auto n0 = G0 * (i0 % blocksN);
+        auto n1 = std::min(n0 + G0, dN);
+
+        // Main loop
+        auto mStop = m0 + ((m1 - m0) / G1) * G1;
+        auto nStop = n0 + ((n1 - n0) / G1) * G1;
+        for (auto n = n0; n < nStop; n += G1) {
+            for (auto m = m0; m < mStop; m += G1) {
+                _matmulT_chunk_smmla<G1, G1>(&lhs[m * dK], &lhsScale[m], &rhs[n * dK], &rhsScale[n],
+                                             dK, dN, &out[m * dN + n]);
+            }
+        }
+        // Handle remainder when dN is not a multiple of G1, `out[m0:m1, nStop:n1]`
+        for (auto n = nStop; n < n1; ++n) {
+            for (auto m = m0; m < m1; ++m) {
+                _mv_chunk_int8<1, 64>(&lhs[m * dK], lhsScale[m], &rhs[n * dK], &rhsScale[n], dK,
+                                      &out[m * dN + n]);
+            }
+        }
+        // Handle remainder when dM is not a multiple of G1, `out[mStop:m1, n0:nStop]`
+        // (note: excludes the bottom-right corner which is handled in the loop above)
+        for (auto m = mStop; m < m1; ++m) {
+            for (auto n = n0; n < nStop; ++n) {
+                _mv_chunk_int8<1, 64>(&lhs[m * dK], lhsScale[m], &rhs[n * dK], &rhsScale[n], dK,
+                                      &out[m * dN + n]);
+            }
+        }
+    }
+}
+
 // -----------------------------------------------------------------------------------------------
 // ARM S3D8 matmul
 
-#else  // !(__ARM_NEON && __ARM_FEATURE_BF16_VECTOR_ARITHMETIC)
+#else  // !(__ARM_NEON && __ARM_FEATURE_BF16_VECTOR_ARITHMETIC && __ARM_FEATURE_MATMUL_INT8 &&
+       // __ARM_FEATURE_DOTPROD)
+
+#ifdef __ARM_NEON
+#pragma message(                                                                      \
+    "ARM NEON detected but required features for optimized matmul are not available," \
+    " falling back to generic implementations")
+#endif
 
 // -----------------------------------------------------------------------------------------------
 // Generic matmul
 
 float _dot_bf16(const bf16* __restrict__ a, const bf16* __restrict__ b, const uint n) {
     float result = 0;
+#pragma omp simd reduction(+ : result)
     for (auto i = 0u; i < n; ++i) {
         result += float(a[i]) * float(b[i]);
     }
@@ -315,8 +527,6 @@ void _matmulT_bf16(const bf16* __restrict__ lhs,
     }
 }
 
-#endif  // __ARM_NEON && __ARM_FEATURE_BF16_VECTOR_ARITHMETIC
-
 int32_t _dot_int8(const int8_t* __restrict__ a, const int8_t* __restrict__ b, const uint n) {
     int32_t result = 0;
 #pragma omp simd reduction(+ : result)
@@ -325,6 +535,27 @@ int32_t _dot_int8(const int8_t* __restrict__ a, const int8_t* __restrict__ b, co
     }
     return result;
 }
+
+void _matmulT_int8(const int8_t* __restrict__ lhs,
+                   const bf16* __restrict__ lhsScale,
+                   const int8_t* __restrict__ rhs,
+                   const bf16* __restrict__ rhsScale,
+                   const uint dM,
+                   const uint dK,
+                   const uint dN,
+                   bf16* __restrict__ out) {
+#pragma omp parallel for
+    for (auto n = 0u; n < dN; ++n) {
+        auto nScale = float(rhsScale[n]);
+        for (auto m = 0u; m < dM; ++m) {
+            auto dot = _dot_int8(&lhs[m * dK], &rhs[n * dK], dK);
+            out[m * dN + n] = bf16(float(dot) * float(lhsScale[m]) * nScale);
+        }
+    }
+}
+
+#endif  // __ARM_NEON && __ARM_FEATURE_BF16_VECTOR_ARITHMETIC && __ARM_FEATURE_MATMUL_INT8 &&
+        // __ARM_FEATURE_DOTPROD
 
 int32_t _dot_int8_s3d8(const int8_t* __restrict__ a,
                        const uint8_t* __restrict__ b,
@@ -357,14 +588,7 @@ void matmulT(const int8_t* __restrict__ lhs,
              const uint dK,
              const uint dN,
              bf16* __restrict__ out) {
-#pragma omp parallel for
-    for (auto n = 0u; n < dN; ++n) {
-        auto nScale = float(rhsScale[n]);
-        for (auto m = 0u; m < dM; ++m) {
-            auto dot = _dot_int8(&lhs[m * dK], &rhs[n * dK], dK);
-            out[m * dN + n] = bf16(float(dot) * float(lhsScale[m]) * nScale);
-        }
-    }
+    _matmulT_int8(lhs, lhsScale, rhs, rhsScale, dM, dK, dN, out);
 }
 
 void matmulT(const int8_t* __restrict__ lhs,
