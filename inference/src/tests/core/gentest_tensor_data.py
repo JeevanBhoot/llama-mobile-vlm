@@ -307,12 +307,15 @@ class Tests:
             (79, 64, 47, "odd-mn"),
             (3, 5, 7, "small"),
             (137, 79, 37, "prime"),
-            (53, 41, 1, "m1"),
-            (1, 41, 17, "n1"),
-            (50, 143, 1, "m1-odd-k"),
-            (1, 143, 50, "n1-odd-k"),
+            # matrix-vector
+            (1, 149, 170, "m1"),
+            (170, 149, 1, "n1"),
+            (1, 277, 1, "mn1"),
+            # n multiple of 3 (for testing s3d8 padding)
+            (79, 149, 81, "n-multiple-3"),
+            (1, 149, 81, "m1-n-multiple-3"),
         ]
-        for dN, dK, dM, name in cases:
+        for dM, dK, dN, name in cases:
             torch.manual_seed(_seed_from_name(name))
             weight = torch.randn(dN, dK).bfloat16() / (dK**0.5)
             x = torch.randn(dM, dK).bfloat16()
