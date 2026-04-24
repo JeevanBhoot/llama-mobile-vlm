@@ -14,6 +14,23 @@
 
 namespace squash::ops {
 
+namespace {
+
+int8_t _decode_s3d8(const uint8_t pack, const int8_t* __restrict__ lut, const uint vIdx) {
+    switch (vIdx) {
+        case 0:
+            return lut[0 * 64u + (pack & 0x3Fu)];
+        case 1:
+            return lut[1 * 64u + ((pack >> 1) & 0x3Fu)];
+        case 2:
+            return lut[2 * 64u + ((pack & 0x3Fu) ^ (pack >> 7))];
+        default:
+            return 0;
+    }
+}
+
+}  // namespace
+
 // -----------------------------------------------------------------------------------------------
 // Data copy/convert
 
@@ -70,23 +87,130 @@ void castChannelInt8(const bf16* in, uint dN, uint dK, int8_t* out_data, bf16* o
     }
 }
 
+namespace {
+
+#if defined(__ARM_NEON)
+
+template <uint BlockK>
+void _cast_chunk_s3d8(const uint8_t* __restrict__ in,
+                      const int8_t* __restrict__ lut,
+                      const uint dK,
+                      const uint stopN,
+                      int8_t* __restrict__ out,
+                      const uint outStride) {
+    constexpr auto RowsPerPack = 3u;
+    static_assert(BlockK % 16 == 0, "BlockK must be a multiple of 16");
+
+    int8x16x4_t luts[RowsPerPack];
+#pragma unroll
+    for (auto row = 0u; row < RowsPerPack; ++row) {
+        luts[row].val[0] = vld1q_s8(&lut[row * 64u + 0u]);
+        luts[row].val[1] = vld1q_s8(&lut[row * 64u + 16u]);
+        luts[row].val[2] = vld1q_s8(&lut[row * 64u + 32u]);
+        luts[row].val[3] = vld1q_s8(&lut[row * 64u + 48u]);
+    }
+
+    const auto kStop = (dK / BlockK) * BlockK;
+    for (auto k = 0u; k < kStop; k += BlockK) {
+        uint8x16_t idx[RowsPerPack][BlockK / 16];
+#pragma unroll
+        for (auto iK = 0u; iK < BlockK / 16; ++iK) {
+            uint8x16_t packed = vld1q_u8(&in[k + iK * 16]);
+            idx[0][iK] = vandq_u8(packed, vdupq_n_u8(0x3Fu));
+            idx[1][iK] = vandq_u8(vshrq_n_u8(packed, 1), vdupq_n_u8(0x3Fu));
+            idx[2][iK] = veorq_u8(idx[0][iK], vshrq_n_u8(packed, 7));
+        }
+        if (stopN > 0) {
+#pragma unroll
+            for (auto iK = 0u; iK < BlockK / 16; ++iK) {
+                vst1q_s8(&out[0u * outStride + k + iK * 16], vqtbl4q_s8(luts[0], idx[0][iK]));
+            }
+        }
+        if (stopN > 1) {
+#pragma unroll
+            for (auto iK = 0u; iK < BlockK / 16; ++iK) {
+                vst1q_s8(&out[1u * outStride + k + iK * 16], vqtbl4q_s8(luts[1], idx[1][iK]));
+            }
+        }
+        if (stopN > 2) {
+#pragma unroll
+            for (auto iK = 0u; iK < BlockK / 16; ++iK) {
+                vst1q_s8(&out[2u * outStride + k + iK * 16], vqtbl4q_s8(luts[2], idx[2][iK]));
+            }
+        }
+    }
+
+    for (auto k = kStop; k < dK; ++k) {
+        if (stopN > 0) {
+            out[0u * outStride + k] = _decode_s3d8(in[k], lut, 0u);
+        }
+        if (stopN > 1) {
+            out[1u * outStride + k] = _decode_s3d8(in[k], lut, 1u);
+        }
+        if (stopN > 2) {
+            out[2u * outStride + k] = _decode_s3d8(in[k], lut, 2u);
+        }
+    }
+}
+
+void _castChannelInt8_s3d8(const uint8_t* __restrict__ in_data,
+                           const int8_t* __restrict__ in_lut,
+                           const bf16* __restrict__ in_scale,
+                           const uint dN,
+                           const uint dK,
+                           int8_t* __restrict__ out_data,
+                           bf16* __restrict__ out_scale) {
+    constexpr auto RowsPerPack = 3u;
+    constexpr auto BlockK = 128u;
+    const auto packedRows = (dN + RowsPerPack - 1) / RowsPerPack;
+
+#pragma omp parallel for
+    for (auto p = 0u; p < packedRows; ++p) {
+        const auto n0 = p * RowsPerPack;
+        const auto stopN = std::min(RowsPerPack, dN - n0);
+        _cast_chunk_s3d8<BlockK>(&in_data[p * dK], in_lut, dK, stopN, &out_data[n0 * dK], dK);
+        for (auto n = 0u; n < stopN; ++n) {
+            out_scale[n0 + n] = in_scale[n0 + n];
+        }
+    }
+}
+
+#else  // !__ARM_NEON
+
+void _castChannelInt8_s3d8(const uint8_t* __restrict__ in_data,
+                           const int8_t* __restrict__ in_lut,
+                           const bf16* __restrict__ in_scale,
+                           const uint dN,
+                           const uint dK,
+                           int8_t* __restrict__ out_data,
+                           bf16* __restrict__ out_scale) {
+#pragma omp parallel for
+    for (auto n = 0u; n < dN; ++n) {
+        out_scale[n] = in_scale[n];
+        for (auto k = 0u; k < dK; ++k) {
+            out_data[n * dK + k] = _decode_s3d8(in_data[(n / 3u) * dK + k], in_lut, n % 3u);
+        }
+    }
+}
+
+#endif  // __ARM_NEON
+
+}  // namespace
+
+void castChannelInt8(const uint8_t* __restrict__ in_data,
+                     const int8_t* __restrict__ in_lut,
+                     const bf16* __restrict__ in_scale,
+                     const uint dN,
+                     const uint dK,
+                     int8_t* __restrict__ out_data,
+                     bf16* __restrict__ out_scale) {
+    _castChannelInt8_s3d8(in_data, in_lut, in_scale, dN, dK, out_data, out_scale);
+}
+
 // -----------------------------------------------------------------------------------------------
 // Matmuls
 
 namespace {
-
-int8_t _decode_s3d8(const uint8_t pack, const int8_t* __restrict__ lut, const uint vIdx) {
-    switch (vIdx) {
-        case 0:
-            return lut[0 * 64u + (pack & 0x3Fu)];
-        case 1:
-            return lut[1 * 64u + ((pack >> 1) & 0x3Fu)];
-        case 2:
-            return lut[2 * 64u + ((pack & 0x3Fu) ^ (pack >> 7))];
-        default:
-            return 0;
-    }
-}
 
 #if defined(__ARM_NEON) && defined(__ARM_FEATURE_BF16_VECTOR_ARITHMETIC) && \
     defined(__ARM_FEATURE_MATMUL_INT8) && defined(__ARM_FEATURE_DOTPROD)

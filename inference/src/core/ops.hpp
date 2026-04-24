@@ -15,6 +15,13 @@ void copyStrided(const bf16* src, uint n, uint d, uint sSrc, uint sDest, bf16* d
 void castFloat(const bf16* in, float* out, uint n);
 void castBf16(const float* in, bf16* out, uint n);
 void castChannelInt8(const bf16* in, uint dN, uint dK, int8_t* out_data, bf16* out_scale);
+void castChannelInt8(const uint8_t* in_data,
+                     const int8_t* in_lut,
+                     const bf16* in_scale,
+                     uint dN,
+                     uint dK,
+                     int8_t* out_data,
+                     bf16* out_scale);
 
 // Matmuls
 

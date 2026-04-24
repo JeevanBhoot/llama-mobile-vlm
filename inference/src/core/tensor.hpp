@@ -102,6 +102,7 @@ Tensor clone(const TensorV& tensor);
 void assign(const TensorV& tensor, const TensorV& src);
 Tensor castFloat(const TensorV& tensor);
 Tensor castBf16(const TensorV& tensor);
+void castChannelInt8(const TensorV& tensor, const TensorV& out);
 Tensor castChannelInt8(const TensorV& tensor);
 Tensor concat(const std::vector<TensorV>& tensors, uint dim);
 Tensor tile(const TensorV& tensor, const std::vector<uint>& reps);

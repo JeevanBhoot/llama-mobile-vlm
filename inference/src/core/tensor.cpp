@@ -451,26 +451,56 @@ Tensor castBf16(const TensorV& tensor) {
     return out;
 }
 
+void castChannelInt8(const TensorV& tensor, const TensorV& out) {
+    if (tensor.shape.size() != 2) {
+        std::ostringstream err;
+        err << "castChannelInt8: expected 2D tensor, tensor.shape: " << tensor.shape;
+        throw std::invalid_argument(err.str());
+    }
+    if (out.shape != tensor.shape) {
+        std::ostringstream err;
+        err << "castChannelInt8: output shape mismatch, out.shape: " << out.shape
+            << ", tensor.shape: " << tensor.shape;
+        throw std::invalid_argument(err.str());
+    }
+    if (!std::holds_alternative<_data::ChannelInt8>(out.data)) {
+        throw std::invalid_argument("castChannelInt8: output must have ChannelInt8 tensor data");
+    }
+
+    auto outData = std::get<_data::ChannelInt8>(out.data);
+    if (std::holds_alternative<_data::ChannelInt8>(tensor.data)) {
+        auto data = std::get<_data::ChannelInt8>(tensor.data);
+        std::copy_n(data.data, prod(tensor.shape), outData.data);
+        std::copy_n(data.scale, tensor.shape[0], outData.scale);
+    } else if (std::holds_alternative<_data::Flat<float>>(tensor.data)) {
+        castChannelInt8(castBf16(tensor), out);
+    } else if (std::holds_alternative<_data::Flat<bf16>>(tensor.data)) {
+        ops::castChannelInt8(data<bf16>(tensor), tensor.shape[0], tensor.shape[1], outData.data,
+                             outData.scale);
+    } else if (std::holds_alternative<_data::ChannelS3D8>(tensor.data)) {
+        auto data = std::get<_data::ChannelS3D8>(tensor.data);
+        ops::castChannelInt8(data.data, data.lut, data.scale, tensor.shape[0], tensor.shape[1],
+                             outData.data, outData.scale);
+    } else {
+        throw std::invalid_argument(
+            "castChannelInt8 requires float, bf16, ChannelInt8, or ChannelS3D8 tensor data");
+    }
+}
+
 Tensor castChannelInt8(const TensorV& tensor) {
     if (tensor.shape.size() != 2) {
         std::ostringstream err;
         err << "castChannelInt8: expected 2D tensor, tensor.shape: " << tensor.shape;
         throw std::invalid_argument(err.str());
     }
-    if (std::holds_alternative<_data::Flat<float>>(tensor.data)) {
-        return castChannelInt8(castBf16(tensor));
-    }
-    if (!std::holds_alternative<_data::Flat<bf16>>(tensor.data)) {
-        throw std::invalid_argument("castChannelInt8 requires float or bf16 tensor data");
-    }
-
     auto scaleOffset = align(ulong(prod(tensor.shape)) * sizeof(int8_t));
     auto buffer = Buffer(scaleOffset + ulong(tensor.shape[0]) * sizeof(bf16));
     auto* outData = reinterpret_cast<int8_t*>(buffer.get<char>());
     auto* outScale = reinterpret_cast<bf16*>(buffer.get<char>() + scaleOffset);
-    ops::castChannelInt8(data<bf16>(tensor), tensor.shape[0], tensor.shape[1], outData, outScale);
-    return Tensor{{.data = _data::ChannelInt8(outData, outScale), .shape = tensor.shape},
-                  std::move(buffer)};
+    auto out = Tensor{{.data = _data::ChannelInt8(outData, outScale), .shape = tensor.shape},
+                      std::move(buffer)};
+    castChannelInt8(tensor, out);
+    return out;
 }
 
 Tensor concat(const std::vector<TensorV>& tensors, uint dim) {
