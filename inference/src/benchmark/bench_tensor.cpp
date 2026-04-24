@@ -122,6 +122,7 @@ tensor::Tensor randnChannelS3D8Tensor(uint dOut, uint dIn, ulong seed) {
 
 template <class MakeInput, class MakeWeight>
 void benchmarkMatmulT(const benchmarking::Report& report,
+                      const std::string& dtype,
                       MakeInput&& makeInput,
                       MakeWeight&& makeWeight,
                       ulong seed) {
@@ -161,18 +162,22 @@ void benchmarkMatmulT(const benchmarking::Report& report,
             auto timer = benchmark.record();
             tensor::matmulT(xs[i % copies], weights[i % copies]);
         }
-        benchmark.dump(report[name], {{"batch_size", batchSize}, {"d_in", dIn}, {"d_out", dOut}});
+        benchmark.dump(
+            report[name],
+            {{"batch_size", batchSize}, {"d_in", dIn}, {"d_out", dOut}, {"dtype", dtype}});
     }
 }
 
 REGISTER_BENCHMARK(_tensor_matmulT_bf16)(const benchmarking::Report& report) {
-    benchmarkMatmulT(report, randnBf16Tensor, randnBf16Tensor, 0x23f3ac651617c540);
+    benchmarkMatmulT(report, "bf16", randnBf16Tensor, randnBf16Tensor, 0x23f3ac651617c540);
 }
 REGISTER_BENCHMARK(_tensor_matmulT_int8)(const benchmarking::Report& report) {
-    benchmarkMatmulT(report, randnChannelInt8Tensor, randnChannelInt8Tensor, 0xeb4852bba3aeb1d0);
+    benchmarkMatmulT(report, "int8", randnChannelInt8Tensor, randnChannelInt8Tensor,
+                     0xeb4852bba3aeb1d0);
 }
 REGISTER_BENCHMARK(_tensor_matmulT_s3d8)(const benchmarking::Report& report) {
-    benchmarkMatmulT(report, randnChannelInt8Tensor, randnChannelS3D8Tensor, 0x24bec62971dd9ca1);
+    benchmarkMatmulT(report, "s3d8", randnChannelInt8Tensor, randnChannelS3D8Tensor,
+                     0x24bec62971dd9ca1);
 }
 
 // ### other benchmarks
