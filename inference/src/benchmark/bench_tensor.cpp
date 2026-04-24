@@ -7,28 +7,12 @@ using namespace squash;
 
 namespace {
 
-void flushCache() {
-    // Allocate a buffer larger than the largest cache
-    const size_t cacheFlushSize = 512 * 1024 * 1024;
-    static std::vector<char> cacheFlushBuffer(cacheFlushSize);
-    for (auto n = 0; n < 10; ++n) {
-        // Read-modify-write seems better than write-only for flushing caches
-#pragma omp parallel for schedule(static)
-        for (auto i = 0ull; i < cacheFlushBuffer.size(); ++i) {
-            cacheFlushBuffer[i] += 1;
-        }
-    }
-}
-
 struct ComputeAndTransferBenchmark {
     ulong macCount;
     ulong byteCount;
     benchmarking::Benchmark benchmark = {};
 
-    benchmarking::Benchmark::Recorder record() {
-        flushCache();
-        return benchmark.record();
-    }
+    benchmarking::Benchmark::Recorder record() { return benchmark.record(); }
 
     void dump(const benchmarking::Report& report, nlohmann::json details) {
         auto result = benchmark.result();
@@ -47,17 +31,25 @@ struct ComputeAndTransferBenchmark {
     }
 };
 
+std::vector<tensor::Tensor> cloneN(const tensor::Tensor& tensor, uint n) {
+    std::vector<tensor::Tensor> clones;
+    clones.reserve(n);
+    for (auto i = 0u; i < n; ++i) {
+        clones.push_back(clone(tensor));
+    }
+    return clones;
+}
+
 REGISTER_BENCHMARK(_tensor_copy)(const benchmarking::Report& report) {
     selectOmpNumThreads();
 
-    // Check cache flushing works: copy speed should not exceed main memory bandwidth
-    // Note - 64 MiB fits in the largest cache of a Graviton 4 CPU
-    const size_t nelement = 64 * 1024 * 1024;
+    // Use a large tensor to avoid the last-level cache
+    const size_t nelement = (1ull << 30) / (2 * sizeof(bf16));  // ~1 GiB (R+W)
     auto x = tensor::randn({nelement}, 1.0f, 0x6ab49512d9d3de72);
     auto y = tensor::clone(x);
 
     ComputeAndTransferBenchmark benchmark{.macCount = 0, .byteCount = 2 * sizeof(bf16) * nelement};
-    for (auto rep = 0u; rep < 100u; ++rep) {
+    for (auto rep = 0u; rep < 10u; ++rep) {
         auto timer = benchmark.record();
         tensor::assign(y, x);
     }
@@ -66,7 +58,6 @@ REGISTER_BENCHMARK(_tensor_copy)(const benchmarking::Report& report) {
 
 // ### _tensor_proj benchmarks
 
-namespace {
 tensor::Tensor randnBf16Tensor(uint dOut, uint dIn, ulong seed) {
     return tensor::randn({dOut, dIn}, 1.0f, seed);
 }
@@ -162,16 +153,17 @@ void benchmarkMatmulT(const benchmarking::Report& report,
             .byteCount =
                 countBytes(x) + countBytes(weight) + sizeof(bf16) * ulong(batchSize) * ulong(dOut),
         };
-        auto reps = std::clamp(uint(1e11 / double(benchmark.macCount)), 20u, 200u);
-
-        for (auto rep = 0u; rep < reps; ++rep) {
+        auto reps = std::clamp(uint(1e12 / double(benchmark.macCount)), 20u, 2000u);
+        auto copies = std::min(reps, uint((1ull << 30) / double(benchmark.byteCount)));  // ~1 GiB
+        auto weights = cloneN(weight, copies);
+        auto xs = cloneN(x, copies);
+        for (auto i = 0u; i < reps; ++i) {
             auto timer = benchmark.record();
-            tensor::matmulT(x, weight);
+            tensor::matmulT(xs[i % copies], weights[i % copies]);
         }
         benchmark.dump(report[name], {{"batch_size", batchSize}, {"d_in", dIn}, {"d_out", dOut}});
     }
 }
-}  // namespace
 
 REGISTER_BENCHMARK(_tensor_matmulT_bf16)(const benchmarking::Report& report) {
     benchmarkMatmulT(report, randnBf16Tensor, randnBf16Tensor, 0x23f3ac651617c540);
@@ -204,9 +196,15 @@ REGISTER_BENCHMARK(_tensor_attention)(const benchmarking::Report& report) {
                 2 * ulong(head_dim * heads_kv * heads_q) * ulong(seq_q * seq_kv) / (1 + causal),
             .byteCount = sizeof(bf16) * head_dim * heads_kv * (2 * seq_q * heads_q + 2 * seq_kv),
         };
-        for (auto rep = 0u; rep < 20u; ++rep) {
+        auto reps = 20u;
+        auto copies = std::min(reps, uint((1ull << 30) / double(benchmark.byteCount)));  // ~1 GiB
+        auto queries = cloneN(query, copies);
+        auto keys = cloneN(key, copies);
+        auto values = cloneN(value, copies);
+        for (auto i = 0u; i < reps; ++i) {
             auto timer = benchmark.record();
-            query = tensor::attention(std::move(query), key, value, causal);
+            queries[i % copies] = tensor::attention(std::move(queries[i % copies]),
+                                                    keys[i % copies], values[i % copies], causal);
         }
         benchmark.dump(report[name], {{"seq_q", seq_q},
                                       {"seq_kv", seq_kv},
@@ -223,8 +221,9 @@ REGISTER_BENCHMARK(tensor_mlp)(const benchmarking::Report& report) {
     uint batchSize = 1;
     uint dModel = 4096;
     uint dFFN = 14336;
+    uint copies = 10;
 
-    auto inputs = tensor::randn({batchSize, dModel}, 1.0f, rng());
+    auto input = tensor::randn({batchSize, dModel}, 1.0f, rng());
     auto wUp = tensor::randn({dFFN, dModel}, 0.02f, rng());
     auto wGate = tensor::randn({dFFN, dModel}, 0.02f, rng());
     auto wDown = tensor::randn({dModel, dFFN}, 0.02f, rng());
@@ -233,14 +232,17 @@ REGISTER_BENCHMARK(tensor_mlp)(const benchmarking::Report& report) {
         .macCount = 3ull * ulong(batchSize) * ulong(dModel) * ulong(dFFN),
         .byteCount = sizeof(bf16) * (batchSize * (3 * dModel + 5 * dFFN) + (3 * dFFN * dModel)),
     };
-
-    for (auto rep = 0u; rep < 100u; ++rep) {
+    auto inputs = cloneN(input, copies);
+    auto wUps = cloneN(wUp, copies);
+    auto wGates = cloneN(wGate, copies);
+    auto wDowns = cloneN(wDown, copies);
+    for (auto i = 0u; i < 100u; ++i) {
         auto timer = benchmark.record();
-
-        auto up = tensor::matmulT(inputs, wUp);
-        auto gate = tensor::matmulT(inputs, wGate);
+        auto& x = inputs[i % copies];
+        auto up = tensor::matmulT(x, wUps[i % copies]);
+        auto gate = tensor::matmulT(x, wGates[i % copies]);
         up = tensor::swiGlu(std::move(up), gate);
-        auto outputs = tensor::matmulT(up, wDown);
+        auto outputs = tensor::matmulT(up, wDowns[i % copies]);
     }
     benchmark.dump(report, {{"batch_size", batchSize}, {"d_model", dModel}, {"d_ffn", dFFN}});
 }

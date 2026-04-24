@@ -373,15 +373,46 @@ Tensor randn(Shape shape, float stddev, ulong seed) {
 Tensor clone(const TensorV& tensor) {
     return std::visit(
         [&](auto& d) -> Tensor {
-            if constexpr (std::is_same_v<std::decay_t<decltype(d)>, _data::Flat<float>>) {
+            using Data = std::decay_t<decltype(d)>;
+            if constexpr (std::is_same_v<Data, _data::Flat<float>>) {
                 auto out = empty<float>(tensor.shape);
                 ops::copy(d.data, prod(tensor.shape), data<float>(out));
                 return out;
 
-            } else if constexpr (std::is_same_v<std::decay_t<decltype(d)>, _data::Flat<bf16>>) {
+            } else if constexpr (std::is_same_v<Data, _data::Flat<bf16>>) {
                 auto out = empty<bf16>(tensor.shape);
                 ops::copy(d.data, prod(tensor.shape), data<bf16>(out));
                 return out;
+
+            } else if constexpr (std::is_same_v<Data, _data::ChannelInt8>) {
+                auto dN = tensor.shape[0];
+                auto dK = tensor.shape[1];
+                auto scaleOffset = align(ulong(dN) * ulong(dK) * sizeof(int8_t));
+                auto buffer = Buffer(scaleOffset + ulong(dN) * sizeof(bf16));
+                auto* outData = reinterpret_cast<int8_t*>(buffer.get<char>());
+                auto* outScale = reinterpret_cast<bf16*>(buffer.get<char>() + scaleOffset);
+                std::copy_n(d.data, ulong(dN) * ulong(dK), outData);
+                std::copy_n(d.scale, dN, outScale);
+                return Tensor{
+                    {.data = _data::ChannelInt8(outData, outScale), .shape = tensor.shape},
+                    std::move(buffer)};
+
+            } else if constexpr (std::is_same_v<Data, _data::ChannelS3D8>) {
+                auto dN = tensor.shape[0];
+                auto dK = tensor.shape[1];
+                auto packedRows = (dN + 2u) / 3u;
+                auto lutOffset = align(ulong(packedRows) * ulong(dK) * sizeof(uint8_t));
+                auto scaleOffset = align(lutOffset + 3u * 64u * sizeof(int8_t));
+                auto buffer = Buffer(scaleOffset + ulong(dN) * sizeof(bf16));
+                auto* outData = reinterpret_cast<uint8_t*>(buffer.get<char>());
+                auto* outLut = reinterpret_cast<int8_t*>(buffer.get<char>() + lutOffset);
+                auto* outScale = reinterpret_cast<bf16*>(buffer.get<char>() + scaleOffset);
+                std::copy_n(d.data, ulong(packedRows) * ulong(dK), outData);
+                std::copy_n(d.lut, 3u * 64u, outLut);
+                std::copy_n(d.scale, dN, outScale);
+                return Tensor{
+                    {.data = _data::ChannelS3D8(outData, outLut, outScale), .shape = tensor.shape},
+                    std::move(buffer)};
 
             } else {
                 std::ostringstream err;
