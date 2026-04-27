@@ -259,8 +259,39 @@ REGISTER_BENCHMARK(_dot_inst_throughput)(const benchmarking::Report& report) {
                          }
                      }});
 
+    tests.push_back({"sdot",
+                     16 * 16,  // #instructions * 16 MACs per sdot (4*1x4x1)
+                     [innerReps]() {
+                         for (auto i = 0u; i < innerReps; ++i) {
+                             asm volatile(
+                                 "sdot v0.4s, v30.16b, v31.16b\n"
+                                 "sdot v1.4s, v30.16b, v31.16b\n"
+                                 "sdot v2.4s, v30.16b, v31.16b\n"
+                                 "sdot v3.4s, v30.16b, v31.16b\n"
+                                 //
+                                 "sdot v4.4s, v30.16b, v31.16b\n"
+                                 "sdot v5.4s, v30.16b, v31.16b\n"
+                                 "sdot v6.4s, v30.16b, v31.16b\n"
+                                 "sdot v7.4s, v30.16b, v31.16b\n"
+                                 //
+                                 "sdot v8.4s, v30.16b, v31.16b\n"
+                                 "sdot v9.4s, v30.16b, v31.16b\n"
+                                 "sdot v10.4s, v30.16b, v31.16b\n"
+                                 "sdot v11.4s, v30.16b, v31.16b\n"
+                                 //
+                                 "sdot v12.4s, v30.16b, v31.16b\n"
+                                 "sdot v13.4s, v30.16b, v31.16b\n"
+                                 "sdot v14.4s, v30.16b, v31.16b\n"
+                                 "sdot v15.4s, v30.16b, v31.16b\n"
+                                 :
+                                 :
+                                 : "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9",
+                                   "v10", "v11", "v12", "v13", "v14", "v15", "v30", "v31");
+                         }
+                     }});
+
     tests.push_back({"smmla",
-                     16 * 32,  // #instructions * 32 MACs per smmla (2x8 @ 8x2)
+                     16 * 32,  // #instructions * 32 MACs per smmla (1*2x8x2)
                      [innerReps]() {
                          for (auto i = 0u; i < innerReps; ++i) {
                              asm volatile(
