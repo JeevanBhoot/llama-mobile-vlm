@@ -1,5 +1,6 @@
 #include "benchmark/benchmark.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <numeric>
@@ -63,20 +64,27 @@ std::ostream& operator<<(std::ostream& out, const Report& report) {
     return out << report.name << ": ";
 }
 
-void Registry::run(const std::string& prefix, bool jsonOutput, uint repeat) {
+void Registry::run(const std::vector<std::string>& prefixes, bool jsonOutput, uint repeat) {
+    const auto matches = [&](const std::string& name) {
+        if (prefixes.empty()) {
+            return name.at(0) != '_';
+        }
+        return std::any_of(prefixes.begin(), prefixes.end(),
+                           [&](const std::string& prefix) { return name.find(prefix) == 0; });
+    };
+
     auto nRun = 0u;
     for (uint r = 0; r < repeat; ++r) {
         for (const auto& [name, fn] : instance().benchmarks) {
-            if ((prefix.empty() && name.at(0) != '_') ||
-                (!prefix.empty() && name.find(prefix) == 0)) {
+            if (matches(name)) {
                 std::cerr << "-- Running benchmark: " << name << "\n";
                 fn(Report{name, jsonOutput});
+                ++nRun;
             }
-            ++nRun;
         }
     }
     if (nRun == 0) {
-        std::cerr << "No benchmarks matched '" << prefix << "'\n";
+        std::cerr << "No benchmarks matched " << dump(prefixes) << "\n";
     }
 }
 
