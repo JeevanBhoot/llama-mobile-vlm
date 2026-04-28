@@ -26,7 +26,7 @@ struct ComputeAndTransferBenchmark {
         details["time"] = benchmark.times;
         report(details);
 
-        std::cerr << std::right << std::setw(45) << report << 1e3 * result.mean << " ms, "
+        std::cerr << std::right << std::setw(55) << report << 1e3 * result.mean << " ms, "
                   << gmacCount / result.mean << " GMAC/s, " << gibCount / result.mean << " GiB/s\n";
     }
 };
@@ -181,6 +181,54 @@ REGISTER_BENCHMARK(_tensor_matmulT_int8)(const benchmarking::Report& report) {
 REGISTER_BENCHMARK(_tensor_matmulT_s3d8)(const benchmarking::Report& report) {
     benchmarkMatmulT(report, "s3d8", randnChannelInt8Tensor, randnChannelS3D8Tensor,
                      0x24bec62971dd9ca1);
+}
+REGISTER_BENCHMARK(_tensor_matmulT_s3d8_as_int8)(const benchmarking::Report& report) {
+    selectOmpNumThreads();
+    auto seed = 0x90d8519062b091f7;
+    std::vector<std::tuple<uint, uint, uint, std::string>> cases = {
+        // Sizes for 11B (batchSize, dIn, dOut) == (dM, dK, dN)
+        {1, 4096, 14336, "text.generate.mlp.up"},     //
+        {1, 14336, 4096, "text.generate.mlp.down"},   //
+        {1, 4096, 4096, "text.generate.attn.[q,o]"},  //
+        {1, 4096, 1024, "text.generate.attn.[k,v]"},  //
+        {1, 4096, 128256, "text.generate.predict"},   //
+        //
+        {128, 4096, 14336, "text.prefill.mlp.up"},     //
+        {128, 14336, 4096, "text.prefill.mlp.down"},   //
+        {128, 4096, 4096, "text.prefill.attn.[q,o]"},  //
+        {128, 4096, 1024, "text.prefill.attn.[k,v]"},  //
+        //
+        {1601, 1280, 5120, "vision.mlp.up"},          //
+        {1601, 5120, 1280, "vision.mlp.down"},        //
+        {1601, 1280, 1280, "vision.attn.[q,k,v,o]"},  //
+    };
+    for (const auto& [batchSize, dIn, dOut, name] : cases) {
+        auto caseSeed = seed ^ std::hash<std::string>{}(name);
+        auto weight = randnChannelS3D8Tensor(dOut, dIn, caseSeed ^ 0x7a9dc59745b7b3db);
+        auto x = randnChannelInt8Tensor(batchSize, dIn, caseSeed ^ 0xe3e1ecf114d26aa1);
+
+        auto reps = 20u;
+        auto copies = reps;
+        auto weights = cloneN(weight, copies);
+        auto xs = cloneN(x, copies);
+        auto weightInt8 = castChannelInt8(weights[0]);
+
+        // Note that weightInt8 bytes are not counted, for fair comparison with other matmulT
+        // benchmarks (and because it may remain in cache)
+        ComputeAndTransferBenchmark benchmark{
+            .macCount = ulong(batchSize) * ulong(dIn) * ulong(dOut),
+            .byteCount =
+                countBytes(x) + countBytes(weight) + sizeof(bf16) * ulong(batchSize) * ulong(dOut),
+        };
+        for (auto i = 0u; i < reps; ++i) {
+            auto timer = benchmark.record();
+            castChannelInt8(weights[i % copies], weightInt8);
+            tensor::matmulT(xs[i % copies], weightInt8);
+        }
+        benchmark.dump(
+            report[name],
+            {{"batch_size", batchSize}, {"d_in", dIn}, {"d_out", dOut}, {"dtype", "s3d8/int8"}});
+    }
 }
 
 // ### S3D8 cast
