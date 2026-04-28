@@ -169,7 +169,7 @@ void benchmarkMatmulT(const benchmarking::Report& report,
         // auto reps = std::clamp(uint(1e12 / double(benchmark.macCount)), 20u, 2000u);
         // auto copies = std::min(reps, uint((1ull << 30) / double(benchmark.byteCount)));// ~1 GiB
         auto reps = 20u;
-        auto copies = double(benchmark.byteCount) > 100e6 ? 1u : reps;  // avoid OOM
+        auto copies = name == "text.generate.predict" ? 2u : reps;  // avoid OOM
         auto weights = cloneN(weight, copies);
         auto xs = cloneN(x, copies);
         for (auto i = 0u; i < reps; ++i) {
@@ -209,7 +209,7 @@ REGISTER_BENCHMARK(_tensor_matmulT_s3d8_as_int8)(const benchmarking::Report& rep
                 countBytes(x) + countBytes(weight) + sizeof(bf16) * ulong(batchSize) * ulong(dOut),
         };
         auto reps = 20u;
-        auto copies = double(benchmark.byteCount) > 100e6 ? 1u : reps;  // avoid OOM
+        auto copies = name == "text.generate.predict" ? 2u : reps;  // avoid OOM
         auto weights = cloneN(weight, copies);
         auto xs = cloneN(x, copies);
         auto weightInt8 = castChannelInt8(weights[0]);
@@ -257,7 +257,7 @@ REGISTER_BENCHMARK(_tensor_copy_int8)(const benchmarking::Report& report) {
         // Only count bytes read, not written, assuming writes stay in cache
         ComputeAndTransferBenchmark benchmark{.macCount = 0, .byteCount = countBytes(x)};
         auto reps = 20u;
-        auto copies = double(benchmark.byteCount) > 100e6 ? 1u : reps;  // avoid OOM
+        auto copies = name == "text.predict" ? 2u : reps;  // avoid OOM
         auto xs = cloneN(x, copies);
         auto y = clone(xs[0]);
         for (auto i = 0u; i < reps; ++i) {
@@ -278,7 +278,7 @@ REGISTER_BENCHMARK(_tensor_cast_s3d8)(const benchmarking::Report& report) {
         // Only count bytes read, not written, assuming writes stay in cache
         ComputeAndTransferBenchmark benchmark{.macCount = 0, .byteCount = countBytes(x)};
         auto reps = 20u;
-        auto copies = double(benchmark.byteCount) > 100e6 ? 1u : reps;  // avoid OOM
+        auto copies = name == "text.predict" ? 2u : reps;  // avoid OOM
         auto xs = cloneN(x, copies);
         auto y = castChannelInt8(xs[0]);
         for (auto i = 0u; i < reps; ++i) {
