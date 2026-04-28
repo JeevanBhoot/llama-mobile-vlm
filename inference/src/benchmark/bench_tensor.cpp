@@ -158,7 +158,7 @@ void benchmarkMatmulT(const benchmarking::Report& report,
         // auto reps = std::clamp(uint(1e12 / double(benchmark.macCount)), 20u, 2000u);
         // auto copies = std::min(reps, uint((1ull << 30) / double(benchmark.byteCount)));// ~1 GiB
         auto reps = 20u;
-        auto copies = reps;
+        auto copies = double(benchmark.byteCount) > 100e6 ? 1u : reps;  // avoid OOM
         auto weights = cloneN(weight, copies);
         auto xs = cloneN(x, copies);
         for (auto i = 0u; i < reps; ++i) {
@@ -207,12 +207,6 @@ REGISTER_BENCHMARK(_tensor_matmulT_s3d8_as_int8)(const benchmarking::Report& rep
         auto weight = randnChannelS3D8Tensor(dOut, dIn, caseSeed ^ 0x7a9dc59745b7b3db);
         auto x = randnChannelInt8Tensor(batchSize, dIn, caseSeed ^ 0xe3e1ecf114d26aa1);
 
-        auto reps = 20u;
-        auto copies = reps;
-        auto weights = cloneN(weight, copies);
-        auto xs = cloneN(x, copies);
-        auto weightInt8 = castChannelInt8(weights[0]);
-
         // Note that weightInt8 bytes are not counted, for fair comparison with other matmulT
         // benchmarks (and because it may remain in cache)
         ComputeAndTransferBenchmark benchmark{
@@ -220,6 +214,12 @@ REGISTER_BENCHMARK(_tensor_matmulT_s3d8_as_int8)(const benchmarking::Report& rep
             .byteCount =
                 countBytes(x) + countBytes(weight) + sizeof(bf16) * ulong(batchSize) * ulong(dOut),
         };
+        auto reps = 20u;
+        auto copies = double(benchmark.byteCount) > 100e6 ? 1u : reps;  // avoid OOM
+        auto weights = cloneN(weight, copies);
+        auto xs = cloneN(x, copies);
+        auto weightInt8 = castChannelInt8(weights[0]);
+
         for (auto i = 0u; i < reps; ++i) {
             auto timer = benchmark.record();
             castChannelInt8(weights[i % copies], weightInt8);
@@ -231,7 +231,7 @@ REGISTER_BENCHMARK(_tensor_matmulT_s3d8_as_int8)(const benchmarking::Report& rep
     }
 }
 
-// ### S3D8 cast
+// ### INT8 copy vs S3D8 cast
 
 REGISTER_BENCHMARK(_tensor_copy_int8)(const benchmarking::Report& report) {
     selectOmpNumThreads();
@@ -254,7 +254,7 @@ REGISTER_BENCHMARK(_tensor_copy_int8)(const benchmarking::Report& report) {
         // Only count bytes read, not written, assuming writes stay in cache
         ComputeAndTransferBenchmark benchmark{.macCount = 0, .byteCount = countBytes(x)};
         auto reps = 20u;
-        auto copies = reps;
+        auto copies = double(benchmark.byteCount) > 100e6 ? 1u : reps;  // avoid OOM
         auto xs = cloneN(x, copies);
         auto y = clone(xs[0]);
         for (auto i = 0u; i < reps; ++i) {
@@ -285,10 +285,8 @@ REGISTER_BENCHMARK(_tensor_cast_s3d8)(const benchmarking::Report& report) {
 
         // Only count bytes read, not written, assuming writes stay in cache
         ComputeAndTransferBenchmark benchmark{.macCount = 0, .byteCount = countBytes(x)};
-        // auto reps = std::clamp(uint(1e11 / double(benchmark.byteCount)), 20u, 2000u);
-        // auto copies = std::clamp(uint((1ull << 30) / double(benchmark.byteCount)), 1u, reps);
         auto reps = 20u;
-        auto copies = reps;
+        auto copies = double(benchmark.byteCount) > 100e6 ? 1u : reps;  // avoid OOM
         auto xs = cloneN(x, copies);
         auto y = castChannelInt8(xs[0]);
         for (auto i = 0u; i < reps; ++i) {

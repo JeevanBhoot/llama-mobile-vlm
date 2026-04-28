@@ -1,6 +1,7 @@
 #include "squash.hpp"
 
 #include <omp.h>
+#include <cstdlib>
 #include <sstream>
 #include <thread>
 #include "stb_image.h"
@@ -9,6 +10,9 @@
 namespace squash {
 
 void selectOmpNumThreads() {
+    if (std::getenv("OMP_NUM_THREADS") != nullptr) {
+        return;
+    }
     auto nthreads = std::thread::hardware_concurrency();
 #if defined(ANDROID) && defined(__aarch64__)
     // Assume BIG.little on Android/ARM, e.g. 9-core = 5 threads
