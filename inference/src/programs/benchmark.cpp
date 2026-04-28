@@ -7,9 +7,11 @@ int main(int argc, char** argv) {
     options.add_options()                                                                    //
         ("prefix", "Prefixes to select tests", cxxopts::value<strings>())                    //
         ("j,json", "Output JSON to stdout", cxxopts::value<bool>()->default_value("false"))  //
-        ("r,repeat", "Number of times to repeat each benchmark",
-         cxxopts::value<uint>()->default_value("1"))  //
-        ("help", "Print help")                        //
+        ("r,repeat", "Number of times to repeat each benchmark",                             //
+         cxxopts::value<uint>()->default_value("1"))                                         //
+        ("s,shuffle", "Shuffle benchmark and case order",                                    //
+         cxxopts::value<bool>()->default_value("false"))                                     //
+        ("help", "Print help")                                                               //
         ;
     options.parse_positional({"prefix"});
     options.positional_help("prefix...");
@@ -20,6 +22,6 @@ int main(int argc, char** argv) {
     }
     squash::benchmarking::Registry::run(
         args.count("prefix") ? args["prefix"].as<strings>() : strings{}, args["json"].as<bool>(),
-        args["repeat"].as<uint>());
+        args["repeat"].as<uint>(), args["shuffle"].as<bool>());
     return 0;
 }

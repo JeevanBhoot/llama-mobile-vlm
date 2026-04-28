@@ -39,6 +39,7 @@ std::ostream& operator<<(std::ostream&, const Benchmark::Measurement&);
 struct Report {
     std::string name;
     bool jsonOutput;
+    bool shuffle;
     Report operator[](const std::string& child) const;
     void operator()(nlohmann::json result) const;
     void operator()(nlohmann::json::initializer_list_t result) const;
@@ -49,7 +50,10 @@ struct Registry {
     using Fn = void (*)(const Report&);
     std::vector<std::tuple<std::string, Fn>> benchmarks;
 
-    static void run(const std::vector<std::string>& prefixes, bool jsonOutput, uint repeat = 1);
+    static void run(const std::vector<std::string>& prefixes,
+                    bool jsonOutput,
+                    uint repeat,
+                    bool shuffle);
     struct Register {
         Register(const std::string& name, Fn fn);
     };

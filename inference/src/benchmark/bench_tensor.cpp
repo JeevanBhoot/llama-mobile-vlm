@@ -2,6 +2,8 @@
 #include "core/tensor.hpp"
 
 #include <omp.h>
+#include <algorithm>
+#include <random>
 
 using namespace squash;
 
@@ -121,13 +123,7 @@ tensor::Tensor randnChannelS3D8Tensor(uint dOut, uint dIn, ulong seed) {
         std::move(buffer)};
 }
 
-template <class MakeInput, class MakeWeight>
-void benchmarkMatmulT(const benchmarking::Report& report,
-                      const std::string& dtype,
-                      MakeInput&& makeInput,
-                      MakeWeight&& makeWeight,
-                      ulong seed) {
-    selectOmpNumThreads();
+std::vector<std::tuple<uint, uint, uint, std::string>> getMatmulTCases(bool shuffle) {
     std::vector<std::tuple<uint, uint, uint, std::string>> cases = {
         // Sizes for 11B (batchSize, dIn, dOut) == (dM, dK, dN)
         {1, 4096, 14336, "text.generate.mlp.up"},     //
@@ -145,7 +141,22 @@ void benchmarkMatmulT(const benchmarking::Report& report,
         {1601, 5120, 1280, "vision.mlp.down"},        //
         {1601, 1280, 1280, "vision.attn.[q,k,v,o]"},  //
     };
-    for (const auto& [batchSize, dIn, dOut, name] : cases) {
+    if (shuffle) {
+        std::random_device randomDevice;
+        std::mt19937_64 rng(randomDevice());
+        std::shuffle(cases.begin(), cases.end(), rng);
+    }
+    return cases;
+}
+
+template <class MakeInput, class MakeWeight>
+void benchmarkMatmulT(const benchmarking::Report& report,
+                      const std::string& dtype,
+                      MakeInput&& makeInput,
+                      MakeWeight&& makeWeight,
+                      ulong seed) {
+    selectOmpNumThreads();
+    for (const auto& [batchSize, dIn, dOut, name] : getMatmulTCases(report.shuffle)) {
         auto caseSeed = seed ^ std::hash<std::string>{}(name);
         auto weight = makeWeight(dOut, dIn, caseSeed ^ 0x7a9dc59745b7b3db);
         auto x = makeInput(batchSize, dIn, caseSeed ^ 0xe3e1ecf114d26aa1);
@@ -185,24 +196,7 @@ REGISTER_BENCHMARK(_tensor_matmulT_s3d8)(const benchmarking::Report& report) {
 REGISTER_BENCHMARK(_tensor_matmulT_s3d8_as_int8)(const benchmarking::Report& report) {
     selectOmpNumThreads();
     auto seed = 0x90d8519062b091f7;
-    std::vector<std::tuple<uint, uint, uint, std::string>> cases = {
-        // Sizes for 11B (batchSize, dIn, dOut) == (dM, dK, dN)
-        {1, 4096, 14336, "text.generate.mlp.up"},     //
-        {1, 14336, 4096, "text.generate.mlp.down"},   //
-        {1, 4096, 4096, "text.generate.attn.[q,o]"},  //
-        {1, 4096, 1024, "text.generate.attn.[k,v]"},  //
-        {1, 4096, 128256, "text.generate.predict"},   //
-        //
-        {128, 4096, 14336, "text.prefill.mlp.up"},     //
-        {128, 14336, 4096, "text.prefill.mlp.down"},   //
-        {128, 4096, 4096, "text.prefill.attn.[q,o]"},  //
-        {128, 4096, 1024, "text.prefill.attn.[k,v]"},  //
-        //
-        {1601, 1280, 5120, "vision.mlp.up"},          //
-        {1601, 5120, 1280, "vision.mlp.down"},        //
-        {1601, 1280, 1280, "vision.attn.[q,k,v,o]"},  //
-    };
-    for (const auto& [batchSize, dIn, dOut, name] : cases) {
+    for (const auto& [batchSize, dIn, dOut, name] : getMatmulTCases(report.shuffle)) {
         auto caseSeed = seed ^ std::hash<std::string>{}(name);
         auto weight = randnChannelS3D8Tensor(dOut, dIn, caseSeed ^ 0x7a9dc59745b7b3db);
         auto x = randnChannelInt8Tensor(batchSize, dIn, caseSeed ^ 0xe3e1ecf114d26aa1);
@@ -233,9 +227,7 @@ REGISTER_BENCHMARK(_tensor_matmulT_s3d8_as_int8)(const benchmarking::Report& rep
 
 // ### INT8 copy vs S3D8 cast
 
-REGISTER_BENCHMARK(_tensor_copy_int8)(const benchmarking::Report& report) {
-    selectOmpNumThreads();
-    auto seed = 0xf71d3ef9d9ca8c44;
+std::vector<std::tuple<uint, uint, std::string>> getCopyCases(bool shuffle) {
     std::vector<std::tuple<uint, uint, std::string>> cases = {
         {14336, 4096, "text.mlp.up"},     //
         {4096, 14336, "text.mlp.down"},   //
@@ -247,7 +239,18 @@ REGISTER_BENCHMARK(_tensor_copy_int8)(const benchmarking::Report& report) {
         {1280, 5120, "vision.mlp.down"},        //
         {1280, 1280, "vision.attn.[q,k,v,o]"},  //
     };
-    for (const auto& [dOut, dIn, name] : cases) {
+    if (shuffle) {
+        std::random_device randomDevice;
+        std::mt19937_64 rng(randomDevice());
+        std::shuffle(cases.begin(), cases.end(), rng);
+    }
+    return cases;
+}
+
+REGISTER_BENCHMARK(_tensor_copy_int8)(const benchmarking::Report& report) {
+    selectOmpNumThreads();
+    auto seed = 0xf71d3ef9d9ca8c44;
+    for (const auto& [dOut, dIn, name] : getCopyCases(report.shuffle)) {
         auto caseSeed = seed ^ std::hash<std::string>{}(name);
         auto x = randnChannelInt8Tensor(dOut, dIn, caseSeed ^ 0x6b54f7b87a3d11d9);
 
@@ -268,18 +271,7 @@ REGISTER_BENCHMARK(_tensor_copy_int8)(const benchmarking::Report& report) {
 REGISTER_BENCHMARK(_tensor_cast_s3d8)(const benchmarking::Report& report) {
     selectOmpNumThreads();
     auto seed = 0x93d0f16f8d5c13aa;
-    std::vector<std::tuple<uint, uint, std::string>> cases = {
-        {14336, 4096, "text.mlp.up"},     //
-        {4096, 14336, "text.mlp.down"},   //
-        {4096, 4096, "text.attn.[q,o]"},  //
-        {1024, 4096, "text.attn.[k,v]"},  //
-        {128256, 4096, "text.predict"},   //
-        //
-        {5120, 1280, "vision.mlp.up"},          //
-        {1280, 5120, "vision.mlp.down"},        //
-        {1280, 1280, "vision.attn.[q,k,v,o]"},  //
-    };
-    for (const auto& [dOut, dIn, name] : cases) {
+    for (const auto& [dOut, dIn, name] : getCopyCases(report.shuffle)) {
         auto caseSeed = seed ^ std::hash<std::string>{}(name);
         auto x = randnChannelS3D8Tensor(dOut, dIn, caseSeed ^ 0x6b54f7b87a3d11d9);
 
