@@ -47,9 +47,10 @@ REGISTER_BENCHMARK(_tensor_copy)(const benchmarking::Report& report) {
     const size_t nelement = (1ull << 30) / (2 * sizeof(bf16));  // ~1 GiB (R+W)
     auto x = tensor::randn({nelement}, 1.0f, 0x6ab49512d9d3de72);
     auto y = tensor::clone(x);
+    auto reps = 20u;
 
     ComputeAndTransferBenchmark benchmark{.macCount = 0, .byteCount = 2 * sizeof(bf16) * nelement};
-    for (auto rep = 0u; rep < 10u; ++rep) {
+    for (auto rep = 0u; rep < reps; ++rep) {
         auto timer = benchmark.record();
         tensor::assign(y, x);
     }
@@ -154,8 +155,10 @@ void benchmarkMatmulT(const benchmarking::Report& report,
             .byteCount =
                 countBytes(x) + countBytes(weight) + sizeof(bf16) * ulong(batchSize) * ulong(dOut),
         };
-        auto reps = std::clamp(uint(1e12 / double(benchmark.macCount)), 20u, 2000u);
-        auto copies = std::min(reps, uint((1ull << 30) / double(benchmark.byteCount)));  // ~1 GiB
+        // auto reps = std::clamp(uint(1e12 / double(benchmark.macCount)), 20u, 2000u);
+        // auto copies = std::min(reps, uint((1ull << 30) / double(benchmark.byteCount)));// ~1 GiB
+        auto reps = 20u;
+        auto copies = reps;
         auto weights = cloneN(weight, copies);
         auto xs = cloneN(x, copies);
         for (auto i = 0u; i < reps; ++i) {
@@ -202,8 +205,10 @@ REGISTER_BENCHMARK(_tensor_cast_s3d8)(const benchmarking::Report& report) {
 
         // Only count bytes read, not written, assuming writes stay in cache
         ComputeAndTransferBenchmark benchmark{.macCount = 0, .byteCount = countBytes(x)};
-        auto reps = std::clamp(uint(1e11 / double(benchmark.byteCount)), 20u, 2000u);
-        auto copies = std::clamp(uint((1ull << 30) / double(benchmark.byteCount)), 1u, reps);
+        // auto reps = std::clamp(uint(1e11 / double(benchmark.byteCount)), 20u, 2000u);
+        // auto copies = std::clamp(uint((1ull << 30) / double(benchmark.byteCount)), 1u, reps);
+        auto reps = 20u;
+        auto copies = reps;
         auto xs = cloneN(x, copies);
         auto y = castChannelInt8(xs[0]);
         for (auto i = 0u; i < reps; ++i) {
