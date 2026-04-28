@@ -50,7 +50,7 @@ def _run_on_device(command: Iterable[Any], env: dict[str, str]) -> None:
     program, *args = command
     program = _push_to_device(Path(program))
     env = {"LD_LIBRARY_PATH": program.parent, **env}
-    taskset_str = ""
+    taskset_str = "taskset 1f0"  # prime and performance cores only
 
     # benchmark stability improvement
     if os.environ.get("ANDROID_SINGLE_THREAD") == "1":
