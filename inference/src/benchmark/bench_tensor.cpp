@@ -233,6 +233,38 @@ REGISTER_BENCHMARK(_tensor_matmulT_s3d8_as_int8)(const benchmarking::Report& rep
 
 // ### S3D8 cast
 
+REGISTER_BENCHMARK(_tensor_copy_int8)(const benchmarking::Report& report) {
+    selectOmpNumThreads();
+    auto seed = 0xf71d3ef9d9ca8c44;
+    std::vector<std::tuple<uint, uint, std::string>> cases = {
+        {14336, 4096, "text.mlp.up"},     //
+        {4096, 14336, "text.mlp.down"},   //
+        {4096, 4096, "text.attn.[q,o]"},  //
+        {1024, 4096, "text.attn.[k,v]"},  //
+        {128256, 4096, "text.predict"},   //
+        //
+        {5120, 1280, "vision.mlp.up"},          //
+        {1280, 5120, "vision.mlp.down"},        //
+        {1280, 1280, "vision.attn.[q,k,v,o]"},  //
+    };
+    for (const auto& [dOut, dIn, name] : cases) {
+        auto caseSeed = seed ^ std::hash<std::string>{}(name);
+        auto x = randnChannelInt8Tensor(dOut, dIn, caseSeed ^ 0x6b54f7b87a3d11d9);
+
+        // Only count bytes read, not written, assuming writes stay in cache
+        ComputeAndTransferBenchmark benchmark{.macCount = 0, .byteCount = countBytes(x)};
+        auto reps = 20u;
+        auto copies = reps;
+        auto xs = cloneN(x, copies);
+        auto y = clone(xs[0]);
+        for (auto i = 0u; i < reps; ++i) {
+            auto timer = benchmark.record();
+            castChannelInt8(xs[i % copies], y);
+        }
+        benchmark.dump(report[name], {{"d_in", dIn}, {"d_out", dOut}, {"dtype", "int8"}});
+    }
+}
+
 REGISTER_BENCHMARK(_tensor_cast_s3d8)(const benchmarking::Report& report) {
     selectOmpNumThreads();
     auto seed = 0x93d0f16f8d5c13aa;

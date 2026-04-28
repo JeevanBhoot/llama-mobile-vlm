@@ -48,6 +48,19 @@ void copy(const bf16* src, uint n, bf16* dest) {
     }
 }
 
+void copy(const int8_t* src_data,
+          const bf16* src_scale,
+          uint dN,
+          uint dK,
+          int8_t* dest_data,
+          bf16* dest_scale) {
+#pragma omp parallel for
+    for (auto n = 0u; n < dN; ++n) {
+        std::copy_n(src_data + n * dK, dK, dest_data + n * dK);
+        dest_scale[n] = src_scale[n];
+    }
+}
+
 void copyStrided(const bf16* src, uint n, uint d, uint sSrc, uint sDest, bf16* dest) {
     for (uint i = 0; i < n; ++i) {
         for (uint j = 0; j < d; ++j) {

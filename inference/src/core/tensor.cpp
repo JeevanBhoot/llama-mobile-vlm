@@ -470,8 +470,8 @@ void castChannelInt8(const TensorV& tensor, const TensorV& out) {
     auto outData = std::get<_data::ChannelInt8>(out.data);
     if (std::holds_alternative<_data::ChannelInt8>(tensor.data)) {
         auto data = std::get<_data::ChannelInt8>(tensor.data);
-        std::copy_n(data.data, prod(tensor.shape), outData.data);
-        std::copy_n(data.scale, tensor.shape[0], outData.scale);
+        ops::copy(data.data, data.scale, tensor.shape[0], tensor.shape[1], outData.data,
+                  outData.scale);
     } else if (std::holds_alternative<_data::Flat<float>>(tensor.data)) {
         castChannelInt8(castBf16(tensor), out);
     } else if (std::holds_alternative<_data::Flat<bf16>>(tensor.data)) {

@@ -9,6 +9,12 @@ namespace squash::ops {
 
 void copy(const float* src, uint n, float* dest);
 void copy(const bf16* src, uint n, bf16* dest);
+void copy(const int8_t* src_data,
+          const bf16* src_scale,
+          uint dN,
+          uint dK,
+          int8_t* dest_data,
+          bf16* dest_scale);
 // Copies dest[i*sDest + j] = src[i*sSrc + j], for i in [0, n), j in [0, d)
 void copyStrided(const bf16* src, uint n, uint d, uint sSrc, uint sDest, bf16* dest);
 
