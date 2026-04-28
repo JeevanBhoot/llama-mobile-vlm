@@ -50,10 +50,12 @@ def _run_on_device(command: Iterable[Any], env: dict[str, str]) -> None:
     program, *args = command
     program = _push_to_device(Path(program))
     env = {"LD_LIBRARY_PATH": program.parent, **env}
+    taskset_str = ""
 
-    # stability improvements
-    taskset_str = "taskset 100"  # run on prime core only
-    env["OMP_NUM_THREADS"] = "1"
+    # benchmark stability improvement
+    if os.environ.get("ANDROID_SINGLE_THREAD") == "1":
+        taskset_str = "taskset 100"  # run on prime core only
+        env["OMP_NUM_THREADS"] = "1"
 
     args_str = " ".join(str(arg) for arg in args if arg is not None)
     env_str = " ".join(f"{k}={v}" for k, v in env.items())
