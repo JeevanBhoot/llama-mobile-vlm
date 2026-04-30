@@ -42,6 +42,13 @@ std::vector<tensor::Tensor> cloneN(const tensor::Tensor& tensor, uint n) {
     return clones;
 }
 
+ulong mixSeed(ulong seed, ulong index) {
+    auto mixed = seed + 0x9e3779b97f4a7c15ull * (index + 1);
+    mixed = (mixed ^ (mixed >> 30)) * 0xbf58476d1ce4e5b9ull;
+    mixed = (mixed ^ (mixed >> 27)) * 0x94d049bb133111ebull;
+    return mixed ^ (mixed >> 31);
+}
+
 REGISTER_BENCHMARK(_tensor_copy)(const benchmarking::Report& report) {
     selectOmpNumThreads();
 
@@ -69,16 +76,16 @@ tensor::Tensor randnChannelInt8Tensor(uint dOut, uint dIn, ulong seed) {
     const auto scaleOffset = tensor::align(ulong(dOut) * ulong(dIn) * sizeof(int8_t));
     auto buffer = tensor::Buffer(scaleOffset + sizeof(bf16) * ulong(dOut));
 
-    std::mt19937_64 rng(seed);
-    std::uniform_int_distribution<int8_t> valueDist(-128, 127);
-    std::uniform_real_distribution<float> uniformDist(0.0f, 1.0f);
     auto* data = reinterpret_cast<int8_t*>(buffer.get<char>());
     auto* scale = reinterpret_cast<bf16*>(buffer.get<char>() + scaleOffset);
 #pragma omp parallel for
     for (auto n = 0u; n < dOut; ++n) {
+        auto rng = std::mt19937_64(mixSeed(seed, n));
+        std::uniform_int_distribution<int> valueDist(-128, 127);
+        std::uniform_real_distribution<float> uniformDist(0.0f, 1.0f);
         scale[n] = bf16(0.02f + 0.3f * uniformDist(rng));
         for (auto k = 0u; k < dIn; ++k) {
-            data[n * dIn + k] = valueDist(rng);
+            data[n * dIn + k] = static_cast<int8_t>(valueDist(rng));
         }
     }
     return tensor::Tensor{{.data = tensor::_data::ChannelInt8(data, scale), .shape = {dOut, dIn}},
@@ -97,9 +104,6 @@ tensor::Tensor randnChannelS3D8Tensor(uint dOut, uint dIn, ulong seed) {
 
     std::mt19937_64 rng(seed);
     std::uniform_int_distribution<int8_t> centroidDist(-128, 127);
-    std::uniform_int_distribution<int> indexDist(0, 31);
-    std::uniform_int_distribution<int8_t> signDist(0, 1);
-    std::uniform_real_distribution<float> uniformDist(0.0f, 1.0f);
     std::vector<int8_t> centroids(32u * 3u);
     for (auto& centroid : centroids) {
         centroid = centroidDist(rng);
@@ -107,16 +111,21 @@ tensor::Tensor randnChannelS3D8Tensor(uint dOut, uint dIn, ulong seed) {
     tensor::_data::ChannelS3D8::expandLut(centroids.data(), lut);
 #pragma omp parallel for
     for (auto row = 0u; row < packedRows; ++row) {
+        auto rowRng = std::mt19937_64(mixSeed(seed ^ 0x8e4d89b9c4d59223ull, row));
+        std::uniform_int_distribution<int> indexDist(0, 31);
+        std::uniform_int_distribution<int> signDist(0, 1);
         for (auto k = 0u; k < dIn; ++k) {
-            auto idx = indexDist(rng);
-            auto sign0 = signDist(rng), sign1 = signDist(rng), sign2 = signDist(rng);
+            auto idx = indexDist(rowRng);
+            auto sign0 = signDist(rowRng), sign1 = signDist(rowRng), sign2 = signDist(rowRng);
             data[row * dIn + k] =
                 static_cast<uint8_t>((idx << 1) | sign0 | (sign1 << 6) | ((sign0 ^ sign2) << 7));
         }
     }
 #pragma omp parallel for
     for (auto n = 0u; n < dOut; ++n) {
-        scale[n] = bf16(0.02f + 0.3f * uniformDist(rng));
+        auto scaleRng = std::mt19937_64(mixSeed(seed ^ 0xf6eb2f2f84f067a7ull, n));
+        std::uniform_real_distribution<float> uniformDist(0.0f, 1.0f);
+        scale[n] = bf16(0.02f + 0.3f * uniformDist(scaleRng));
     }
     return tensor::Tensor{
         {.data = tensor::_data::ChannelS3D8(data, lut, scale), .shape = {dOut, dIn}},
