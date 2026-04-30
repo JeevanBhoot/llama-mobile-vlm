@@ -2,6 +2,8 @@
 #include <fstream>
 #include <iostream>
 
+#include <json.hpp>
+
 #include "lib/squash.hpp"
 
 int main(int argc, char** argv) {
@@ -9,7 +11,9 @@ int main(int argc, char** argv) {
     options.add_options()                                                      //
         ("model_file", "Model to load (.sqt)", cxxopts::value<std::string>())  //
         ("image", "Image file", cxxopts::value<std::string>())                 //
-        ("help", "Print help")                                                 //
+        ("benchmark", "Save benchmark timings to cli.benchmark.jsonl",
+         cxxopts::value<bool>()->default_value("false"))  //
+        ("help", "Print help")                            //
         ("g,max_generated_tokens", "Maximum number of generated tokens",
          cxxopts::value<uint>()->default_value("16"))                                           //
         ("t,temperature", "Sampling temperature", cxxopts::value<float>()->default_value("0"))  //
@@ -38,6 +42,10 @@ int main(int argc, char** argv) {
     }
 
     std::string prompt;
+    std::ofstream benchmarkJsonl;
+    if (args["benchmark"].as<bool>()) {
+        benchmarkJsonl.open("cli.benchmark.jsonl");
+    }
     squash::Generator::Options generatorOptions{
         .maxGeneratedTokens = args["max_generated_tokens"].as<uint>(),
         .seed = std::nullopt,
@@ -49,21 +57,33 @@ int main(int argc, char** argv) {
         timer = squash::Timer();
         auto prefillOut = generator.prefill(prompt, image, generatorOptions);
         std::cout << prefillOut.back();
-        auto prefillRate = double(prefillOut.size()) / timer.elapsed();
+        auto prefillTime = timer.elapsed();
+        if (benchmarkJsonl.is_open()) {
+            benchmarkJsonl << nlohmann::json{{"tokens", prefillOut.size()},
+                                             {"image", image.has_value()},
+                                             {"time", prefillTime}}
+                                  .dump()
+                           << '\n';
+        }
         timer = squash::Timer();
         auto step = 0u;
         while (true) {
-            auto next = generator.generate();
-            std::cout << next << std::flush;
             ++step;
+            auto stepTimer = squash::Timer();
+            auto next = generator.generate();
+            auto stepTime = stepTimer.elapsed();
+            std::cout << next << std::flush;
             if (next.empty()) {
                 break;
+            }
+            if (benchmarkJsonl.is_open()) {
+                benchmarkJsonl << nlohmann::json{{"tokens", 1}, {"time", stepTime}}.dump() << '\n';
             }
         }
         std::cout << "\n";
         auto generateRate = step / timer.elapsed();
-        std::cerr << "-- Prefill " << prefillRate << " tok/s; Generate " << generateRate
-                  << " tok/s\n\n";
+        std::cerr << "-- Prefill (" << prefillOut.size() << " tok) " << prefillTime
+                  << " s; Generate " << generateRate << " tok/s\n\n";
     }
     return 0;
 }

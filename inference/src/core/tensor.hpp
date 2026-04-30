@@ -34,11 +34,28 @@ struct Flat {
     T* data;
     Flat(T* data = nullptr) : data(data) {}
 };
+
+struct ChannelInt8 {
+    int8_t* data;  // {dN, dK}
+    bf16* scale;   // {dN}
+    ChannelInt8(int8_t* data, bf16* scale) : data(data), scale(scale) {}
+};
+
+struct ChannelS3D8 {
+    uint8_t* data;  // {dN, dK}
+    int8_t* lut;    // {3, 64}
+    bf16* scale;    // {dN}
+    ChannelS3D8(uint8_t* data, int8_t* lut, bf16* scale) : data(data), lut(lut), scale(scale) {}
+
+    // src {32, 3}, dest {3, 64}
+    static void expandLut(const int8_t* src, int8_t* dest);
+};
 }  // namespace _data
 
 // A non-owning Tensor view
 struct TensorV {
-    using DataT = std::variant<_data::Flat<bf16>, _data::Flat<float>>;
+    using DataT =
+        std::variant<_data::Flat<bf16>, _data::Flat<float>, _data::ChannelInt8, _data::ChannelS3D8>;
     DataT data;
     Shape shape;
 };
@@ -49,6 +66,8 @@ struct Tensor : TensorV {
 };
 
 uint prod(const Shape&);
+ulong align(ulong offset, ulong alignment = DefaultAlignment);
+ulong countBytes(const TensorV& tensor);
 std::ostream& operator<<(std::ostream&, const Shape&);
 std::ostream& operator<<(std::ostream&, const TensorV&);
 void saveNpy(std::ostream&, const TensorV&);
@@ -83,6 +102,8 @@ Tensor clone(const TensorV& tensor);
 void assign(const TensorV& tensor, const TensorV& src);
 Tensor castFloat(const TensorV& tensor);
 Tensor castBf16(const TensorV& tensor);
+void castChannelInt8(const TensorV& tensor, const TensorV& out);
+Tensor castChannelInt8(const TensorV& tensor);
 Tensor concat(const std::vector<TensorV>& tensors, uint dim);
 Tensor tile(const TensorV& tensor, const std::vector<uint>& reps);
 
@@ -95,9 +116,9 @@ Tensor rmsNorm(const TensorV& weight, const TensorV& x, float epsilon);
 Tensor layerNorm(const TensorV& weight, const TensorV& bias, const TensorV& x, float epsilon);
 Tensor embeddingLookup(const TensorV& weight, const std::vector<uint>& tokens);
 
-// weight :: (dOut, dIn)
 // x      :: (batch, dIn)
-Tensor projection(const TensorV& weight, const TensorV& x);
+// weight :: (dOut, dIn)
+Tensor matmulT(const TensorV& x, const TensorV& weight);
 
 // tensor :: (dS, ..., dim)
 // freq   :: (dim/2)

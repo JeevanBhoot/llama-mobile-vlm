@@ -13,6 +13,31 @@ uint prod(const Shape& x) {
     return std::accumulate(x.begin(), x.end(), 1u, std::multiplies<uint>());
 }
 
+ulong align(ulong offset, ulong alignment) {
+    return alignment * ((offset + alignment - 1) / alignment);
+}
+
+ulong countBytes(const TensorV& tensor) {
+    return std::visit(
+        [&tensor](const auto& data) -> ulong {
+            using T = std::decay_t<decltype(data)>;
+            if constexpr (std::is_same_v<T, _data::Flat<float>>) {
+                return sizeof(float) * ulong(prod(tensor.shape));
+            } else if constexpr (std::is_same_v<T, _data::Flat<bf16>>) {
+                return sizeof(bf16) * ulong(prod(tensor.shape));
+            } else if constexpr (std::is_same_v<T, _data::ChannelInt8>) {
+                return sizeof(int8_t) * ulong(prod(tensor.shape)) +
+                       sizeof(bf16) * ulong(tensor.shape[0]);
+            } else if constexpr (std::is_same_v<T, _data::ChannelS3D8>) {
+                return sizeof(uint8_t) * ulong((tensor.shape[0] + 2) / 3) * ulong(tensor.shape[1]) +
+                       3u * 64u * sizeof(int8_t) + sizeof(bf16) * ulong(tensor.shape[0]);
+            } else {
+                return 0u;
+            }
+        },
+        tensor.data);
+}
+
 std::ostream& operator<<(std::ostream& out, const Shape& shape) {
     out << "(";
     for (size_t i = 0; i < shape.size(); i++) {
@@ -31,8 +56,7 @@ std::ostream& operator<<(std::ostream& out, const Shape& shape) {
 
 // Note: round up allocated size to a multiple of `alignment`, required on Android
 Buffer::Buffer(ulong size, ulong alignment)
-    : _data(reinterpret_cast<char*>(
-          std::aligned_alloc(alignment, (size + alignment - 1) / alignment * alignment))) {
+    : _data(reinterpret_cast<char*>(std::aligned_alloc(alignment, align(size, alignment)))) {
     if (!_data) {
         std::ostringstream err;
         err << "Buffer allocation failed, size: " << size << ", alignment: " << alignment;
@@ -66,6 +90,22 @@ Buffer Buffer::copy(ulong size, ulong alignment) const {
     Buffer result(size, alignment);
     std::copy(_data, _data + size, result._data);
     return result;
+}
+
+void _data::ChannelS3D8::expandLut(const int8_t* src, int8_t* dest) {
+    for (auto idx = 0u; idx < 32u; ++idx) {
+        int8_t v0 = src[idx * 3u + 0u];
+        dest[0u * 64u + 2u * idx + 0u] = v0;
+        dest[0u * 64u + 2u * idx + 1u] = int8_t(-v0);
+
+        int8_t v1 = src[idx * 3u + 1u];
+        dest[1u * 64u + idx] = v1;
+        dest[1u * 64u + 32u + idx] = int8_t(-v1);
+
+        int8_t v2 = src[idx * 3u + 2u];
+        dest[2u * 64u + 2u * idx + 0u] = v2;
+        dest[2u * 64u + 2u * idx + 1u] = int8_t(-v2);
+    }
 }
 
 /// Tensor ///
@@ -245,6 +285,10 @@ std::vector<uint> strides(const TensorV& tensor) {
 // Operations
 
 TensorV reshape(const TensorV& tensor, const Shape& shape) {
+    if (!((std::holds_alternative<_data::Flat<float>>(tensor.data) ||
+           std::holds_alternative<_data::Flat<bf16>>(tensor.data)))) {
+        throw std::invalid_argument("reshape requires Flat tensor data");
+    }
     if (prod(tensor.shape) != prod(shape)) {
         std::ostringstream msg;
         msg << "Cannot reshape " << tensor.shape << " to " << shape;
@@ -270,7 +314,15 @@ TensorV indexLeading(const TensorV& tensor, const std::vector<uint>& indices) {
         offset += stride[i] * indices[i];
     }
     auto data = std::visit(
-        [offset](auto& d) { return TensorV::DataT(std::decay_t<decltype(d)>(d.data + offset)); },
+        [offset](auto& d) -> TensorV::DataT {
+            using T = std::decay_t<decltype(d)>;
+            if constexpr (std::is_same_v<T, _data::ChannelInt8> ||
+                          std::is_same_v<T, _data::ChannelS3D8>) {
+                throw std::invalid_argument("indexLeading does not support quantized tensors");
+            } else {
+                return T(d.data + offset);
+            }
+        },
         tensor.data);
     return TensorV{
         data, {tensor.shape.begin() + static_cast<ptrdiff_t>(indices.size()), tensor.shape.end()}};
@@ -285,7 +337,15 @@ TensorV slice0(const TensorV& tensor, uint start, uint end) {
     }
     auto offset = start * (prod(tensor.shape) / tensor.shape[0]);
     auto data = std::visit(
-        [offset](auto& d) { return TensorV::DataT(std::decay_t<decltype(d)>(d.data + offset)); },
+        [offset](auto& d) -> TensorV::DataT {
+            using T = std::decay_t<decltype(d)>;
+            if constexpr (std::is_same_v<T, _data::ChannelInt8> ||
+                          std::is_same_v<T, _data::ChannelS3D8>) {
+                throw std::invalid_argument("slice0 does not support quantized tensors");
+            } else {
+                return T(d.data + offset);
+            }
+        },
         tensor.data);
     auto shape = tensor.shape;
     shape[0] = end - start;
@@ -293,6 +353,10 @@ TensorV slice0(const TensorV& tensor, uint start, uint end) {
 }
 
 TensorV unsqueeze(const TensorV& tensor, const std::vector<uint>& indices) {
+    if (!((std::holds_alternative<_data::Flat<float>>(tensor.data) ||
+           std::holds_alternative<_data::Flat<bf16>>(tensor.data)))) {
+        throw std::invalid_argument("unsqueeze requires Flat tensor data");
+    }
     auto shape = tensor.shape;
     for (auto i : indices) {
         shape.insert(shape.begin() + i, 1u);
@@ -308,16 +372,47 @@ Tensor randn(Shape shape, float stddev, ulong seed) {
 
 Tensor clone(const TensorV& tensor) {
     return std::visit(
-        [&](auto& d) {
-            if constexpr (std::is_same_v<std::decay_t<decltype(d)>, _data::Flat<float>>) {
+        [&](auto& d) -> Tensor {
+            using Data = std::decay_t<decltype(d)>;
+            if constexpr (std::is_same_v<Data, _data::Flat<float>>) {
                 auto out = empty<float>(tensor.shape);
                 ops::copy(d.data, prod(tensor.shape), data<float>(out));
                 return out;
 
-            } else if constexpr (std::is_same_v<std::decay_t<decltype(d)>, _data::Flat<bf16>>) {
+            } else if constexpr (std::is_same_v<Data, _data::Flat<bf16>>) {
                 auto out = empty<bf16>(tensor.shape);
                 ops::copy(d.data, prod(tensor.shape), data<bf16>(out));
                 return out;
+
+            } else if constexpr (std::is_same_v<Data, _data::ChannelInt8>) {
+                auto dN = tensor.shape[0];
+                auto dK = tensor.shape[1];
+                auto scaleOffset = align(ulong(dN) * ulong(dK) * sizeof(int8_t));
+                auto buffer = Buffer(scaleOffset + ulong(dN) * sizeof(bf16));
+                auto* outData = reinterpret_cast<int8_t*>(buffer.get<char>());
+                auto* outScale = reinterpret_cast<bf16*>(buffer.get<char>() + scaleOffset);
+                std::copy_n(d.data, ulong(dN) * ulong(dK), outData);
+                std::copy_n(d.scale, dN, outScale);
+                return Tensor{
+                    {.data = _data::ChannelInt8(outData, outScale), .shape = tensor.shape},
+                    std::move(buffer)};
+
+            } else if constexpr (std::is_same_v<Data, _data::ChannelS3D8>) {
+                auto dN = tensor.shape[0];
+                auto dK = tensor.shape[1];
+                auto packedRows = (dN + 2u) / 3u;
+                auto lutOffset = align(ulong(packedRows) * ulong(dK) * sizeof(uint8_t));
+                auto scaleOffset = align(lutOffset + 3u * 64u * sizeof(int8_t));
+                auto buffer = Buffer(scaleOffset + ulong(dN) * sizeof(bf16));
+                auto* outData = reinterpret_cast<uint8_t*>(buffer.get<char>());
+                auto* outLut = reinterpret_cast<int8_t*>(buffer.get<char>() + lutOffset);
+                auto* outScale = reinterpret_cast<bf16*>(buffer.get<char>() + scaleOffset);
+                std::copy_n(d.data, ulong(packedRows) * ulong(dK), outData);
+                std::copy_n(d.lut, 3u * 64u, outLut);
+                std::copy_n(d.scale, dN, outScale);
+                return Tensor{
+                    {.data = _data::ChannelS3D8(outData, outLut, outScale), .shape = tensor.shape},
+                    std::move(buffer)};
 
             } else {
                 std::ostringstream err;
@@ -353,6 +448,58 @@ Tensor castBf16(const TensorV& tensor) {
     }
     auto out = empty<bf16>({tensor.shape.begin(), tensor.shape.end()});
     ops::castBf16(data<float>(tensor), data<bf16>(out), prod(out.shape));
+    return out;
+}
+
+void castChannelInt8(const TensorV& tensor, const TensorV& out) {
+    if (tensor.shape.size() != 2) {
+        std::ostringstream err;
+        err << "castChannelInt8: expected 2D tensor, tensor.shape: " << tensor.shape;
+        throw std::invalid_argument(err.str());
+    }
+    if (out.shape != tensor.shape) {
+        std::ostringstream err;
+        err << "castChannelInt8: output shape mismatch, out.shape: " << out.shape
+            << ", tensor.shape: " << tensor.shape;
+        throw std::invalid_argument(err.str());
+    }
+    if (!std::holds_alternative<_data::ChannelInt8>(out.data)) {
+        throw std::invalid_argument("castChannelInt8: output must have ChannelInt8 tensor data");
+    }
+
+    auto outData = std::get<_data::ChannelInt8>(out.data);
+    if (std::holds_alternative<_data::ChannelInt8>(tensor.data)) {
+        auto data = std::get<_data::ChannelInt8>(tensor.data);
+        ops::copy(data.data, data.scale, tensor.shape[0], tensor.shape[1], outData.data,
+                  outData.scale);
+    } else if (std::holds_alternative<_data::Flat<float>>(tensor.data)) {
+        castChannelInt8(castBf16(tensor), out);
+    } else if (std::holds_alternative<_data::Flat<bf16>>(tensor.data)) {
+        ops::castChannelInt8(data<bf16>(tensor), tensor.shape[0], tensor.shape[1], outData.data,
+                             outData.scale);
+    } else if (std::holds_alternative<_data::ChannelS3D8>(tensor.data)) {
+        auto data = std::get<_data::ChannelS3D8>(tensor.data);
+        ops::castChannelInt8(data.data, data.lut, data.scale, tensor.shape[0], tensor.shape[1],
+                             outData.data, outData.scale);
+    } else {
+        throw std::invalid_argument(
+            "castChannelInt8 requires float, bf16, ChannelInt8, or ChannelS3D8 tensor data");
+    }
+}
+
+Tensor castChannelInt8(const TensorV& tensor) {
+    if (tensor.shape.size() != 2) {
+        std::ostringstream err;
+        err << "castChannelInt8: expected 2D tensor, tensor.shape: " << tensor.shape;
+        throw std::invalid_argument(err.str());
+    }
+    auto scaleOffset = align(ulong(prod(tensor.shape)) * sizeof(int8_t));
+    auto buffer = Buffer(scaleOffset + ulong(tensor.shape[0]) * sizeof(bf16));
+    auto* outData = reinterpret_cast<int8_t*>(buffer.get<char>());
+    auto* outScale = reinterpret_cast<bf16*>(buffer.get<char>() + scaleOffset);
+    auto out = Tensor{{.data = _data::ChannelInt8(outData, outScale), .shape = tensor.shape},
+                      std::move(buffer)};
+    castChannelInt8(tensor, out);
     return out;
 }
 
@@ -481,21 +628,43 @@ Tensor embeddingLookup(const TensorV& weight, const std::vector<uint>& tokens) {
         throw std::invalid_argument(err.str());
     }
     auto out = empty<bf16>({uint(tokens.size()), weight.shape[1]});
-    ops::gather(data<bf16>(weight), tokens.data(), uint(tokens.size()), weight.shape[1],
-                data<bf16>(out));
+    if (std::holds_alternative<_data::ChannelInt8>(weight.data)) {
+        auto weight_ = std::get<_data::ChannelInt8>(weight.data);
+        ops::gather(weight_.data, weight_.scale, tokens.data(), uint(tokens.size()),
+                    weight.shape[1], data<bf16>(out));
+    } else if (std::holds_alternative<_data::ChannelS3D8>(weight.data)) {
+        auto weight_ = std::get<_data::ChannelS3D8>(weight.data);
+        ops::gather(weight_.data, weight_.lut, weight_.scale, tokens.data(), uint(tokens.size()),
+                    weight.shape[1], data<bf16>(out));
+    } else {
+        ops::gather(data<bf16>(weight), tokens.data(), uint(tokens.size()), weight.shape[1],
+                    data<bf16>(out));
+    }
     return out;
 }
 
-Tensor projection(const TensorV& weight, const TensorV& x) {
+Tensor matmulT(const TensorV& x, const TensorV& weight) {
     if (weight.shape.size() != 2 || x.shape.size() != 2 || weight.shape[1] != x.shape[1]) {
         std::ostringstream err;
-        err << "projection: bad shapes " << weight.shape << " and " << x.shape
+        err << "matmulT: bad shapes " << weight.shape << " and " << x.shape
             << ", expected (dOut, dIn) and (batch, dIn)";
         throw std::invalid_argument(err.str());
     }
     auto out = empty<bf16>({x.shape[0], weight.shape[0]});
-    ops::matmulT(data<bf16>(x), data<bf16>(weight), x.shape[0], x.shape[1], weight.shape[0],
-                 data<bf16>(out));
+    if (std::holds_alternative<_data::ChannelInt8>(weight.data)) {
+        auto x_ = std::get<_data::ChannelInt8>(x.data);
+        auto weight_ = std::get<_data::ChannelInt8>(weight.data);
+        ops::matmulT(x_.data, x_.scale, weight_.data, weight_.scale, x.shape[0], x.shape[1],
+                     weight.shape[0], data<bf16>(out));
+    } else if (std::holds_alternative<_data::ChannelS3D8>(weight.data)) {
+        auto x_ = std::get<_data::ChannelInt8>(x.data);
+        auto weight_ = std::get<_data::ChannelS3D8>(weight.data);
+        ops::matmulT(x_.data, x_.scale, weight_.data, weight_.lut, weight_.scale, x.shape[0],
+                     x.shape[1], weight.shape[0], data<bf16>(out));
+    } else {
+        ops::matmulT(data<bf16>(x), data<bf16>(weight), x.shape[0], x.shape[1], weight.shape[0],
+                     data<bf16>(out));
+    }
     return out;
 }
 

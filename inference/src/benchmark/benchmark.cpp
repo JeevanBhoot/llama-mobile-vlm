@@ -1,8 +1,10 @@
 #include "benchmark/benchmark.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <numeric>
+#include <random>
 
 namespace squash::benchmarking {
 
@@ -45,7 +47,7 @@ std::ostream& operator<<(std::ostream& out, const Benchmark::Measurement& m) {
 }
 
 Report Report::operator[](const std::string& child) const {
-    return {name + "." + child, jsonOutput};
+    return {name + "." + child, jsonOutput, shuffle};
 }
 
 void Report::operator()(nlohmann::json json) const {
@@ -63,20 +65,38 @@ std::ostream& operator<<(std::ostream& out, const Report& report) {
     return out << report.name << ": ";
 }
 
-void Registry::run(const std::string& prefix, bool jsonOutput, uint repeat) {
+void Registry::run(const std::vector<std::string>& prefixes,
+                   bool jsonOutput,
+                   uint repeat,
+                   bool shuffle) {
+    const auto matches = [&](const std::string& name) {
+        if (prefixes.empty()) {
+            return name.at(0) != '_';
+        }
+        return std::any_of(prefixes.begin(), prefixes.end(),
+                           [&](const std::string& prefix) { return name.find(prefix) == 0; });
+    };
+
+    std::vector<std::tuple<std::string, Fn>> benchmarks;
+    std::copy_if(instance().benchmarks.begin(), instance().benchmarks.end(),
+                 std::back_inserter(benchmarks),
+                 [&](const auto& item) { return matches(std::get<0>(item)); });
+
+    std::random_device randomDevice;
+    std::mt19937_64 rng(randomDevice());
     auto nRun = 0u;
     for (uint r = 0; r < repeat; ++r) {
-        for (const auto& [name, fn] : instance().benchmarks) {
-            if ((prefix.empty() && name.at(0) != '_') ||
-                (!prefix.empty() && name.find(prefix) == 0)) {
-                std::cerr << "-- Running benchmark: " << name << "\n";
-                fn(Report{name, jsonOutput});
-            }
+        if (shuffle) {
+            std::shuffle(benchmarks.begin(), benchmarks.end(), rng);
+        }
+        for (const auto& [name, fn] : benchmarks) {
+            std::cerr << "-- Running benchmark: " << name << "\n";
+            fn(Report{name, jsonOutput, shuffle});
             ++nRun;
         }
     }
     if (nRun == 0) {
-        std::cerr << "No benchmarks matched '" << prefix << "'\n";
+        std::cerr << "No benchmarks matched " << dump(prefixes) << "\n";
     }
 }
 

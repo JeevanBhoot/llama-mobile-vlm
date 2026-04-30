@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import os
 import platform as host_platform
+import re
 import shutil
 import subprocess
 import sys
@@ -45,21 +46,43 @@ def _push_to_device(src: Path) -> Path:
     return dest
 
 
+def _get_device_model() -> str | None:
+    """Return the adb-reported model name for the attached Android device."""
+    result = subprocess.run(
+        ["adb", "devices", "-l"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for line in result.stdout.splitlines():
+        if line.strip() and not line.startswith("List of devices attached"):
+            match = re.search(r"(?:^|\s)model:(\S+)", line)
+            return match.group(1) if match else None
+
+
 def _run_on_device(command: Iterable[Any], env: dict[str, str]) -> None:
     """Run on an attached Android device"""
     program, *args = command
     program = _push_to_device(Path(program))
-    args_str = " ".join(str(arg) for arg in args if arg is not None)
     env = {"LD_LIBRARY_PATH": program.parent, **env}
+
+    taskset_str = ""
+    device_model = _get_device_model()
+    if device_model == "Pixel_8a":
+        taskset_str = "taskset 1f0"  # prime and performance cores only
+    else:
+        print(
+            f'WARNING: adb device model is {device_model}, not "Pixel_8a"; running without taskset',
+            file=sys.stderr,
+        )
+    if os.environ.get("ANDROID_SINGLE_THREAD") == "1" and taskset_str:
+        taskset_str = "taskset 100"
+        env["OMP_NUM_THREADS"] = "1"
+
+    args_str = " ".join(str(arg) for arg in args if arg is not None)
     env_str = " ".join(f"{k}={v}" for k, v in env.items())
-    _run(
-        [
-            "adb",
-            "shell",
-            f"cd {program.parent} && env {env_str} ./{program.name} {args_str}",
-        ],
-        env=env,
-    )
+    cmd_str = f"cd {program.parent} && env {env_str} {taskset_str} ./{program.name} {args_str}"
+    _run(["adb", "shell", cmd_str], env=env)
 
 
 def _run_target(

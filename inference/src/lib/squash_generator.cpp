@@ -10,6 +10,14 @@ namespace squash {
 
 namespace {
 
+Tensor projection(const TensorV& weight, const TensorV& x) {
+    if (std::holds_alternative<_data::ChannelInt8>(weight.data) ||
+        std::holds_alternative<_data::ChannelS3D8>(weight.data)) {
+        return tensor::matmulT(castChannelInt8(x), weight);
+    }
+    return tensor::matmulT(x, weight);
+}
+
 // Layers
 
 Tensor attention(const TextModel& model,
