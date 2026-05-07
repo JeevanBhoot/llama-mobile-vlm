@@ -1,4 +1,5 @@
 import urllib
+import unittest.mock as um
 
 import PIL
 import pytest
@@ -9,6 +10,7 @@ from utility import (
     batches,
     distributed_batches,
     from_dict,
+    get_task_outputs,
     merge_params_mllama,
     set_padding_side_left,
 )
@@ -43,6 +45,34 @@ def test_distributed_batches() -> None:
         out[rank] = list(distributed_batches(items, batch_size, rank, world_size))
     assert out[0] == [[0, 1], [4, 5]]
     assert out[1] == [[2, 3], [6, 7]]
+
+
+def test_get_task_outputs(tmp_path) -> None:
+    artifact_dir = tmp_path / "artifact"
+    artifact_dir.mkdir()
+    (artifact_dir / "ai2d.jsonl").write_text(
+        '{"id": "1", "output": "A", "answers": ["A"], "accuracy": 1.0}\n'
+        '{"id": "2", "output": "B", "answers": ["C"], "accuracy": 0.0}\n'
+    )
+
+    artifact = um.Mock()
+    artifact.type = "task_outputs"
+    artifact.download.return_value = str(artifact_dir)
+    other_artifact = um.Mock()
+    other_artifact.type = "model"
+
+    run = um.Mock()
+    run.logged_artifacts.return_value = [other_artifact, artifact]
+    run.name = "test-run"
+    download_root = tmp_path / "downloads"
+
+    assert get_task_outputs(run, download_root=download_root) == {
+        "ai2d": [
+            {"id": "1", "output": "A", "answers": ["A"], "accuracy": 1.0},
+            {"id": "2", "output": "B", "answers": ["C"], "accuracy": 0.0},
+        ]
+    }
+    artifact.download.assert_called_once_with(root=str(download_root))
 
 
 @pytest.mark.skip(reason="Not used")

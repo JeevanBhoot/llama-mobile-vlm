@@ -1,12 +1,13 @@
 import copy
 import dataclasses
+import json
 import subprocess
 import tempfile
 import typing
 import unittest.mock as um
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, Iterable, Iterator, Optional, TypeVar
+from typing import Any, Callable, Iterable, Iterator, Optional, TypeVar
 
 import safetensors.torch
 import torch
@@ -26,6 +27,8 @@ LLAMA_PROMPT_TEMPLATES = dict(
     "<|start_header_id|>assistant<|end_header_id|>\n\n",
     simple="<|image|>{prompt}",
 )
+
+TASK_OUTPUT_ARTIFACT_TYPE = "task_outputs"
 
 
 def batches(
@@ -121,6 +124,39 @@ def merge_params_mllama(m: MllamaVisionModel) -> None:
 def check_s3_access() -> None:
     """Check that we have credentials for AWS S3 access."""
     subprocess.check_call(["aws", "s3", "ls", S3_REPO_PATH], stdout=subprocess.DEVNULL)
+
+
+def get_task_outputs(
+    run: Any,
+    download_root: str | Path | None = None,
+    artifact_type: str = TASK_OUTPUT_ARTIFACT_TYPE,
+) -> dict[str, list[dict[str, Any]]]:
+    """Download and load per-example task outputs logged by `train.py`.
+
+    Returns a dictionary mapping task names to the JSONL records logged for that
+    task. Each record contains at least `id`, `output`, `answers`, and the
+    task-specific metrics that were computed during evaluation.
+    """
+    artifacts = [a for a in run.logged_artifacts() if a.type == artifact_type]
+    if len(artifacts) != 1:
+        run_name = getattr(run, "name", "<unknown>")
+        raise ValueError(
+            f"Expected exactly one {artifact_type!r} artifact for run {run_name!r}, "
+            f"found {len(artifacts)}"
+        )
+
+    root = (
+        Path(download_root)
+        if download_root is not None
+        else Path(LOCAL_DATA_PATH).parent / "artifacts" / run.name / artifact_type
+    )
+    artifact_dir = Path(artifacts[0].download(root=str(root)))
+
+    out = {}
+    for path in artifact_dir.rglob("*.jsonl"):
+        with path.open() as f:
+            out[path.stem] = [json.loads(line) for line in f]
+    return out
 
 
 def get_unsharded_quantised_params(
