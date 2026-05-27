@@ -27,6 +27,45 @@ struct StringHolder {
     ~StringHolder() { env->ReleaseStringUTFChars(jdata, data); }
 };
 
+std::optional<squash::Image> imageFromDirectBuffer(JNIEnv* env,
+                                                   jint imageWidth,
+                                                   jint imageHeight,
+                                                   jobject imageData) {
+    if (imageData == nullptr) {
+        return std::nullopt;
+    }
+    if (imageWidth <= 0 || imageHeight <= 0) {
+        throw std::runtime_error("Image width and height must be positive when image data is set");
+    }
+
+    auto* buffer = reinterpret_cast<uint8_t*>(env->GetDirectBufferAddress(imageData));
+    auto capacity = env->GetDirectBufferCapacity(imageData);
+    if (buffer == nullptr || capacity < 0) {
+        throw std::runtime_error("Image data must be a direct ByteBuffer");
+    }
+
+    auto width = static_cast<size_t>(imageWidth);
+    auto height = static_cast<size_t>(imageHeight);
+    auto expectedSize = width * height * sizeof(uint32_t);
+    if (static_cast<uint64_t>(capacity) != expectedSize) {
+        std::ostringstream err;
+        err << "Image buffer has size " << capacity << ", expected " << expectedSize;
+        throw std::runtime_error(err.str());
+    }
+
+    auto* pixels = reinterpret_cast<uint32_t*>(buffer);
+    std::vector<uint8_t> rgb(width * height * 3);
+    for (auto i = size_t(0); i < width * height; ++i) {
+        auto pixel = pixels[i];
+        rgb[3 * i + 0] = static_cast<uint8_t>((pixel >> 16) & 0xff);
+        rgb[3 * i + 1] = static_cast<uint8_t>((pixel >> 8) & 0xff);
+        rgb[3 * i + 2] = static_cast<uint8_t>(pixel & 0xff);
+    }
+
+    return squash::Image(static_cast<uint>(imageHeight), static_cast<uint>(imageWidth),
+                         std::move(rgb));
+}
+
 template <class T, class F>
 T errorGuard(JNIEnv* env, F&& func) {
     try {
@@ -58,6 +97,9 @@ extern "C" JNIEXPORT jobjectArray JNICALL  //
 Java_ai_graphcore_squashedllama_Lib_prefill(JNIEnv* env,
                                             jobject /*this*/,
                                             jstring _prefix,
+                                            jint imageWidth,
+                                            jint imageHeight,
+                                            jobject _imageData,
                                             jint maxGeneratedTokens,
                                             jdouble temperature,
                                             jint topK,
@@ -67,7 +109,8 @@ Java_ai_graphcore_squashedllama_Lib_prefill(JNIEnv* env,
         if (!session) {
             throw std::runtime_error("No model loaded");
         }
-        auto tokens = session->generator.prefill(prefix.data, {},
+        auto image = imageFromDirectBuffer(env, imageWidth, imageHeight, _imageData);
+        auto tokens = session->generator.prefill(prefix.data, std::move(image),
                                                  {.maxGeneratedTokens = uint(maxGeneratedTokens),
                                                   .seed = std::nullopt,
                                                   .temperature = float(temperature),

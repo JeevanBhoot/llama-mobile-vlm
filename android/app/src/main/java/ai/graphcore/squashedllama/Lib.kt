@@ -2,50 +2,125 @@ package ai.graphcore.squashedllama
 
 import android.os.Handler
 import android.os.Looper
+import java.nio.ByteBuffer
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.thread
 import kotlin.concurrent.withLock
 import kotlin.time.DurationUnit
 import kotlin.time.TimeSource
 
-object Lib {
-    external fun load(path: String)
-    external fun unload()
-    external fun prefill(
+enum class Model(val label: String, val path: String, val supportsImage: Boolean) {
+    Dummy("Dummy", "", true),
+    TextInt8("Text (INT8)", "/data/local/tmp/text-int8.sqt", false),
+    VisionS3d8("Vision (S3D8)", "/data/local/tmp/vision-s3d8-proud-sponge-1878.sqt", true),
+}
+
+data class Image(
+    val width: Int,
+    val height: Int,
+    val argb: ByteBuffer
+)
+
+object Settings {
+    val maxGeneratedTokens = 100
+    val temperature = 0.0  // Greedy for testing
+    val topK = 50
+    val topP = 1.0
+}
+
+interface Generator {
+    fun load(path: String)
+    fun unload()
+    fun prefill(
         prefix: String,
+        imageWidth: Int,
+        imageHeight: Int,
+        imageArgb: ByteBuffer?,
         maxGeneratedTokens: Int,
         temperature: Double,
         topK: Int,
         topP: Double
     ): Array<String>
 
-    external fun generate(): String
+    fun generate(): String
+}
+
+object Lib : Generator {
+    external override fun load(path: String)
+    external override fun unload()
+    external override fun prefill(
+        prefix: String,
+        imageWidth: Int,
+        imageHeight: Int,
+        imageArgb: ByteBuffer?,
+        maxGeneratedTokens: Int,
+        temperature: Double,
+        topK: Int,
+        topP: Double
+    ): Array<String>
+    external override fun generate(): String
 
     init {
         System.loadLibrary("squashed-llama")
     }
 }
 
-object Worker {
-    private val maxGeneratedTokens = 8
-    private val temperature = 0.0  // Greedy for testing
-    private val topK = 50
-    private val topP = 1.0
+object DummyGenerator : Generator {
+    private var nextToken = 0
+    private val tokens = listOf(
+        "Response: ", "I'm ", "a ", "dummy", ", ", "I ", "have ", "no ", "wise ", "words", "."
+    )
 
+    override fun load(path: String) { }
+    override fun unload() { }
+
+    override fun prefill(
+        prefix: String,
+        imageWidth: Int,
+        imageHeight: Int,
+        imageArgb: ByteBuffer?,
+        maxGeneratedTokens: Int,
+        temperature: Double,
+        topK: Int,
+        topP: Double
+    ): Array<String> {
+        if (prefix.trim().lowercase() == "error") {
+            throw RuntimeException("You asked me for an error - you've got it!")
+        }
+        Thread.sleep(250)
+        nextToken = 0
+        val hasImage = imageArgb != null && imageWidth > 0 && imageHeight > 0
+        val imageDescription = if (hasImage) {
+            "${imageWidth}x$imageHeight RGB"
+        } else {
+            "None"
+        }
+        return arrayOf(prefix, "Prompt: \"$prefix\"\nImage: $imageDescription\n")
+    }
+    override fun generate(): String {
+        Thread.sleep(100)
+        return tokens.getOrElse(nextToken++) { "" }
+    }
+}
+
+object Worker {
     interface Command {
-        data class Load(val path: String) : Command
-        data object Unload : Command
-        data class Generate(val prompt: String) : Command
+        data class Load(val model: Model) : Command
+        data class Generate(
+            val prompt: String,
+            val image: Image? = null
+        ) : Command
     }
 
     interface Event {
-        data class Loaded(val path: String?) : Event
+        data class Loaded(val model: Model) : Event
         data class Response(
             val text: String,
             val prompt: String,
-            val prefillRate: Double,
+            val prefillTime: Double,
             val generationRate: Double?
         ) : Event
+        data class Error(val message: String) : Event
     }
 
     fun setListener(listener: (Event) -> Unit) {
@@ -65,12 +140,11 @@ object Worker {
     private val lock = ReentrantLock()
     private val hasCommand = lock.newCondition()
     private val mainLooper = Handler(Looper.getMainLooper())
-
     @Volatile
     private var nextCommand: Command? = null
-
     @Volatile
     private var commandListener: (Event) -> Unit = {}
+    private var generator: Generator = DummyGenerator
 
     private fun onEvent(event: Event) {
         mainLooper.post {
@@ -79,58 +153,74 @@ object Worker {
     }
 
     private fun handleCommand(command: Command) {
-        when (command) {
-            is Command.Load -> {
-                Lib.load(command.path)
-                onEvent(Event.Loaded(command.path))
-            }
+        try {
+            when (command) {
+                is Command.Load -> {
+                    val nextGenerator = if (command.model == Model.Dummy) DummyGenerator else Lib
+                    if (generator !== nextGenerator) {
+                        generator.unload()
+                        generator = nextGenerator
+                    }
+                    generator.load(command.model.path)
+                    onEvent(Event.Loaded(command.model))
+                }
 
-            is Command.Unload -> {
-                Lib.unload()
-                onEvent(Event.Loaded(null))
-            }
-
-            is Command.Generate -> {
-                // Prefill
-                val timer = TimeSource.Monotonic
-                val tStart = timer.markNow()
-                val parts = Lib.prefill(
-                    command.prompt,
-                    maxGeneratedTokens = maxGeneratedTokens,
-                    temperature = temperature,
-                    topK = topK,
-                    topP = topP
-                )
-                var response = parts.last()
-                val tPrefill = timer.markNow()
-                val prefillRate =
-                    parts.size.toDouble() / (tPrefill - tStart).toDouble(DurationUnit.SECONDS)
-                onEvent(
-                    Event.Response(
-                        text = response,
-                        prompt = command.prompt,
-                        prefillRate = prefillRate,
-                        generationRate = null
+                is Command.Generate -> {
+                    // Prefill
+                    val timer = TimeSource.Monotonic
+                    val tStart = timer.markNow()
+                    val parts = generator.prefill(
+                        command.prompt,
+                        imageWidth = command.image?.width ?: 0,
+                        imageHeight = command.image?.height ?: 0,
+                        imageArgb = command.image?.argb,
+                        maxGeneratedTokens = Settings.maxGeneratedTokens,
+                        temperature = Settings.temperature,
+                        topK = Settings.topK,
+                        topP = Settings.topP
                     )
-                )
-
-                // Generation
-                for (i in 1..maxGeneratedTokens) {
-                    if (nextCommand != null) return;  // Interrupt generation
-                    response += Lib.generate()
-                    val tGenerate = timer.markNow()
-                    val generationRate =
-                        i / (tGenerate - tPrefill).toDouble(DurationUnit.SECONDS)
+                    var response = parts.last()
+                    val tPrefill = timer.markNow()
+                    val prefillTime = (tPrefill - tStart).toDouble(DurationUnit.SECONDS)
                     onEvent(
                         Event.Response(
                             text = response,
                             prompt = command.prompt,
-                            prefillRate = prefillRate,
-                            generationRate = generationRate
+                            prefillTime = prefillTime,
+                            generationRate = null
                         )
                     )
+
+                    // Generation
+                    for (i in 1..Settings.maxGeneratedTokens) {
+                        if (nextCommand != null) return;  // Interrupt generation
+                        val token = generator.generate()
+                        if (token.isEmpty()) break
+                        response += token
+                        val tGenerate = timer.markNow()
+                        val generationRate =
+                            i / (tGenerate - tPrefill).toDouble(DurationUnit.SECONDS)
+                        onEvent(
+                            Event.Response(
+                                text = response,
+                                prompt = command.prompt,
+                                prefillTime = prefillTime,
+                                generationRate = generationRate
+                            )
+                        )
+                    }
                 }
             }
+        } catch (error: Throwable) {
+            if (command is Command.Load) {
+                try {
+                    generator.unload()
+                } catch (_: Throwable) { }
+                generator = DummyGenerator
+                generator.load(Model.Dummy.path)
+                onEvent(Event.Loaded(Model.Dummy))
+            }
+            onEvent(Event.Error(error.message ?: error.toString()))
         }
     }
 
