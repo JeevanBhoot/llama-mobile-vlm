@@ -11,7 +11,7 @@ import kotlin.time.DurationUnit
 import kotlin.time.TimeSource
 
 enum class Model(val label: String, val path: String, val supportsImage: Boolean) {
-    Dummy("Dummy", "", true),
+    Dummy("None", "", true),
     TextInt8("Text (INT8)", "/data/local/tmp/text-int8.sqt", false),
     VisionS3d8("Vision (S3D8)", "/data/local/tmp/vision-s3d8-proud-sponge-1878.sqt", true),
 }

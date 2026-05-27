@@ -16,15 +16,16 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image as ComposeImage
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
@@ -44,7 +45,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -57,20 +57,34 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
+import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.concurrent.thread
 
 private const val MAX_IMAGE_PREVIEW_SIZE = 1024
+private const val CAMERA_IMAGE_DIR = "camera_images"
 
 data class SelectedImage(
     val image: Image,
     val preview: Bitmap,
     val label: String
 )
+
+fun createCameraImageUri(context: Context): Uri {
+    val imageDir = File(context.cacheDir, CAMERA_IMAGE_DIR).apply { mkdirs() }
+    val imageFile = File.createTempFile("camera_", ".jpg", imageDir)
+    return FileProvider.getUriForFile(
+        context,
+        "${context.packageName}.fileprovider",
+        imageFile
+    )
+}
 
 fun selectedImageFromUri(context: Context, uri: Uri): SelectedImage {
     val source = ImageDecoder.createSource(context.contentResolver, uri)
@@ -137,7 +151,9 @@ fun MainScreen(
     generationRate: Double?,
     modifier: Modifier = Modifier,
     onModelSelected: (Model) -> Unit = {},
-    onPickImage: () -> Unit = {},
+    onSelectImage: () -> Unit = {},
+    onTakePhoto: () -> Unit = {},
+    onClearImage: () -> Unit = {},
     onSubmitPrompt: (String) -> Unit = {}
 ) {
     Surface(modifier = modifier, color = MaterialTheme.colorScheme.surface) {
@@ -158,7 +174,9 @@ fun MainScreen(
             ImageSelector(
                 enabled = selectedModel.supportsImage,
                 selectedImage = selectedImage.takeIf { selectedModel.supportsImage },
-                onPickImage = onPickImage,
+                onSelectImage = onSelectImage,
+                onTakePhoto = onTakePhoto,
+                onClearImage = onClearImage,
                 modifier = Modifier.fillMaxWidth()
             )
             Spacer(Modifier.height(8.dp))
@@ -211,7 +229,7 @@ fun MainScreen(
                 }
             }
             ProgressBar(
-                label = "Prefilling",
+                label = "Prefill",
                 progress = prefillProgress,
                 modifier = Modifier.fillMaxWidth()
             )
@@ -275,31 +293,94 @@ fun ProgressBar(
 fun ImageSelector(
     enabled: Boolean,
     selectedImage: SelectedImage?,
-    onPickImage: () -> Unit,
+    onSelectImage: () -> Unit,
+    onTakePhoto: () -> Unit,
+    onClearImage: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Surface(
         modifier = modifier
-            .aspectRatio(1f)
-            .clickable(enabled = enabled, onClick = onPickImage),
+            .aspectRatio(1f),
         shape = MaterialTheme.shapes.medium,
         color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+        border = if (selectedImage == null) {
+            BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+        } else {
+            null
+        }
     ) {
         Box(contentAlignment = Alignment.Center) {
             if (selectedImage == null) {
-                Text(
-                    if (enabled) "Select image" else "Model does not support images",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = if (enabled) MaterialTheme.colorScheme.onSurface else Color.Gray
-                )
+                if (enabled) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        IconButton(
+                            onClick = onSelectImage,
+                            modifier = Modifier.size(72.dp)
+                        ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_photo_library_24),
+                                contentDescription = "Choose image",
+                                modifier = Modifier.size(36.dp)
+                            )
+                        }
+                        IconButton(
+                            onClick = onTakePhoto,
+                            modifier = Modifier.size(72.dp)
+                        ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_photo_camera_24),
+                                contentDescription = "Take photo",
+                                modifier = Modifier.size(36.dp)
+                            )
+                        }
+                    }
+                } else {
+                    Text(
+                        "Model does not support images",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Color.Gray
+                    )
+                }
             } else {
-                ComposeImage(
-                    bitmap = selectedImage.preview.asImageBitmap(),
-                    contentDescription = selectedImage.label,
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize()
-                )
+                val imageAspectRatio =
+                    selectedImage.preview.width.toFloat() / selectedImage.preview.height.toFloat()
+                Surface(
+                    modifier = if (imageAspectRatio >= 1f) {
+                        Modifier
+                            .fillMaxWidth()
+                            .aspectRatio(imageAspectRatio)
+                    } else {
+                        Modifier
+                            .fillMaxHeight()
+                            .aspectRatio(imageAspectRatio)
+                    },
+                    shape = MaterialTheme.shapes.medium,
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+                ) {
+                    Box {
+                        ComposeImage(
+                            bitmap = selectedImage.preview.asImageBitmap(),
+                            contentDescription = selectedImage.label,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        Surface(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(8.dp),
+                            shape = MaterialTheme.shapes.small,
+                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f)
+                        ) {
+                            IconButton(onClick = onClearImage) {
+                                Icon(
+                                    imageVector = Icons.Filled.Clear,
+                                    contentDescription = "Clear image"
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -314,44 +395,36 @@ fun ModelSelector(
 ) {
     var expanded by rememberSaveable { mutableStateOf(false) }
 
-    Row(
-        modifier = modifier,
-        verticalAlignment = Alignment.CenterVertically
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = it },
+        modifier = modifier
     ) {
-        ExposedDropdownMenuBox(
+        OutlinedTextField(
+            value = selectedModel.label,
+            onValueChange = {},
+            readOnly = true,
+            label = { Text("Model") },
+            trailingIcon = {
+                ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded)
+            },
+            modifier = Modifier
+                .menuAnchor()
+                .fillMaxWidth()
+        )
+        ExposedDropdownMenu(
             expanded = expanded,
-            onExpandedChange = { expanded = it },
-            modifier = Modifier.weight(1f)
+            onDismissRequest = { expanded = false }
         ) {
-            OutlinedTextField(
-                value = selectedModel.label,
-                onValueChange = {},
-                readOnly = true,
-                label = { Text("Model") },
-                trailingIcon = {
-                    ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded)
-                },
-                modifier = Modifier
-                    .menuAnchor()
-                    .fillMaxWidth()
-            )
-            ExposedDropdownMenu(
-                expanded = expanded,
-                onDismissRequest = { expanded = false }
-            ) {
-                Model.entries.forEach { model ->
-                    DropdownMenuItem(
-                        text = { Text(model.label) },
-                        onClick = {
-                            expanded = false
-                            onModelSelected(model)
-                        }
-                    )
-                }
+            Model.entries.forEach { model ->
+                DropdownMenuItem(
+                    text = { Text(model.label) },
+                    onClick = {
+                        expanded = false
+                        onModelSelected(model)
+                    }
+                )
             }
-        }
-        TextButton(onClick = { onModelSelected(Model.Dummy) }) {
-            Text("Unload")
         }
     }
 }
@@ -371,6 +444,7 @@ class MainActivity : ComponentActivity() {
         var prefillProgress by mutableStateOf<Double?>(null)
         var prefillTime by mutableStateOf<Double?>(null)
         var generationRate by mutableStateOf<Double?>(null)
+        var cameraImageUri by mutableStateOf<Uri?>(null)
 
         Worker.setListener { event ->
             when (event) {
@@ -415,22 +489,33 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val context = LocalContext.current
-            val imagePicker = rememberLauncherForActivityResult(
-                ActivityResultContracts.PickVisualMedia()
-            ) { uri ->
-                if (uri == null) {
-                    selectedImage = null
-                } else {
-                    thread {
-                        val image = selectedImageFromUri(context.applicationContext, uri)
-                        runOnUiThread {
-                            selectedImage = image
-                        }
+            fun loadSelectedImage(uri: Uri) {
+                thread {
+                    val image = selectedImageFromUri(context.applicationContext, uri)
+                    runOnUiThread {
+                        selectedImage = image
                     }
                 }
             }
 
-            CustomTheme {
+            val imagePicker = rememberLauncherForActivityResult(
+                ActivityResultContracts.PickVisualMedia()
+            ) { uri ->
+                if (uri != null) {
+                    loadSelectedImage(uri)
+                }
+            }
+            val camera = rememberLauncherForActivityResult(
+                ActivityResultContracts.TakePicture()
+            ) { success ->
+                val uri = cameraImageUri
+                cameraImageUri = null
+                if (success && uri != null) {
+                    loadSelectedImage(uri)
+                }
+            }
+
+            CustomTheme(largeFonts = false) {
                 MainScreen(
                     ready = (loadedModel == selectedModel),
                     selectedModel = selectedModel,
@@ -447,10 +532,18 @@ class MainActivity : ComponentActivity() {
                         selectedModel = model
                         Worker.send(Worker.Command.Load(model))
                     },
-                    onPickImage = {
+                    onSelectImage = {
                         imagePicker.launch(
                             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                         )
+                    },
+                    onTakePhoto = {
+                        val uri = createCameraImageUri(context.applicationContext)
+                        cameraImageUri = uri
+                        camera.launch(uri)
+                    },
+                    onClearImage = {
+                        selectedImage = null
                     },
                     onSubmitPrompt = { prompt ->
                         val image = selectedImage.takeIf { selectedModel.supportsImage }
