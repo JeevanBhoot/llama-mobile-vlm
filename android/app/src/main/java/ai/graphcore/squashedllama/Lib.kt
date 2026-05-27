@@ -3,6 +3,7 @@ package ai.graphcore.squashedllama
 import android.os.Handler
 import android.os.Looper
 import java.nio.ByteBuffer
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.thread
 import kotlin.concurrent.withLock
@@ -28,9 +29,15 @@ object Settings {
     val topP = 1.0
 }
 
+enum class ProgressPhase {
+    Loading,
+    Prefill
+}
+
 interface Generator {
     fun load(path: String)
     fun unload()
+    fun progress(): Double?
     fun prefill(
         prefix: String,
         imageWidth: Int,
@@ -48,6 +55,7 @@ interface Generator {
 object Lib : Generator {
     external override fun load(path: String)
     external override fun unload()
+    external override fun progress(): Double?
     external override fun prefill(
         prefix: String,
         imageWidth: Int,
@@ -67,12 +75,17 @@ object Lib : Generator {
 
 object DummyGenerator : Generator {
     private var nextToken = 0
+    @Volatile
+    private var currentProgress: Double? = null
     private val tokens = listOf(
         "Response: ", "I'm ", "a ", "dummy", ", ", "I ", "have ", "no ", "wise ", "words", "."
     )
 
-    override fun load(path: String) { }
+    override fun load(path: String) {
+        simulateProgress(5, 20)
+    }
     override fun unload() { }
+    override fun progress(): Double? = currentProgress
 
     override fun prefill(
         prefix: String,
@@ -87,7 +100,7 @@ object DummyGenerator : Generator {
         if (prefix.trim().lowercase() == "error") {
             throw RuntimeException("You asked me for an error - you've got it!")
         }
-        Thread.sleep(250)
+        simulateProgress(5, 50)
         nextToken = 0
         val hasImage = imageArgb != null && imageWidth > 0 && imageHeight > 0
         val imageDescription = if (hasImage) {
@@ -100,6 +113,18 @@ object DummyGenerator : Generator {
     override fun generate(): String {
         Thread.sleep(100)
         return tokens.getOrElse(nextToken++) { "" }
+    }
+
+    private fun simulateProgress(steps: Int, stepMs: Long) {
+        currentProgress = 0.0
+        try {
+            for (i in 1..steps) {
+                Thread.sleep(stepMs)
+                currentProgress = i.toDouble() / steps
+            }
+        } finally {
+            currentProgress = null
+        }
     }
 }
 
@@ -114,6 +139,7 @@ object Worker {
 
     interface Event {
         data class Loaded(val model: Model) : Event
+        data class Progress(val phase: ProgressPhase, val progress: Double?) : Event
         data class Response(
             val text: String,
             val prompt: String,
@@ -161,7 +187,9 @@ object Worker {
                         generator.unload()
                         generator = nextGenerator
                     }
-                    generator.load(command.model.path)
+                    withProgress(ProgressPhase.Loading) {
+                        generator.load(command.model.path)
+                    }
                     onEvent(Event.Loaded(command.model))
                 }
 
@@ -169,16 +197,18 @@ object Worker {
                     // Prefill
                     val timer = TimeSource.Monotonic
                     val tStart = timer.markNow()
-                    val parts = generator.prefill(
-                        command.prompt,
-                        imageWidth = command.image?.width ?: 0,
-                        imageHeight = command.image?.height ?: 0,
-                        imageArgb = command.image?.argb,
-                        maxGeneratedTokens = Settings.maxGeneratedTokens,
-                        temperature = Settings.temperature,
-                        topK = Settings.topK,
-                        topP = Settings.topP
-                    )
+                    val parts = withProgress(ProgressPhase.Prefill) {
+                        generator.prefill(
+                            command.prompt,
+                            imageWidth = command.image?.width ?: 0,
+                            imageHeight = command.image?.height ?: 0,
+                            imageArgb = command.image?.argb,
+                            maxGeneratedTokens = Settings.maxGeneratedTokens,
+                            temperature = Settings.temperature,
+                            topK = Settings.topK,
+                            topP = Settings.topP
+                        )
+                    }
                     var response = parts.last()
                     val tPrefill = timer.markNow()
                     val prefillTime = (tPrefill - tStart).toDouble(DurationUnit.SECONDS)
@@ -221,6 +251,28 @@ object Worker {
                 onEvent(Event.Loaded(Model.Dummy))
             }
             onEvent(Event.Error(error.message ?: error.toString()))
+        }
+    }
+
+    private fun <T> withProgress(phase: ProgressPhase, block: () -> T): T {
+        val running = AtomicBoolean(true)
+        val poller = thread {
+            var lastProgress: Double? = null
+            while (running.get()) {
+                val progress = generator.progress()
+                if (progress != null && progress != lastProgress) {
+                    lastProgress = progress
+                    onEvent(Event.Progress(phase, progress))
+                }
+                Thread.sleep(100)
+            }
+        }
+        try {
+            return block()
+        } finally {
+            running.set(false)
+            poller.join()
+            onEvent(Event.Progress(phase, null))
         }
     }
 

@@ -18,6 +18,32 @@ Tensor projection(const TensorV& weight, const TensorV& x) {
     return tensor::matmulT(x, weight);
 }
 
+const ProgressCallback NoProgressCallback;
+struct ProgressTracker {
+    uint currentStep;
+    uint totalSteps;
+    const ProgressCallback& callback;
+
+    ProgressTracker(uint totalSteps, const ProgressCallback& callback)
+        : currentStep(0), totalSteps(totalSteps), callback(callback) {
+        report();
+    }
+
+    void report() const {
+        if (callback) {
+            auto value = totalSteps == 0
+                             ? 1.0
+                             : static_cast<double>(currentStep) / static_cast<double>(totalSteps);
+            callback(std::clamp(value, 0.0, 1.0));
+        }
+    }
+
+    void step() {
+        currentStep++;
+        report();
+    }
+};
+
 // Layers
 
 Tensor attention(const TextModel& model,
@@ -137,7 +163,7 @@ void resetCache(Generator& g, uint dSequenceMax) {
     }
 }
 
-void forward(Generator& g, const std::vector<uint>& tokens) {
+void forward(Generator& g, const std::vector<uint>& tokens, ProgressTracker& progress) {
     if (g.kvCache.dSequenceMax < g.kvCache.dSequence + tokens.size()) {
         std::ostringstream err;
         err << "Over-full KV cache of maximum size " << g.kvCache.dSequenceMax << " tokens";
@@ -159,6 +185,7 @@ void forward(Generator& g, const std::vector<uint>& tokens) {
                                             g.kvCache.dSequence, g.kvCache.entries[i]));
         }
         x = add(std::move(x), mlp(model, model.layers[i].mlp, x));
+        progress.step();
     }
     x = clone(slice0(x, x.shape[0] - 1, x.shape[0]));  // for efficiency, only keep last token
     x = rmsNorm(model.finalNorm, x, model.normEpsilon);
@@ -167,7 +194,7 @@ void forward(Generator& g, const std::vector<uint>& tokens) {
     g.prevToken = nextToken(g, x);
 }
 
-Tensor forwardImage(Generator& g, const TensorV& image) {
+Tensor forwardImage(Generator& g, const TensorV& image, ProgressTracker& progress) {
     auto& model = *g.model.visionModel;
 
     // Embeddings
@@ -191,6 +218,7 @@ Tensor forwardImage(Generator& g, const TensorV& image) {
             out = add(std::move(out),
                       projection(indexLeading(model.multiModalProjector.weight, {idx}), x));
         }
+        progress.step();
     }
     x = layerNorm(model.layerNormPost.weight, model.layerNormPost.bias, x, model.normEpsilon);
     // Lookup {aspectRatioID = 0, tileIndex = 0}
@@ -201,6 +229,7 @@ Tensor forwardImage(Generator& g, const TensorV& image) {
         auto& layer = model.layers1[i];
         x = add(std::move(x), visionAttention(model, layer.attention, x));
         x = add(std::move(x), visionMlp(model, layer.mlp, x));
+        progress.step();
     }
     out = add(std::move(out), projection(indexLeading(model.multiModalProjector.weight,
                                                       {static_cast<uint>(model.outputTaps.size())}),
@@ -208,7 +237,9 @@ Tensor forwardImage(Generator& g, const TensorV& image) {
     return out;
 }
 
-Generator::KVCache prepareCrossAttentionCache(const TextModel& model, const TensorV& imageOut) {
+Generator::KVCache prepareCrossAttentionCache(const TextModel& model,
+                                              const TensorV& imageOut,
+                                              ProgressTracker& progress) {
     auto kvShape = std::vector<uint>{imageOut.shape[0], model.dAttentionKV, model.dAttentionHead};
     Generator::KVCache cache;
     cache.dSequence = cache.dSequenceMax = imageOut.shape[0];
@@ -219,6 +250,7 @@ Generator::KVCache prepareCrossAttentionCache(const TextModel& model, const Tens
         key = rmsNorm(*layer.attention.key_norm, key, model.normEpsilon);
         auto value = reshape(projection(layer.attention.value, imageOut), kvShape);
         cache.entries.push_back({std::move(key), std::move(value)});
+        progress.step();
     }
     return cache;
 }
@@ -237,7 +269,8 @@ Generator::Generator(Model& model) : model(model) {}
 
 std::vector<std::string> Generator::prefill(const std::string& prefix,
                                             const std::optional<Image>& image,
-                                            const Options& options) {
+                                            const Options& options,
+                                            const ProgressCallback& progressCallback) {
     // Set generation state
     this->options = options;
     if (options.seed.has_value()) {
@@ -254,8 +287,20 @@ std::vector<std::string> Generator::prefill(const std::string& prefix,
             err << "Passed an image to " << model.source << ", which does not support vision input";
             throw std::runtime_error(err.str());
         }
-        auto imageOut = forwardImage(*this, preprocess(*model.visionModel, *image));
-        crossAttentionCache = prepareCrossAttentionCache(model.textModel, imageOut);
+    }
+
+    auto progressSteps = model.textModel.dLayers;
+    if (image) {
+        progressSteps += model.visionModel->dLayers0;
+        progressSteps += model.visionModel->dLayers1;
+        progressSteps += uint(model.textModel.crossAttentionLayers.size());
+    }
+    ProgressTracker progress(progressSteps, progressCallback);
+
+    // Handle image
+    if (image) {
+        auto imageOut = forwardImage(*this, preprocess(*model.visionModel, *image), progress);
+        crossAttentionCache = prepareCrossAttentionCache(model.textModel, imageOut, progress);
     } else {
         crossAttentionCache.reset();
     }
@@ -269,7 +314,7 @@ std::vector<std::string> Generator::prefill(const std::string& prefix,
     auto encoded = model.textModel.tokenizer.encode(prefix);
     tokens.insert(tokens.end(), encoded.begin(), encoded.end());
     resetCache(*this, uint(tokens.size() + options.maxGeneratedTokens));
-    forward(*this, tokens);
+    forward(*this, tokens, progress);
 
     // Return tokens, including prompt
     if (this->prevToken != model.textModel.endOfTextID) {
@@ -287,7 +332,8 @@ std::string Generator::generate() {
     if (kvCache.dSequence == kvCache.dSequenceMax) {
         return "";
     }
-    forward(*this, {prevToken});
+    ProgressTracker progress(model.textModel.dLayers, NoProgressCallback);
+    forward(*this, {prevToken}, progress);
     return (prevToken == model.textModel.endOfTextID)
                ? ""
                : model.textModel.tokenizer.decode({prevToken});

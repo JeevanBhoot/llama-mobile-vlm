@@ -1,6 +1,8 @@
 #ifdef ANDROID
 
 #include <jni.h>
+#include <algorithm>
+#include <atomic>
 #include <fstream>
 
 #include "squash.hpp"
@@ -12,6 +14,27 @@ struct Session {
     explicit Session(squash::Model&& _model) : model(std::move(_model)), generator(model) {}
 };
 std::unique_ptr<Session> session;
+
+struct Progress {
+    static constexpr double None = -1.0;
+    std::atomic<double> value{None};
+
+    void set(double progress) {
+        value.store(std::clamp(progress, 0.0, 1.0), std::memory_order_relaxed);
+    }
+    void clear() { value.store(None, std::memory_order_relaxed); }
+
+    std::optional<double> get() const {
+        auto progress = value.load(std::memory_order_relaxed);
+        return progress < 0.0 ? std::nullopt : std::make_optional(progress);
+    }
+};
+Progress progress;
+
+struct ProgressScope {
+    ProgressScope() { progress.set(0.0); }
+    ~ProgressScope() { progress.clear(); }
+};
 
 // JNI helpers
 
@@ -80,17 +103,30 @@ T errorGuard(JNIEnv* env, F&& func) {
 extern "C" JNIEXPORT void JNICALL  //
 Java_ai_graphcore_squashedllama_Lib_load(JNIEnv* env, jobject /*this*/, jstring _path) {
     errorGuard<void>(env, [&] {
+        ProgressScope _progressScope;
         squash::selectOmpNumThreads();
         StringHolder path(env, _path);
         session.reset();  // free memory before loading a new model
         std::ifstream file(path.data);
-        session.reset(new Session{squash::loadSquashedTensors(file)});
+        session.reset(new Session{
+            squash::loadSquashedTensors(file, [](double value) { progress.set(value); })});
     });
 }
 
 extern "C" JNIEXPORT void JNICALL  //
 Java_ai_graphcore_squashedllama_Lib_unload(JNIEnv* env, jobject /*this*/) {
     errorGuard<void>(env, [&] { session.reset(); });
+}
+
+extern "C" JNIEXPORT jobject JNICALL  //
+Java_ai_graphcore_squashedllama_Lib_progress(JNIEnv* env, jobject /*this*/) {
+    auto current = progress.get();
+    if (!current) {
+        return nullptr;
+    }
+    auto doubleClass = env->FindClass("java/lang/Double");
+    auto constructor = env->GetMethodID(doubleClass, "<init>", "(D)V");
+    return env->NewObject(doubleClass, constructor, static_cast<jdouble>(*current));
 }
 
 extern "C" JNIEXPORT jobjectArray JNICALL  //
@@ -105,6 +141,7 @@ Java_ai_graphcore_squashedllama_Lib_prefill(JNIEnv* env,
                                             jint topK,
                                             jdouble topP) {
     return errorGuard<jobjectArray>(env, [&] {
+        ProgressScope _progressScope;
         StringHolder prefix(env, _prefix);
         if (!session) {
             throw std::runtime_error("No model loaded");
@@ -115,7 +152,8 @@ Java_ai_graphcore_squashedllama_Lib_prefill(JNIEnv* env,
                                                   .seed = std::nullopt,
                                                   .temperature = float(temperature),
                                                   .topK = uint(topK),
-                                                  .topP = float(topP)});
+                                                  .topP = float(topP)},
+                                                 [](double value) { progress.set(value); });
         auto jarray =
             env->NewObjectArray(jsize(tokens.size()), env->FindClass("java/lang/String"), nullptr);
         for (auto i = 0u; i < tokens.size(); ++i) {

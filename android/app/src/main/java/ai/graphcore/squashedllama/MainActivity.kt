@@ -39,6 +39,7 @@ import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -130,6 +131,8 @@ fun MainScreen(
     output: String,
     outputIsError: Boolean,
     promptForOutput: String,
+    loadingProgress: Double?,
+    prefillProgress: Double?,
     prefillTime: Double?,
     generationRate: Double?,
     modifier: Modifier = Modifier,
@@ -162,6 +165,11 @@ fun MainScreen(
             ModelSelector(
                 selectedModel = selectedModel,
                 onModelSelected = onModelSelected,
+                modifier = Modifier.fillMaxWidth()
+            )
+            ProgressBar(
+                label = "Loading",
+                progress = loadingProgress,
                 modifier = Modifier.fillMaxWidth()
             )
             Spacer(Modifier.height(8.dp))
@@ -202,6 +210,11 @@ fun MainScreen(
                     )
                 }
             }
+            ProgressBar(
+                label = "Prefilling",
+                progress = prefillProgress,
+                modifier = Modifier.fillMaxWidth()
+            )
             Spacer(Modifier.height(16.dp))
             OutlinedTextField(
                 value = output,
@@ -232,6 +245,29 @@ fun MainScreen(
                 color = Color.Gray,
             )
         }
+    }
+}
+
+@SuppressLint("DefaultLocale")
+@Composable
+fun ProgressBar(
+    label: String,
+    progress: Double?,
+    modifier: Modifier = Modifier
+) {
+    if (progress == null) return
+
+    Column(modifier = modifier.padding(top = 4.dp)) {
+        LinearProgressIndicator(
+            progress = { progress.toFloat() },
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(
+            text = "$label ${"%.0f".format(progress * 100)}%",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color.Gray
+        )
     }
 }
 
@@ -331,6 +367,8 @@ class MainActivity : ComponentActivity() {
         var output by mutableStateOf("")
         var outputIsError by mutableStateOf(false)
         var promptForOutput by mutableStateOf("")
+        var loadingProgress by mutableStateOf<Double?>(null)
+        var prefillProgress by mutableStateOf<Double?>(null)
         var prefillTime by mutableStateOf<Double?>(null)
         var generationRate by mutableStateOf<Double?>(null)
 
@@ -341,14 +379,24 @@ class MainActivity : ComponentActivity() {
                     output = ""
                     outputIsError = false
                     promptForOutput = ""
+                    loadingProgress = null
+                    prefillProgress = null
                     prefillTime = null
                     generationRate = null
+                }
+
+                is Worker.Event.Progress -> {
+                    when (event.phase) {
+                        ProgressPhase.Loading -> loadingProgress = event.progress
+                        ProgressPhase.Prefill -> prefillProgress = event.progress
+                    }
                 }
 
                 is Worker.Event.Response -> {
                     output = event.text
                     outputIsError = false
                     promptForOutput = event.prompt
+                    prefillProgress = null
                     prefillTime = event.prefillTime
                     generationRate = event.generationRate
                 }
@@ -357,6 +405,8 @@ class MainActivity : ComponentActivity() {
                     output = event.message
                     outputIsError = true
                     promptForOutput = ""
+                    loadingProgress = null
+                    prefillProgress = null
                     prefillTime = null
                     generationRate = null
                 }
@@ -388,6 +438,8 @@ class MainActivity : ComponentActivity() {
                     output = output,
                     outputIsError = outputIsError,
                     promptForOutput = promptForOutput,
+                    loadingProgress = loadingProgress,
+                    prefillProgress = prefillProgress,
                     prefillTime = prefillTime,
                     generationRate = generationRate,
                     modifier = Modifier.fillMaxSize(),
@@ -427,6 +479,8 @@ fun Preview() {
             output = "That's a very interesting question. The answer is subjective.",
             outputIsError = false,
             promptForOutput = "",
+            loadingProgress = null,
+            prefillProgress = null,
             prefillTime = 0.5,
             generationRate = null,
             modifier = Modifier.fillMaxSize(),

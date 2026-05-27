@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <iostream>
 #include <optional>
 #include <random>
@@ -45,6 +46,8 @@ Image loadImage(const std::string&);
 Image resizeImage(const Image&, uint height, uint width);
 
 void selectOmpNumThreads();
+
+using ProgressCallback = std::function<void(double)>;
 
 /// Model ///
 // Holds all shape and parameter data (views onto an underlying buffer)
@@ -156,7 +159,7 @@ struct Model {
     tensor::Buffer _data;
 };
 
-Model loadSquashedTensors(std::istream&);
+Model loadSquashedTensors(std::istream&, const ProgressCallback& progress = {});
 namespace impl {
 std::string regexUnicodeToModifiedECMA(const std::string&);
 }  // namespace impl
@@ -199,7 +202,8 @@ struct Generator {
     explicit Generator(Model&);
     std::vector<std::string> prefill(const std::string& prefix,
                                      const std::optional<Image>& image,
-                                     const Options& options);
+                                     const Options& options,
+                                     const ProgressCallback& progress = {});
     // Returns an empty token for endOfText or reaching maxGeneratedTokens
     std::string generate();
 };

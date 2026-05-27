@@ -340,7 +340,7 @@ VisionModel loadVisionModel(const json& header, const json& metadata, ParamBuffe
 
 }  // namespace
 
-Model loadSquashedTensors(std::istream& in) {
+Model loadSquashedTensors(std::istream& in, const ProgressCallback& progress) {
     // Preamble
     char preamble[16];
     in.read(preamble, 16);
@@ -374,8 +374,11 @@ Model loadSquashedTensors(std::istream& in) {
     checkRAM(bufferLength + s3d8LutBytes);
     tensor::Buffer _data(bufferLength + s3d8LutBytes, alignment);
     for (auto i = ulong(0); i < bufferLength; i += BufferChunkSize) {
-        in.read(_data.get() + i,
-                static_cast<std::streamsize>(std::min(i + BufferChunkSize, bufferLength) - i));
+        auto next = std::min(i + BufferChunkSize, bufferLength);
+        in.read(_data.get() + i, static_cast<std::streamsize>(next - i));
+        if (progress) {
+            progress(static_cast<double>(next) / static_cast<double>(bufferLength));
+        }
     }
     ParamBuffer params{
         .alignment = alignment,
