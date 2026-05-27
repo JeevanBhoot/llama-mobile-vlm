@@ -339,7 +339,7 @@ fun ModelSelector(
                 expanded = expanded,
                 onDismissRequest = { expanded = false }
             ) {
-                Model.values().forEach { model ->
+                Model.entries.forEach { model ->
                     DropdownMenuItem(
                         text = { Text(model.label) },
                         onClick = {
