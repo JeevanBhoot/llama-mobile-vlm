@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Graphcore Ltd. All rights reserved.
+
 [versions]
 agp = "8.6.1"
 kotlin = "1.9.0"

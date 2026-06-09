@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Graphcore Ltd. All rights reserved.
+
 import time
 from dataclasses import asdict, dataclass
 from typing import Any, Optional

@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Graphcore Ltd. All rights reserved.
+
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #define STB_IMAGE_RESIZE_IMPLEMENTATION

@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Graphcore Ltd. All rights reserved.
+
 #include "ops.hpp"
 
 #include <omp.h>

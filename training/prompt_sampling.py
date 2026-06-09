@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Graphcore Ltd. All rights reserved.
+
 from dataclasses import dataclass, field
 
 import numpy as np

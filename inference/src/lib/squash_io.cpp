@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Graphcore Ltd. All rights reserved.
+
 #include <sys/sysinfo.h>
 #include <iostream>
 #define JSON_USE_IMPLICIT_CONVERSIONS 0

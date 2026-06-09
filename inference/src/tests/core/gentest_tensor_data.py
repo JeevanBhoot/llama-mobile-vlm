@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Graphcore Ltd. All rights reserved.
+
 """Generate test data for gentest_tensor."""
 
 import hashlib

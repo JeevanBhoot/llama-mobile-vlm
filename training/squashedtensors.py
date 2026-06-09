@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Graphcore Ltd. All rights reserved.
+
 """Model serialization in the squashedtensors '.sqt' format."""
 
 import argparse

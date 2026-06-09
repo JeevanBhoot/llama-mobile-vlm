@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Graphcore Ltd. All rights reserved.
+
 #include "core/tensor.hpp"
 #include "tests/common.hpp"
 

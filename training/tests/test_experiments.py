@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Graphcore Ltd. All rights reserved.
+
 import unittest.mock as um
 from dataclasses import asdict
 from typing import Any, Iterable

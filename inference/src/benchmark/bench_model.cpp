@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Graphcore Ltd. All rights reserved.
+
 #include "bench_model.hpp"
 #include "benchmark.hpp"
 #include "core/ops.hpp"

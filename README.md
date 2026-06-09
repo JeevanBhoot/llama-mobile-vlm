@@ -1,6 +1,6 @@
-# Squashed Llama
+# Llama on Mobile
 
-This is a monorepo for squashed llama work.
+Inference and training code for the Llama on Mobile paper.
 
 Components:
  - [`/android`](android) - client demo app for Android phones (Kotlin)
@@ -18,3 +18,7 @@ In addition to cloning the repo, please run:
 git clone git@github.com:graphcore-research/squashed-llama.git --branch notebooks notebooks
 aws s3 sync s3://graphcore-research-us-east-1/2024-10-squashedllama/models/ models/ --exclude 'v0/**'
 ```
+
+## License
+
+Copyright (c) 2026 Graphcore Ltd. Licensed under the MIT License.

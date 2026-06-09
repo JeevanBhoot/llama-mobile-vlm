@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Graphcore Ltd. All rights reserved.
+
 """
 Compare greedy output generation vs. the reference model.
 Reports number of characters until divergence.

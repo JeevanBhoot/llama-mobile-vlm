@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Graphcore Ltd. All rights reserved.
+
 """Utilities for interacting with quantised models (designed for use with Jupyter)"""
 
 import base64

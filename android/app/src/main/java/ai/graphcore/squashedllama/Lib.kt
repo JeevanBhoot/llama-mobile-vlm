@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Graphcore Ltd. All rights reserved.
+
 package ai.graphcore.squashedllama
 
 import android.os.Handler
