@@ -75,6 +75,7 @@ def run_experiment(xp: Experiment) -> Results:
         scaling_mode="dynamic",
         clip_gradient=False,
         error_weight=None,
+        activation_fmt=None,
     )
     n_bytes = QT.count_bits(model, torch.bfloat16) / 8
 

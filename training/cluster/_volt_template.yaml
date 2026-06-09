@@ -61,11 +61,10 @@ spec:
             
             # Initialise repository and install Python dependencies
             cd ~
-            git -c url."https://${GITHUB_TOKEN}@github.com/".insteadOf=git@github.com: clone --recursive https://${GITHUB_TOKEN}@github.com/graphcore-research/squashed-llama.git
+            git -c url."https://${GITHUB_TOKEN}@github.com/".insteadOf=git@github.com: clone https://${GITHUB_TOKEN}@github.com/graphcore-research/squashed-llama.git
             cd squashed-llama/training
-            git checkout --recurse-submodules ${GIT_COMMIT}
+            git checkout ${GIT_COMMIT}
             python3 -m venv .venv
-            echo "export PYTHONPATH=\${PYTHONPATH}:\$(dirname \${VIRTUAL_ENV})/optimal_weight_formats" >> .venv/bin/activate
             source .venv/bin/activate
             pip install --upgrade pip wheel
             pip install -r requirements.txt

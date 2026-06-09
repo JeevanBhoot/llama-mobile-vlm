@@ -36,9 +36,12 @@ def test_dataset() -> None:
 
     out_dir: str | None = None
     try:
-        with um.patch("train_data.mp.get_context", return_value=InlineCtx()), um.patch(
-            "train_data.transformers.MllamaForConditionalGeneration.from_pretrained",
-            return_value=dummy,
+        with (
+            um.patch("train_data.mp.get_context", return_value=InlineCtx()),
+            um.patch(
+                "train_data.transformers.MllamaForConditionalGeneration.from_pretrained",
+                return_value=dummy,
+            ),
         ):
             out_dir = train_data.generate_data(
                 config,

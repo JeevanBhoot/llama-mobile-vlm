@@ -1,19 +1,18 @@
 # Squashed Llama training
 
+Our development setup requires access to our S3 datasets at `s3://graphcore-research-us-east-1/2024-10-squashedllama/data/`, and a HuggingFace token with access to the `meta-llama` repository.
+
 First-time setup:
-
 ```sh
-git submodule update --init
-
-python3 -m venv .venv
-
+uv python install 3.11
+uv venv .venv --python 3.11
 echo "export PYTHONPATH=\${PYTHONPATH}:\$(dirname \${VIRTUAL_ENV})" >> .venv/bin/activate
-echo "export PYTHONPATH=\${PYTHONPATH}:\$(dirname \${VIRTUAL_ENV})/optimal_weight_formats" >> .venv/bin/activate
 echo "export TOKENIZERS_PARALLELISM=true" >> .venv/bin/activate
 
 source .venv/bin/activate
-pip install --upgrade pip wheel
-pip install -r requirements.txt
+uv pip install -r requirements.txt --index https://download.pytorch.org/whl/cu128
+
+uv run pytest tests/
 ```
 
 Sync from AWS S3:

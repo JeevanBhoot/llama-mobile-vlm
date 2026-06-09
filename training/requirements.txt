@@ -6,6 +6,7 @@ datasets==3.5.0
 ipykernel==6.29.5
 matplotlib==3.10.1
 mypy==1.15.0
+optimal-weight-formats @ git+https://github.com/graphcore-research/optimal-weight-formats.git@43648f441889ce17b8af1c065cf552381ea2b01f
 pandas==2.2.3
 pillow==11.3.0
 pytest==8.3.5
