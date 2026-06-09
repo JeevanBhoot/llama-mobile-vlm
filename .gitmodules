@@ -1,3 +1,0 @@
-[submodule "training/optimal_weight_formats"]
-	path = training/optimal_weight_formats
-	url = git@github.com:graphcore-research/optimal-weight-formats.git
