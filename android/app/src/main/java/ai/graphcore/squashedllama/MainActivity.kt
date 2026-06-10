@@ -3,18 +3,23 @@
 package ai.graphcore.squashedllama
 
 import android.annotation.SuppressLint
+import android.app.Activity
+import android.content.ClipData
 import android.content.Context
+import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.ImageDecoder
 import android.net.Uri
 import android.os.Bundle
+import android.provider.MediaStore
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContract
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image as ComposeImage
@@ -69,7 +74,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.concurrent.thread
 
-private const val MAX_IMAGE_PREVIEW_SIZE = 1024
+private const val MAX_IMAGE_PREVIEW_SIZE = 560
 private const val CAMERA_IMAGE_DIR = "camera_images"
 
 data class SelectedImage(
@@ -88,11 +93,29 @@ fun createCameraImageUri(context: Context): Uri {
     )
 }
 
+class TakePictureWithExplicitUriGrant : ActivityResultContract<Uri, Boolean>() {
+    override fun createIntent(context: Context, input: Uri): Intent {
+        val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+            .putExtra(MediaStore.EXTRA_OUTPUT, input)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        intent.clipData = ClipData.newUri(context.contentResolver, "Camera output", input)
+        return intent
+    }
+
+    override fun parseResult(resultCode: Int, intent: Intent?): Boolean = resultCode == Activity.RESULT_OK
+}
+
 fun selectedImageFromUri(context: Context, uri: Uri): SelectedImage {
     val source = ImageDecoder.createSource(context.contentResolver, uri)
-    val bitmap = ImageDecoder.decodeBitmap(source) { decoder, _, _ ->
+    val bitmap = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
         decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE)
-        decoder.setTargetSampleSize(1)
+        targetImageSize(
+            width = info.size.width,
+            height = info.size.height,
+            maxSize = MAX_IMAGE_PREVIEW_SIZE
+        )?.let { size ->
+            decoder.setTargetSize(size.first, size.second)
+        }
     }
     val scaledBitmap = resizeBitmapToFit(bitmap, MAX_IMAGE_PREVIEW_SIZE)
     val argbBitmap = compactArgb8888Bitmap(scaledBitmap)
@@ -115,6 +138,15 @@ fun selectedImageFromUri(context: Context, uri: Uri): SelectedImage {
         preview = argbBitmap,
         label = uri.lastPathSegment ?: "Selected image"
     )
+}
+
+fun targetImageSize(width: Int, height: Int, maxSize: Int): Pair<Int, Int>? {
+    val largestSide = maxOf(width, height)
+    if (width <= 0 || height <= 0 || largestSide <= maxSize) return null
+
+    val targetWidth = ((width.toLong() * maxSize) / largestSide).toInt().coerceAtLeast(1)
+    val targetHeight = ((height.toLong() * maxSize) / largestSide).toInt().coerceAtLeast(1)
+    return targetWidth to targetHeight
 }
 
 fun resizeBitmapToFit(bitmap: Bitmap, maxSize: Int): Bitmap {
@@ -508,7 +540,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
             val camera = rememberLauncherForActivityResult(
-                ActivityResultContracts.TakePicture()
+                TakePictureWithExplicitUriGrant()
             ) { success ->
                 val uri = cameraImageUri
                 cameraImageUri = null
