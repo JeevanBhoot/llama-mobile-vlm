@@ -2,27 +2,33 @@
 
 package ai.graphcore.squashedllama
 
+import android.Manifest
 import android.annotation.SuppressLint
-import android.app.Activity
-import android.content.ClipData
 import android.content.Context
-import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.ImageDecoder
 import android.net.Uri
 import android.os.Bundle
-import android.provider.MediaStore
+import android.util.Size
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.PickVisualMediaRequest
-import androidx.activity.result.contract.ActivityResultContract
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.Preview as CameraPreviewUseCase
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
+import androidx.camera.view.PreviewView
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image as ComposeImage
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
@@ -38,6 +44,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Clear
@@ -53,57 +60,38 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.core.content.FileProvider
-import java.io.File
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.concurrent.thread
 
 private const val MAX_IMAGE_PREVIEW_SIZE = 560
-private const val CAMERA_IMAGE_DIR = "camera_images"
 
 data class SelectedImage(
     val image: Image,
     val preview: Bitmap,
     val label: String
 )
-
-fun createCameraImageUri(context: Context): Uri {
-    val imageDir = File(context.cacheDir, CAMERA_IMAGE_DIR).apply { mkdirs() }
-    val imageFile = File.createTempFile("camera_", ".jpg", imageDir)
-    return FileProvider.getUriForFile(
-        context,
-        "${context.packageName}.fileprovider",
-        imageFile
-    )
-}
-
-class TakePictureWithExplicitUriGrant : ActivityResultContract<Uri, Boolean>() {
-    override fun createIntent(context: Context, input: Uri): Intent {
-        val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
-            .putExtra(MediaStore.EXTRA_OUTPUT, input)
-            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-        intent.clipData = ClipData.newUri(context.contentResolver, "Camera output", input)
-        return intent
-    }
-
-    override fun parseResult(resultCode: Int, intent: Intent?): Boolean = resultCode == Activity.RESULT_OK
-}
 
 fun selectedImageFromUri(context: Context, uri: Uri): SelectedImage {
     val source = ImageDecoder.createSource(context.contentResolver, uri)
@@ -117,6 +105,10 @@ fun selectedImageFromUri(context: Context, uri: Uri): SelectedImage {
             decoder.setTargetSize(size.first, size.second)
         }
     }
+    return selectedImageFromBitmap(bitmap, uri.lastPathSegment ?: "Selected image")
+}
+
+fun selectedImageFromBitmap(bitmap: Bitmap, label: String): SelectedImage {
     val scaledBitmap = resizeBitmapToFit(bitmap, MAX_IMAGE_PREVIEW_SIZE)
     val argbBitmap = compactArgb8888Bitmap(scaledBitmap)
     if (argbBitmap !== scaledBitmap) scaledBitmap.recycle()
@@ -136,7 +128,7 @@ fun selectedImageFromUri(context: Context, uri: Uri): SelectedImage {
             argb = argb
         ),
         preview = argbBitmap,
-        label = uri.lastPathSegment ?: "Selected image"
+        label = label
     )
 }
 
@@ -176,6 +168,7 @@ fun MainScreen(
     ready: Boolean,
     selectedModel: Model,
     selectedImage: SelectedImage?,
+    cameraActive: Boolean,
     output: String,
     outputIsError: Boolean,
     promptForOutput: String,
@@ -187,6 +180,7 @@ fun MainScreen(
     onModelSelected: (Model) -> Unit = {},
     onSelectImage: () -> Unit = {},
     onTakePhoto: () -> Unit = {},
+    onCaptureCameraImage: (Bitmap) -> Unit = {},
     onClearImage: () -> Unit = {},
     onSubmitPrompt: (String) -> Unit = {}
 ) {
@@ -208,8 +202,10 @@ fun MainScreen(
             ImageSelector(
                 enabled = selectedModel.supportsImage,
                 selectedImage = selectedImage.takeIf { selectedModel.supportsImage },
+                cameraActive = cameraActive && selectedModel.supportsImage,
                 onSelectImage = onSelectImage,
                 onTakePhoto = onTakePhoto,
+                onCaptureCameraImage = onCaptureCameraImage,
                 onClearImage = onClearImage,
                 modifier = Modifier.fillMaxWidth()
             )
@@ -327,8 +323,10 @@ fun ProgressBar(
 fun ImageSelector(
     enabled: Boolean,
     selectedImage: SelectedImage?,
+    cameraActive: Boolean,
     onSelectImage: () -> Unit,
     onTakePhoto: () -> Unit,
+    onCaptureCameraImage: (Bitmap) -> Unit,
     onClearImage: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -344,7 +342,13 @@ fun ImageSelector(
         }
     ) {
         Box(contentAlignment = Alignment.Center) {
-            if (selectedImage == null) {
+            if (cameraActive && selectedImage == null) {
+                CameraPreviewBox(
+                    onCaptureCameraImage = onCaptureCameraImage,
+                    onCancel = onClearImage,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else if (selectedImage == null) {
                 if (enabled) {
                     Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                         IconButton(
@@ -420,6 +424,102 @@ fun ImageSelector(
     }
 }
 
+@Composable
+fun CameraPreviewBox(
+    onCaptureCameraImage: (Bitmap) -> Unit,
+    onCancel: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var capturing by remember { mutableStateOf(false) }
+    val previewView = remember {
+        PreviewView(context).apply {
+            scaleType = PreviewView.ScaleType.FIT_CENTER
+            implementationMode = PreviewView.ImplementationMode.PERFORMANCE
+        }
+    }
+
+    DisposableEffect(context, lifecycleOwner, previewView) {
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+        val executor = ContextCompat.getMainExecutor(context)
+        val listener = Runnable {
+            val cameraProvider = cameraProviderFuture.get()
+            val resolutionSelector = ResolutionSelector.Builder()
+                .setResolutionStrategy(
+                    ResolutionStrategy(
+                        Size(MAX_IMAGE_PREVIEW_SIZE, MAX_IMAGE_PREVIEW_SIZE),
+                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER
+                    )
+                )
+                .build()
+            val preview = CameraPreviewUseCase.Builder()
+                .setResolutionSelector(resolutionSelector)
+                .build()
+                .also { it.setSurfaceProvider(previewView.surfaceProvider) }
+
+            cameraProvider.unbindAll()
+            cameraProvider.bindToLifecycle(
+                lifecycleOwner,
+                CameraSelector.DEFAULT_BACK_CAMERA,
+                preview
+            )
+        }
+        cameraProviderFuture.addListener(listener, executor)
+
+        onDispose {
+            if (cameraProviderFuture.isDone) {
+                cameraProviderFuture.get().unbindAll()
+            }
+        }
+    }
+
+    Box(modifier = modifier) {
+        AndroidView(
+            factory = { previewView },
+            modifier = Modifier
+                .fillMaxSize()
+                .clickable {
+                    val bitmap = previewView.bitmap
+                    if (!capturing && bitmap != null) {
+                        capturing = true
+                        onCaptureCameraImage(bitmap)
+                    }
+                }
+        )
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 24.dp)
+                .size(72.dp)
+                .clip(CircleShape)
+                .background(Color.White.copy(alpha = if (capturing) 0.45f else 0.85f))
+                .padding(6.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(CircleShape)
+                    .background(Color.White.copy(alpha = if (capturing) 0.35f else 0.0f))
+            )
+        }
+        Surface(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(8.dp),
+            shape = MaterialTheme.shapes.small,
+            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f)
+        ) {
+            IconButton(onClick = onCancel) {
+                Icon(
+                    imageVector = Icons.Filled.Clear,
+                    contentDescription = "Close camera"
+                )
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ModelSelector(
@@ -478,7 +578,7 @@ class MainActivity : ComponentActivity() {
         var prefillProgress by mutableStateOf<Double?>(null)
         var prefillTime by mutableStateOf<Double?>(null)
         var generationRate by mutableStateOf<Double?>(null)
-        var cameraImageUri by mutableStateOf<Uri?>(null)
+        var cameraActive by mutableStateOf(false)
 
         Worker.setListener { event ->
             when (event) {
@@ -539,13 +639,11 @@ class MainActivity : ComponentActivity() {
                     loadSelectedImage(uri)
                 }
             }
-            val camera = rememberLauncherForActivityResult(
-                TakePictureWithExplicitUriGrant()
-            ) { success ->
-                val uri = cameraImageUri
-                cameraImageUri = null
-                if (success && uri != null) {
-                    loadSelectedImage(uri)
+            val cameraPermission = rememberLauncherForActivityResult(
+                ActivityResultContracts.RequestPermission()
+            ) { granted ->
+                if (granted) {
+                    cameraActive = true
                 }
             }
 
@@ -554,6 +652,7 @@ class MainActivity : ComponentActivity() {
                     ready = (loadedModel == selectedModel),
                     selectedModel = selectedModel,
                     selectedImage = selectedImage,
+                    cameraActive = cameraActive,
                     output = output,
                     outputIsError = outputIsError,
                     promptForOutput = promptForOutput,
@@ -563,6 +662,7 @@ class MainActivity : ComponentActivity() {
                     generationRate = generationRate,
                     modifier = Modifier.fillMaxSize(),
                     onModelSelected = { model: Model ->
+                        cameraActive = false
                         selectedModel = model
                         Worker.send(Worker.Command.Load(model))
                     },
@@ -572,12 +672,30 @@ class MainActivity : ComponentActivity() {
                         )
                     },
                     onTakePhoto = {
-                        val uri = createCameraImageUri(context.applicationContext)
-                        cameraImageUri = uri
-                        camera.launch(uri)
+                        if (
+                            ContextCompat.checkSelfPermission(
+                                context,
+                                Manifest.permission.CAMERA
+                            ) == PackageManager.PERMISSION_GRANTED
+                        ) {
+                            selectedImage = null
+                            cameraActive = true
+                        } else {
+                            cameraPermission.launch(Manifest.permission.CAMERA)
+                        }
+                    },
+                    onCaptureCameraImage = { bitmap ->
+                        thread {
+                            val image = selectedImageFromBitmap(bitmap, "Camera image")
+                            runOnUiThread {
+                                selectedImage = image
+                                cameraActive = false
+                            }
+                        }
                     },
                     onClearImage = {
                         selectedImage = null
+                        cameraActive = false
                     },
                     onSubmitPrompt = { prompt ->
                         val image = selectedImage.takeIf { selectedModel.supportsImage }
@@ -603,6 +721,7 @@ fun Preview() {
             ready = true,
             selectedModel = Model.Dummy,
             selectedImage = null,
+            cameraActive = false,
             output = "That's a very interesting question. The answer is subjective.",
             outputIsError = false,
             promptForOutput = "",
