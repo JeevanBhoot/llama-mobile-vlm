@@ -14,7 +14,7 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.SquashedLlama">
         <activity
-            android:name="ai.graphcore.squashedllama.MainActivity"
+            android:name="ai.graphcore.llamamobiledemo.MainActivity"
             android:exported="true"
             android:theme="@style/Theme.SquashedLlama"
             android:windowSoftInputMode="adjustResize">

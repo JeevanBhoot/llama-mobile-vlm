@@ -6,11 +6,11 @@ plugins {
 }
 
 android {
-    namespace = "ai.graphcore.squashedllama"
+    namespace = "ai.graphcore.llamamobiledemo"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "ai.graphcore.squashedllama"
+        applicationId = "ai.graphcore.llamamobiledemo"
         minSdk = 34
         targetSdk = 34
         versionCode = 1

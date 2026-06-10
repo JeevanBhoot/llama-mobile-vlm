@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Graphcore Ltd. All rights reserved.
 
-package ai.graphcore.squashedllama
+package ai.graphcore.llamamobiledemo
 
 import org.junit.Test
 

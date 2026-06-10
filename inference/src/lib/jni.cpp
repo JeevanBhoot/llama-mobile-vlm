@@ -103,7 +103,7 @@ T errorGuard(JNIEnv* env, F&& func) {
 }  // namespace
 
 extern "C" JNIEXPORT void JNICALL  //
-Java_ai_graphcore_squashedllama_Lib_load(JNIEnv* env, jobject /*this*/, jstring _path) {
+Java_ai_graphcore_llamamobiledemo_Lib_load(JNIEnv* env, jobject /*this*/, jstring _path) {
     errorGuard<void>(env, [&] {
         ProgressScope _progressScope;
         squash::selectOmpNumThreads();
@@ -116,12 +116,12 @@ Java_ai_graphcore_squashedllama_Lib_load(JNIEnv* env, jobject /*this*/, jstring 
 }
 
 extern "C" JNIEXPORT void JNICALL  //
-Java_ai_graphcore_squashedllama_Lib_unload(JNIEnv* env, jobject /*this*/) {
+Java_ai_graphcore_llamamobiledemo_Lib_unload(JNIEnv* env, jobject /*this*/) {
     errorGuard<void>(env, [&] { session.reset(); });
 }
 
 extern "C" JNIEXPORT jobject JNICALL  //
-Java_ai_graphcore_squashedllama_Lib_progress(JNIEnv* env, jobject /*this*/) {
+Java_ai_graphcore_llamamobiledemo_Lib_progress(JNIEnv* env, jobject /*this*/) {
     auto current = progress.get();
     if (!current) {
         return nullptr;
@@ -132,7 +132,7 @@ Java_ai_graphcore_squashedllama_Lib_progress(JNIEnv* env, jobject /*this*/) {
 }
 
 extern "C" JNIEXPORT jobjectArray JNICALL  //
-Java_ai_graphcore_squashedllama_Lib_prefill(JNIEnv* env,
+Java_ai_graphcore_llamamobiledemo_Lib_prefill(JNIEnv* env,
                                             jobject /*this*/,
                                             jstring _prefix,
                                             jint imageWidth,
@@ -168,7 +168,7 @@ Java_ai_graphcore_squashedllama_Lib_prefill(JNIEnv* env,
 }
 
 extern "C" JNIEXPORT jstring JNICALL  //
-Java_ai_graphcore_squashedllama_Lib_generate(JNIEnv* env, jobject /*this*/) {
+Java_ai_graphcore_llamamobiledemo_Lib_generate(JNIEnv* env, jobject /*this*/) {
     return errorGuard<jstring>(env, [&] {
         if (!session) {
             throw std::runtime_error("No model loaded");
