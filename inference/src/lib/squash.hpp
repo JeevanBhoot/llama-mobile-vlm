@@ -203,6 +203,7 @@ struct Generator {
     std::default_random_engine rng;
     KVCache kvCache;
     std::optional<KVCache> crossAttentionCache;
+    std::optional<uint> crossAttentionStart;
     Options options;
     uint prevToken;
 

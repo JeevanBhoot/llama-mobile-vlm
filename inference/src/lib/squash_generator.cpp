@@ -174,6 +174,15 @@ void resetCache(Generator& g, uint dSequenceMax) {
     }
 }
 
+Tensor zeroRowsBeforeImageToken(const Generator& g, Tensor&& x) {
+    if (g.crossAttentionStart && *g.crossAttentionStart > g.kvCache.dSequence) {
+        auto rows = std::min(x.shape[0], *g.crossAttentionStart - g.kvCache.dSequence);
+        auto rowSize = prod(x.shape) / x.shape[0];
+        std::fill_n(data<bf16>(x), rows * rowSize, bf16(0.0f));
+    }
+    return std::move(x);
+}
+
 void forward(Generator& g, const std::vector<uint>& tokens, ProgressTracker& progress) {
     if (g.kvCache.dSequenceMax < g.kvCache.dSequence + tokens.size()) {
         std::ostringstream err;
@@ -186,16 +195,21 @@ void forward(Generator& g, const std::vector<uint>& tokens, ProgressTracker& pro
         auto xattn =
             std::find(model.crossAttentionLayers.begin(), model.crossAttentionLayers.end(), i);
         if (xattn != model.crossAttentionLayers.end()) {
-            auto xi = static_cast<size_t>(xattn - model.crossAttentionLayers.begin());
             if (g.crossAttentionCache) {
-                x = add(std::move(x), crossAttention(model, model.layers[i].attention, x,
-                                                     g.crossAttentionCache->entries[xi]));
+                auto xi = static_cast<size_t>(xattn - model.crossAttentionLayers.begin());
+                auto xCross = crossAttention(model, model.layers[i].attention, x,
+                                             g.crossAttentionCache->entries[xi]);
+                x = add(std::move(x), xCross);
+
+                auto xMlp = mlp(model, model.layers[i].mlp, x);
+                // zero out the contribution of cross-layer MLPs before the image token
+                x = add(std::move(x), zeroRowsBeforeImageToken(g, std::move(xMlp)));
             }
         } else {
             x = add(std::move(x), attention(model, model.layers[i].attention, x,
                                             g.kvCache.dSequence, g.kvCache.entries[i]));
+            x = add(std::move(x), mlp(model, model.layers[i].mlp, x));
         }
-        x = add(std::move(x), mlp(model, model.layers[i].mlp, x));
         progress.step();
     }
     x = clone(slice0(x, x.shape[0] - 1, x.shape[0]));  // for efficiency, only keep last token
@@ -220,17 +234,25 @@ Tensor forwardImage(Generator& g, const TensorV& image, ProgressTracker& progres
 
     // First transformer stack
     for (auto i = 0u; i < model.dLayers0; ++i) {
-        auto& layer = model.layers0[i];
-        x = add(std::move(x), visionAttention(model, layer.attention, x));
-        x = add(std::move(x), visionMlp(model, layer.mlp, x));
+        // Note: tap index `i` is taken *before* the layer
         auto tap = std::find(model.outputTaps.begin(), model.outputTaps.end(), i);
         if (tap != model.outputTaps.end()) {
             auto idx = static_cast<uint>(tap - model.outputTaps.begin());
             out = add(std::move(out),
                       projection(indexLeading(model.multiModalProjector.weight, {idx}), x));
         }
+        auto& layer = model.layers0[i];
+        x = add(std::move(x), visionAttention(model, layer.attention, x));
+        x = add(std::move(x), visionMlp(model, layer.mlp, x));
         progress.step();
     }
+    auto finalTap = std::find(model.outputTaps.begin(), model.outputTaps.end(), model.dLayers0);
+    if (finalTap != model.outputTaps.end()) {
+        auto idx = static_cast<uint>(finalTap - model.outputTaps.begin());
+        out = add(std::move(out),
+                  projection(indexLeading(model.multiModalProjector.weight, {idx}), x));
+    }
+
     x = layerNorm(model.layerNormPost.weight, model.layerNormPost.bias, x, model.normEpsilon);
     // Lookup {aspectRatioID = 0, tileIndex = 0}
     x = broadcastAdd(std::move(x), indexLeading(model.tileEmbeddingPost, {0, 0}));
@@ -352,6 +374,15 @@ std::vector<std::string> Generator::prefill(const std::string& prefix,
 
     // Handle text
     auto tokens = buildPromptTokens(model.textModel, prefix, image.has_value());
+    if (model.textModel.imageID) {
+        auto imageToken = std::find(tokens.begin(), tokens.end(), *model.textModel.imageID);
+        crossAttentionStart =
+            (imageToken == tokens.end())
+                ? std::nullopt
+                : std::make_optional(static_cast<uint>(imageToken - tokens.begin()));
+    } else {
+        crossAttentionStart = std::nullopt;
+    }
     auto outputTokens = model.textModel.tokenizer.encode(prefix);
     resetCache(*this, uint(tokens.size() + options.maxGeneratedTokens));
     forward(*this, tokens, progress);
