@@ -17,7 +17,7 @@ int main(int argc, char** argv) {
          cxxopts::value<bool>()->default_value("false"))  //
         ("help", "Print help")                            //
         ("g,max_generated_tokens", "Maximum number of generated tokens",
-         cxxopts::value<uint>()->default_value("16"))                                           //
+         cxxopts::value<uint>()->default_value("128"))                                          //
         ("t,temperature", "Sampling temperature", cxxopts::value<float>()->default_value("0"))  //
         ("top_k", "Sampling top-k", cxxopts::value<uint>()->default_value("50"))                //
         ("top_p", "Sampling top-p", cxxopts::value<float>()->default_value("1"))                //
