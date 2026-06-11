@@ -12,10 +12,28 @@ import kotlin.concurrent.withLock
 import kotlin.time.DurationUnit
 import kotlin.time.TimeSource
 
-enum class Model(val label: String, val path: String, val supportsImage: Boolean) {
-    Dummy("None", "", true),
-    TextInt8("Text (INT8)", "/data/local/tmp/text-int8.sqt", false),
-    VisionS3d8("Vision (S3D8)", "/data/local/tmp/vision-s3d8.sqt", true),
+enum class Model(
+    val label: String,
+    val supportsImage: Boolean,
+    val sizeLabel: String? = null,
+    val fileName: String? = null,
+    val downloadUrl: String? = null
+) {
+    Dummy("Select Model", true),
+    VisionS3d8(
+        "Vision (S3D8)",
+        true,
+        sizeLabel = "3.7 GB",
+        fileName = "vision-11B-s3d8.sqt",
+        downloadUrl = "https://graphcore-research-public.s3.eu-west-1.amazonaws.com/2026-llama-mobile/models/20260611/vision-11B-s3d8.sqt"
+    ),
+    TextInt8(
+        "Text (INT8)",
+        false,
+        sizeLabel = "1.5 GB",
+        fileName = "text-1B-int8.sqt",
+        downloadUrl = "https://graphcore-research-public.s3.eu-west-1.amazonaws.com/2026-llama-mobile/models/20260611/text-1B-int8.sqt"
+    ),
 }
 
 data class Image(
@@ -132,7 +150,7 @@ object DummyGenerator : Generator {
 
 object Worker {
     interface Command {
-        data class Load(val model: Model) : Command
+        data class Load(val model: Model, val path: String) : Command
         data class Generate(
             val prompt: String,
             val image: Image? = null
@@ -190,7 +208,7 @@ object Worker {
                         generator = nextGenerator
                     }
                     withProgress(ProgressPhase.Loading) {
-                        generator.load(command.model.path)
+                        generator.load(command.path)
                     }
                     onEvent(Event.Loaded(command.model))
                 }
@@ -249,7 +267,7 @@ object Worker {
                     generator.unload()
                 } catch (_: Throwable) { }
                 generator = DummyGenerator
-                generator.load(Model.Dummy.path)
+                generator.load("")
                 onEvent(Event.Loaded(Model.Dummy))
             }
             onEvent(Event.Error(error.message ?: error.toString()))

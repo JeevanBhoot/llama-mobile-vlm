@@ -50,6 +50,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
@@ -61,8 +62,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -86,6 +89,7 @@ import androidx.core.content.ContextCompat
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.concurrent.thread
+import kotlinx.coroutines.delay
 
 private const val MAX_IMAGE_PREVIEW_SIZE = 560
 
@@ -164,11 +168,25 @@ fun compactArgb8888Bitmap(bitmap: Bitmap): Bitmap {
     return argbBitmap
 }
 
+fun refreshModelDownloadStates(modelStore: ModelStore): Map<Model, ModelDownloadState> {
+    return Model.entries.associateWith { modelStore.state(it) }
+}
+
+fun modelIsLoadable(model: Model, state: ModelDownloadState): Boolean {
+    return model == Model.Dummy || state == ModelDownloadState.Installed
+}
+
+enum class ModelAction {
+    Download,
+    Delete
+}
+
 @SuppressLint("DefaultLocale")
 @Composable
 fun MainScreen(
     ready: Boolean,
     selectedModel: Model,
+    modelDownloadState: ModelDownloadState,
     selectedImage: SelectedImage?,
     cameraActive: Boolean,
     output: String,
@@ -184,11 +202,14 @@ fun MainScreen(
     onTakePhoto: () -> Unit = {},
     onCaptureCameraImage: (Bitmap) -> Unit = {},
     onClearImage: () -> Unit = {},
+    onDownloadModel: () -> Unit = {},
+    onDeleteModel: () -> Unit = {},
     onShowAbout: () -> Unit = {},
     onSubmitPrompt: (String) -> Unit = {}
 ) {
     Surface(modifier = modifier, color = MaterialTheme.colorScheme.surface) {
         Box(modifier = Modifier.fillMaxSize()) {
+            var pendingModelAction by remember { mutableStateOf<ModelAction?>(null) }
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -215,9 +236,23 @@ fun MainScreen(
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(Modifier.height(8.dp))
-                ModelSelector(
-                    selectedModel = selectedModel,
-                    onModelSelected = onModelSelected,
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    ModelSelector(
+                        selectedModel = selectedModel,
+                        onModelSelected = onModelSelected,
+                        modifier = Modifier.weight(1f)
+                    )
+                    ModelActionButton(
+                        state = modelDownloadState,
+                        onAction = { pendingModelAction = it },
+                        modifier = Modifier.padding(start = 8.dp)
+                    )
+                }
+                ModelDownloadStatus(
+                    state = modelDownloadState,
                     modifier = Modifier.fillMaxWidth()
                 )
                 ProgressBar(
@@ -298,6 +333,20 @@ fun MainScreen(
                     color = Color.Gray,
                 )
             }
+            pendingModelAction?.let { action ->
+                ModelActionDialog(
+                    action = action,
+                    model = selectedModel,
+                    onConfirm = {
+                        pendingModelAction = null
+                        when (action) {
+                            ModelAction.Download -> onDownloadModel()
+                            ModelAction.Delete -> onDeleteModel()
+                        }
+                    },
+                    onDismiss = { pendingModelAction = null }
+                )
+            }
             IconButton(
                 onClick = onShowAbout,
                 modifier = Modifier
@@ -313,6 +362,129 @@ fun MainScreen(
             }
         }
     }
+}
+
+@SuppressLint("DefaultLocale")
+@Composable
+fun ModelDownloadStatus(
+    state: ModelDownloadState,
+    modifier: Modifier = Modifier
+) {
+    when (state) {
+        ModelDownloadState.Installed,
+        ModelDownloadState.Missing,
+        ModelDownloadState.NotDownloadable -> Unit
+
+        is ModelDownloadState.Downloading -> {
+            if (state.progress != null) {
+                ProgressBar(
+                    label = "Downloading",
+                    progress = state.progress,
+                    modifier = modifier
+                )
+            } else {
+                Text(
+                    "Downloading...",
+                    modifier = modifier.padding(top = 4.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.Gray
+                )
+            }
+        }
+
+        is ModelDownloadState.Failed -> {
+            Row(
+                modifier = modifier,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    state.message,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(top = 4.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun ModelActionButton(
+    state: ModelDownloadState,
+    onAction: (ModelAction) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    when (state) {
+        ModelDownloadState.Installed -> {
+            IconButton(
+                onClick = { onAction(ModelAction.Delete) },
+                modifier = modifier
+            ) {
+                Icon(
+                    painter = painterResource(R.drawable.ic_delete_24),
+                    contentDescription = "Delete model",
+                    tint = Color.Gray
+                )
+            }
+        }
+
+        ModelDownloadState.Missing,
+        is ModelDownloadState.Failed -> {
+            IconButton(
+                onClick = { onAction(ModelAction.Download) },
+                modifier = modifier
+            ) {
+                Icon(
+                    painter = painterResource(R.drawable.ic_download_24),
+                    contentDescription = "Download model",
+                    tint = Color.Gray
+                )
+            }
+        }
+
+        is ModelDownloadState.Downloading,
+        ModelDownloadState.NotDownloadable -> Spacer(modifier = modifier.size(48.dp))
+    }
+}
+
+@Composable
+fun ModelActionDialog(
+    action: ModelAction,
+    model: Model,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val size = model.sizeLabel ?: "unknown"
+    val title = when (action) {
+        ModelAction.Download -> "Download model?"
+        ModelAction.Delete -> "Remove model?"
+    }
+    val text = when (action) {
+        ModelAction.Download -> "Download \"${model.label}\", Size: $size, WiFi strongly recommended"
+        ModelAction.Delete -> "Remove \"${model.label}\", Size: $size."
+    }
+    val confirmText = when (action) {
+        ModelAction.Download -> "Download"
+        ModelAction.Delete -> "Remove"
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = { Text(text) },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text(confirmText)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
 }
 
 @SuppressLint("DefaultLocale")
@@ -599,11 +771,13 @@ class MainActivity : ComponentActivity() {
         var generationRate by mutableStateOf<Double?>(null)
         var cameraActive by mutableStateOf(false)
         var showAbout by mutableStateOf(false)
+        var loadingModel by mutableStateOf<Model?>(null)
 
         Worker.setListener { event ->
             when (event) {
                 is Worker.Event.Loaded -> {
                     loadedModel = event.model
+                    loadingModel = null
                     output = ""
                     outputIsError = false
                     promptForOutput = ""
@@ -630,6 +804,7 @@ class MainActivity : ComponentActivity() {
                 }
 
                 is Worker.Event.Error -> {
+                    loadingModel = null
                     output = event.message
                     outputIsError = true
                     promptForOutput = ""
@@ -643,6 +818,41 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val context = LocalContext.current
+            val modelStore = remember { ModelStore(context) }
+            var modelDownloadStates by remember {
+                mutableStateOf(refreshModelDownloadStates(modelStore))
+            }
+
+            fun refreshDownloads(): Map<Model, ModelDownloadState> {
+                val states = refreshModelDownloadStates(modelStore)
+                modelDownloadStates = states
+                return states
+            }
+
+            fun loadModel(model: Model) {
+                loadingModel = model
+                Worker.send(Worker.Command.Load(model, modelStore.pathFor(model)))
+            }
+
+            LaunchedEffect(modelStore) {
+                var previousStates = modelDownloadStates
+                while (true) {
+                    val states = refreshDownloads()
+                    val previousSelectedState = previousStates[selectedModel]
+                    val selectedState = states[selectedModel] ?: ModelDownloadState.Missing
+                    if (
+                        previousSelectedState is ModelDownloadState.Downloading &&
+                        selectedState == ModelDownloadState.Installed &&
+                        loadedModel != selectedModel &&
+                        loadingModel != selectedModel
+                    ) {
+                        loadModel(selectedModel)
+                    }
+                    previousStates = states
+                    delay(500)
+                }
+            }
+
             fun loadSelectedImage(uri: Uri) {
                 thread {
                     val image = selectedImageFromUri(context.applicationContext, uri)
@@ -675,8 +885,10 @@ class MainActivity : ComponentActivity() {
                     )
                 } else {
                     MainScreen(
-                        ready = (loadedModel == selectedModel),
+                        ready = (loadedModel == selectedModel && loadingModel == null),
                         selectedModel = selectedModel,
+                        modelDownloadState = modelDownloadStates[selectedModel]
+                            ?: ModelDownloadState.Missing,
                         selectedImage = selectedImage,
                         cameraActive = cameraActive,
                         output = output,
@@ -690,7 +902,11 @@ class MainActivity : ComponentActivity() {
                         onModelSelected = { model: Model ->
                             cameraActive = false
                             selectedModel = model
-                            Worker.send(Worker.Command.Load(model))
+                            val states = refreshDownloads()
+                            val state = states[model] ?: ModelDownloadState.Missing
+                            if (modelIsLoadable(model, state)) {
+                                loadModel(model)
+                            }
                         },
                         onSelectImage = {
                             imagePicker.launch(
@@ -723,6 +939,16 @@ class MainActivity : ComponentActivity() {
                             selectedImage = null
                             cameraActive = false
                         },
+                        onDownloadModel = {
+                            modelStore.startDownload(selectedModel)
+                            refreshDownloads()
+                        },
+                        onDeleteModel = {
+                            modelStore.delete(selectedModel)
+                            refreshDownloads()
+                            selectedModel = Model.Dummy
+                            loadModel(Model.Dummy)
+                        },
                         onShowAbout = {
                             cameraActive = false
                             showAbout = true
@@ -751,6 +977,7 @@ fun Preview() {
         MainScreen(
             ready = true,
             selectedModel = Model.Dummy,
+            modelDownloadState = ModelDownloadState.NotDownloadable,
             selectedImage = null,
             cameraActive = false,
             output = "That's a very interesting question. The answer is subjective.",
