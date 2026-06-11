@@ -51,7 +51,7 @@ std::string regexUnicodeToModifiedECMA(const std::string& original) {
 
 namespace {
 constexpr auto Magic = 0x7471732eu;
-constexpr auto Version = 2u;
+constexpr auto Version = 3u;
 constexpr auto MaxRamProportion = 0.75f;
 constexpr auto BufferChunkSize = 4096u;
 
@@ -249,6 +249,10 @@ TextModel loadTextModel(const json& header, const json& metadata, ParamBuffer& p
              }});
     }
     auto tiedEmbeddings = c.at("tied_embeddings").template get<bool>();
+    auto stopTokenIDs = v.at("stop_token_ids").template get<std::vector<uint>>();
+    if (stopTokenIDs.empty()) {
+        throw std::runtime_error("Model metadata has empty stop_token_ids");
+    }
     return TextModel{
         // Config
         .dLayers = c.at("d_layers").template get<uint>(),
@@ -272,11 +276,15 @@ TextModel loadTextModel(const json& header, const json& metadata, ParamBuffer& p
 
         // Vocab
         .tokenizer = loadTokenizer(v),
+        .chatTemplate = v.at("chat_template").template get<std::string>(),
         .beginOfTextID = v.at("begin_of_text_id").template get<uint>(),
-        .endOfTextID = v.at("end_of_text_id").template get<uint>(),
-        .imageID = v.contains("image_id") && !v.at("image_id").is_null()
-                       ? std::optional<uint>(v.at("image_id").template get<uint>())
-                       : std::nullopt,
+        .startHeaderID = v.at("start_header_id").template get<uint>(),
+        .endHeaderID = v.at("end_header_id").template get<uint>(),
+        .eotID = v.at("eot_id").template get<uint>(),
+        .stopTokenIDs = std::move(stopTokenIDs),
+        .imageID = v.at("image_id").is_null()
+                       ? std::nullopt
+                       : std::optional<uint>(v.at("image_id").template get<uint>()),
     };
 }
 

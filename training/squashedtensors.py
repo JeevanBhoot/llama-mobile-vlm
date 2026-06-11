@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any, Literal, Optional, Union
 
+import safetensors.torch
 import torch
 import transformers
 import weight_formats.quantisation_training as T
@@ -25,8 +26,7 @@ from transformers.models.llama.modeling_llama import LlamaForCausalLM
 from transformers.models.mllama.image_processing_mllama import MllamaImageProcessor
 from transformers.models.mllama.modeling_mllama import MllamaForConditionalGeneration
 
-
-FILE_VERSION = 2
+FILE_VERSION = 3
 
 
 def align(n: int, alignment: int) -> int:
@@ -170,7 +170,13 @@ def rope_angular_frequency(config: transformers.PretrainedConfig) -> Tensor:
     return freq
 
 
-def get_vocab_dict(tokenizer: transformers.PreTrainedTokenizerFast) -> dict[str, Any]:
+def get_vocab_dict(
+    tokenizer: transformers.PreTrainedTokenizerFast,
+    config: transformers.PretrainedConfig,
+) -> dict[str, Any]:
+    if tokenizer.chat_template is None:
+        raise ValueError("Tokenizer has no chat_template")
+
     # Persist-to-file & load to get acccess to the tokenizer internals
     with tempfile.TemporaryDirectory() as tmp:
         tokenizer.backend_tokenizer.save(tmp + "/tokenizer.json")
@@ -188,13 +194,30 @@ def get_vocab_dict(tokenizer: transformers.PreTrainedTokenizerFast) -> dict[str,
     pre_regex = pre_split["pattern"]["Regex"]
     assert pre_byte["type"] == "ByteLevel"
 
-    def _special_token_id(token: str, required: bool = True) -> int:
+    def _special_token_id(token: str, required: bool = True) -> int | None:
         matches = [t["id"] for t in data["added_tokens"] if t["content"] == token]
         if len(matches) > 1:
             raise ValueError(f"Multiple token IDs for token {token!r}")
         if required and not matches:
             raise ValueError(f"Special token {token!r} not found")
         return matches[0] if matches else None
+
+    def _stop_token_ids() -> list[int]:
+        ids = set([])
+        eos_token_id = getattr(config, "eos_token_id", None)
+        if eos_token_id is None and "text_config" in config:
+            eos_token_id = getattr(config.text_config, "eos_token_id", None)
+        if eos_token_id is None:
+            eos_token_id = tokenizer.eos_token_id
+        if isinstance(eos_token_id, list):
+            ids.update(eos_token_id)
+        elif eos_token_id is not None:
+            ids.add(eos_token_id)
+        for stop_token in ("<|end_of_text|>", "<|eom_id|>", "<|eot_id|>"):
+            token_id = _special_token_id(stop_token, required=False)
+            if token_id is not None and token_id not in ids:
+                ids.add(token_id)
+        return sorted(ids)
 
     # Concatenate merges to single strings & de-duplicate
     merge_set = set([])
@@ -205,15 +228,34 @@ def get_vocab_dict(tokenizer: transformers.PreTrainedTokenizerFast) -> dict[str,
             merge_set.add(merge)
             merges.append(merge)
 
-    # Convert vocab from a dict to a list
-    vocab = [None] * len(data["model"]["vocab"])
+    # Convert vocab from a dict to a list, including added special tokens.
+    text_config = getattr(config, "text_config", config)
+    max_token_id = max(
+        list(data["model"]["vocab"].values()) + [t["id"] for t in data["added_tokens"]]
+    )
+    vocab_size = max(getattr(text_config, "vocab_size", 0), max_token_id + 1)
+    vocab = [None] * vocab_size
     for token, id in data["model"]["vocab"].items():
         vocab[id] = token
-    assert all(token is not None for token in vocab)
+    for token in data["added_tokens"]:
+        existing = vocab[token["id"]]
+        if existing is not None and existing != token["content"]:
+            raise ValueError(
+                f"Multiple token contents for ID {token['id']}: "
+                f"{existing!r} and {token['content']!r}"
+            )
+        vocab[token["id"]] = token["content"]
+    missing = [i for i, token in enumerate(vocab) if token is None]
+    if missing:
+        raise ValueError(f"No token content for vocab IDs {missing[:10]}")
 
     return dict(
+        chat_template=tokenizer.chat_template,
         begin_of_text_id=_special_token_id("<|begin_of_text|>"),
-        end_of_text_id=_special_token_id("<|end_of_text|>"),
+        start_header_id=_special_token_id("<|start_header_id|>"),
+        end_header_id=_special_token_id("<|end_header_id|>"),
+        eot_id=_special_token_id("<|eot_id|>"),
+        stop_token_ids=_stop_token_ids(),
         image_id=_special_token_id("<|image|>", required=False),
         pre_tokenizer=pre_regex,
         merges=merges,
@@ -412,17 +454,19 @@ def save(
     image_processor: MllamaImageProcessor | None,
     file_or_path: Union[str, Path, IO[bytes]],
     alignment: int = 32,
+    comment: str | None = None,
 ) -> None:
     """Save a Llama model to '.sqt' format."""
-    header_dict = dict(
-        __metadata__=dict(
-            source=model.config._name_or_path,
-            created=datetime.datetime.now().isoformat(timespec="seconds"),
-            alignment=alignment,
-            config=get_config_dict(model.config, image_processor),
-            vocab=get_vocab_dict(tokenizer),
-        )
+    metadata = dict(
+        source=model.config._name_or_path,
+        created=datetime.datetime.now().isoformat(timespec="seconds"),
+        alignment=alignment,
+        config=get_config_dict(model.config, image_processor),
+        vocab=get_vocab_dict(tokenizer, model.config),
     )
+    if comment is not None:
+        metadata["comment"] = comment
+    header_dict = dict(__metadata__=metadata)
     params = prepare_parameters(model)
 
     # Measure serialized tensors, but discard them (for sake of memory usage)
@@ -496,6 +540,18 @@ def _run() -> None:
         type=Path,
         help="Output path for the '.sqt' file",
     )
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=None,
+        help="Optional quantised checkpoint produced by direct_cast.py or QAT",
+    )
+    parser.add_argument(
+        "--comment",
+        type=str,
+        default=None,
+        help="Optional comment to store in the '.sqt' header metadata",
+    )
     args = parser.parse_args()
     config = transformers.AutoConfig.from_pretrained(args.model_name_or_path)
     if config.model_type == "llama":
@@ -513,7 +569,9 @@ def _run() -> None:
         )
     tokenizer = transformers.AutoTokenizer.from_pretrained(args.model_name_or_path)
     model = model_cls.from_pretrained(args.model_name_or_path)
-    save(model, tokenizer, image_processor, args.output_path)
+    if args.checkpoint is not None:
+        T.load_convert(model, safetensors.torch.load_file(args.checkpoint))
+    save(model, tokenizer, image_processor, args.output_path, comment=args.comment)
 
 
 if __name__ == "__main__":

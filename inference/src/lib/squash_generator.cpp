@@ -3,6 +3,8 @@
 #include "squash.hpp"
 
 #include <algorithm>
+#include <ctime>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 
@@ -264,6 +266,40 @@ Generator::KVCache prepareCrossAttentionCache(const TextModel& model,
     return cache;
 }
 
+bool isStopToken(const TextModel& model, uint token) {
+    return std::find(model.stopTokenIDs.begin(), model.stopTokenIDs.end(), token) !=
+           model.stopTokenIDs.end();
+}
+
+void appendEncoded(std::vector<uint>& tokens, const TextModel& model, const std::string& text) {
+    auto encoded = model.tokenizer.encode(text);
+    tokens.insert(tokens.end(), encoded.begin(), encoded.end());
+}
+
+void appendHeader(std::vector<uint>& tokens, const TextModel& model, const std::string& role) {
+    tokens.push_back(model.startHeaderID);
+    appendEncoded(tokens, model, role);
+    tokens.push_back(model.endHeaderID);
+    appendEncoded(tokens, model, "\n\n");
+}
+
+std::vector<uint> buildPromptTokens(const TextModel& model,
+                                    const std::string& prefix,
+                                    bool hasImage) {
+    std::vector<uint> tokens = {model.beginOfTextID};
+    appendHeader(tokens, model, "user");
+    appendEncoded(tokens, model, prefix);
+    if (hasImage) {
+        if (!model.imageID) {
+            throw std::runtime_error("Model supports vision but tokenizer has no image token ID");
+        }
+        tokens.push_back(*model.imageID);
+    }
+    tokens.push_back(model.eotID);
+    appendHeader(tokens, model, "assistant");
+    return tokens;
+}
+
 }  // namespace
 
 Generator::Options Generator::Options::greedy(uint maxGeneratedTokens) {
@@ -315,37 +351,30 @@ std::vector<std::string> Generator::prefill(const std::string& prefix,
     }
 
     // Handle text
-    std::vector<uint> tokens = {model.textModel.beginOfTextID};
-    if (image) {
-        tokens.push_back(*model.textModel.imageID);
-    }
-    auto nSpecial = tokens.size();
-    auto encoded = model.textModel.tokenizer.encode(prefix);
-    tokens.insert(tokens.end(), encoded.begin(), encoded.end());
+    auto tokens = buildPromptTokens(model.textModel, prefix, image.has_value());
+    auto outputTokens = model.textModel.tokenizer.encode(prefix);
     resetCache(*this, uint(tokens.size() + options.maxGeneratedTokens));
     forward(*this, tokens, progress);
 
-    // Return tokens, including prompt
-    if (this->prevToken != model.textModel.endOfTextID) {
-        tokens.push_back(this->prevToken);
+    // Return tokens for the user-visible prompt plus the first generated token.
+    if (!isStopToken(model.textModel, this->prevToken)) {
+        outputTokens.push_back(this->prevToken);
     }
     std::vector<std::string> stringTokens;
-    stringTokens.reserve(tokens.size() - 1);
-    std::transform(tokens.begin() + static_cast<long>(nSpecial), tokens.end(),
-                   std::back_inserter(stringTokens),
+    stringTokens.reserve(outputTokens.size());
+    std::transform(outputTokens.begin(), outputTokens.end(), std::back_inserter(stringTokens),
                    [&](uint t) { return model.textModel.tokenizer.decode({t}); });
     return stringTokens;
 }
 
 std::string Generator::generate() {
-    if (kvCache.dSequence == kvCache.dSequenceMax) {
+    if (kvCache.dSequence == kvCache.dSequenceMax || isStopToken(model.textModel, prevToken)) {
         return "";
     }
     ProgressTracker progress(model.textModel.dLayers, NoProgressCallback);
     forward(*this, {prevToken}, progress);
-    return (prevToken == model.textModel.endOfTextID)
-               ? ""
-               : model.textModel.tokenizer.decode({prevToken});
+    return isStopToken(model.textModel, prevToken) ? ""
+                                                   : model.textModel.tokenizer.decode({prevToken});
 }
 
 }  // namespace squash

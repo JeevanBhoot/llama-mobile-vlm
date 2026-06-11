@@ -8,6 +8,7 @@
 #include <iostream>
 #include <optional>
 #include <random>
+#include <string>
 #include <vector>
 
 #include "core/common.hpp"
@@ -97,8 +98,12 @@ struct TextModel {
 
     // Vocab
     Tokenizer tokenizer;
+    std::string chatTemplate;
     uint beginOfTextID;
-    uint endOfTextID;
+    uint startHeaderID;
+    uint endHeaderID;
+    uint eotID;
+    std::vector<uint> stopTokenIDs;
     std::optional<uint> imageID;
 };
 
@@ -206,7 +211,7 @@ struct Generator {
                                      const std::optional<Image>& image,
                                      const Options& options,
                                      const ProgressCallback& progress = {});
-    // Returns an empty token for endOfText or reaching maxGeneratedTokens
+    // Returns an empty token for stop tokens or reaching maxGeneratedTokens
     std::string generate();
 };
 

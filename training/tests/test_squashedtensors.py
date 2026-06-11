@@ -3,6 +3,7 @@
 import io
 import json
 import struct
+from pathlib import Path
 
 import torch
 import weight_formats.quantisation as Q
@@ -73,16 +74,71 @@ def read_header(buffer: io.BytesIO) -> tuple[int, dict[str, object]]:
     return version, header
 
 
+def test_get_vocab_dict_includes_added_tokens_and_stop_ids() -> None:
+    class FakeBackendTokenizer:
+        def save(self, path: str) -> None:
+            data = {
+                "model": {
+                    "type": "BPE",
+                    "ignore_merges": True,
+                    "vocab": {"a": 0, "b": 1},
+                    "merges": [],
+                },
+                "pre_tokenizer": {
+                    "pretokenizers": [
+                        {"pattern": {"Regex": "."}},
+                        {"type": "ByteLevel"},
+                    ]
+                },
+                "added_tokens": [
+                    {"id": 2, "content": "<|begin_of_text|>"},
+                    {"id": 3, "content": "<|end_of_text|>"},
+                    {"id": 4, "content": "<|start_header_id|>"},
+                    {"id": 5, "content": "<|end_header_id|>"},
+                    {"id": 6, "content": "<|eot_id|>"},
+                    {"id": 7, "content": "<|eom_id|>"},
+                ],
+            }
+            Path(path).write_text(json.dumps(data))
+
+    class FakeTokenizer:
+        backend_tokenizer = FakeBackendTokenizer()
+        chat_template = "{{ bos_token }}"
+        eos_token_id = 6
+
+    config = LlamaConfig(vocab_size=8, eos_token_id=[3, 6])
+
+    vocab = squashedtensors.get_vocab_dict(FakeTokenizer(), config)
+
+    assert vocab["chat_template"] == "{{ bos_token }}"
+    assert vocab["vocab"] == [
+        "a",
+        "b",
+        "<|begin_of_text|>",
+        "<|end_of_text|>",
+        "<|start_header_id|>",
+        "<|end_header_id|>",
+        "<|eot_id|>",
+        "<|eom_id|>",
+    ]
+    assert vocab["begin_of_text_id"] == 2
+    assert vocab["start_header_id"] == 4
+    assert vocab["end_header_id"] == 5
+    assert vocab["eot_id"] == 6
+    assert vocab["image_id"] is None
+    assert vocab["stop_token_ids"] == [3, 6, 7]
+
+
 @torch.inference_mode()
 def test_save_channel_int8_qat_dynamic(monkeypatch) -> None:
-    monkeypatch.setattr(squashedtensors, "get_vocab_dict", lambda _: {})
+    monkeypatch.setattr(squashedtensors, "get_vocab_dict", lambda *_: {})
     buffer = io.BytesIO()
     squashedtensors.save(make_qat_model("dynamic", INT_FMT), None, None, buffer)
 
     version, header = read_header(buffer)
     entry = header["text_model.layers.0.attn.q_proj.weight"]
 
-    assert version == 2
+    assert version == 3
     assert entry["dtype"] == "INT8"
     assert entry["shape"] == [16, 16]
     assert entry["scale"]["dtype"] == "BF16"
@@ -91,8 +147,25 @@ def test_save_channel_int8_qat_dynamic(monkeypatch) -> None:
 
 
 @torch.inference_mode()
+def test_save_comment_metadata(monkeypatch) -> None:
+    monkeypatch.setattr(squashedtensors, "get_vocab_dict", lambda *_: {})
+    buffer = io.BytesIO()
+    squashedtensors.save(
+        make_qat_model("dynamic", INT_FMT),
+        None,
+        None,
+        buffer,
+        comment="calibration sweep 17",
+    )
+
+    _, header = read_header(buffer)
+
+    assert header["__metadata__"]["comment"] == "calibration sweep 17"
+
+
+@torch.inference_mode()
 def test_save_channel_int8_qat_parameter(monkeypatch) -> None:
-    monkeypatch.setattr(squashedtensors, "get_vocab_dict", lambda _: {})
+    monkeypatch.setattr(squashedtensors, "get_vocab_dict", lambda *_: {})
     buffer = io.BytesIO()
     squashedtensors.save(make_qat_model("parameter", INT_FMT), None, None, buffer)
 
@@ -108,7 +181,7 @@ def test_save_channel_int8_qat_parameter(monkeypatch) -> None:
 
 @torch.inference_mode()
 def test_save_channel_s3d8_qat_dynamic(monkeypatch) -> None:
-    monkeypatch.setattr(squashedtensors, "get_vocab_dict", lambda _: {})
+    monkeypatch.setattr(squashedtensors, "get_vocab_dict", lambda *_: {})
     buffer = io.BytesIO()
     squashedtensors.save(make_qat_model("dynamic", S3D8_FMT), None, None, buffer)
 

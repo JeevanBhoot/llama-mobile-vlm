@@ -137,11 +137,51 @@ ulong countParameters(const Model& model) {
 Model Dummy::createModel(const Dummy::Config& c) {
     // Create model
     std::vector<std::string> vocab;
-    for (auto i = 0u; i < c.text.dVocab - 2 - c.vision.has_value(); ++i) {
+    auto addToken = [&](const std::string& token) {
+        if (std::find(vocab.begin(), vocab.end(), token) == vocab.end()) {
+            vocab.push_back(token);
+        }
+    };
+
+    const std::string chatChars =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 :.,?!'/-=\n";
+    std::vector<std::string> chatTokens;
+    for (auto ch : chatChars) {
+        auto token = impl::encodeBytesForBPE(std::string(1, ch));
+        if (std::find(chatTokens.begin(), chatTokens.end(), token) == chatTokens.end()) {
+            chatTokens.push_back(token);
+        }
+    }
+
+    const auto nSpecialTokens = 4u + uint(c.vision.has_value());
+    if (c.text.dVocab <= chatTokens.size() + nSpecialTokens) {
+        throw std::logic_error("Dummy model vocab is too small for chat metadata");
+    }
+    const auto nNumberTokens = c.text.dVocab - uint(chatTokens.size()) - nSpecialTokens;
+    for (auto i = 0u; i < nNumberTokens; ++i) {
         std::ostringstream token;
         token << "_" << i;
-        vocab.push_back(token.str());
+        addToken(token.str());
     }
+    for (const auto& token : chatTokens) {
+        addToken(token);
+    }
+    const auto beginOfTextID = uint(vocab.size());
+    vocab.push_back("<|begin_of_text|>");
+    const auto startHeaderID = uint(vocab.size());
+    vocab.push_back("<|start_header_id|>");
+    const auto endHeaderID = uint(vocab.size());
+    vocab.push_back("<|end_header_id|>");
+    const auto eotID = uint(vocab.size());
+    vocab.push_back("<|eot_id|>");
+    const auto imageID = uint(vocab.size());
+    if (c.vision.has_value()) {
+        vocab.push_back("<|image|>");
+    }
+    if (vocab.size() != c.text.dVocab) {
+        throw std::logic_error("Dummy model vocab size mismatch");
+    }
+
     Model m{
         .textModel{
             // Config
@@ -163,11 +203,15 @@ Model Dummy::createModel(const Dummy::Config& c) {
             .finalNorm = {},
             .predictTokens = {},
             // Vocab
-            .tokenizer = Tokenizer(std::regex("_[0-9]+"), {}, std::vector<std::string>(vocab)),
-            .beginOfTextID = uint(vocab.size()),
-            .endOfTextID = uint(vocab.size() + 1),
-            .imageID =
-                c.vision.has_value() ? std::make_optional(uint(vocab.size() + 2)) : std::nullopt,
+            .tokenizer =
+                Tokenizer(std::regex(R"(_[0-9]+|[\s\S])"), {}, std::vector<std::string>(vocab)),
+            .chatTemplate = "dummy",
+            .beginOfTextID = beginOfTextID,
+            .startHeaderID = startHeaderID,
+            .endHeaderID = endHeaderID,
+            .eotID = eotID,
+            .stopTokenIDs = {eotID},
+            .imageID = c.vision.has_value() ? std::make_optional(imageID) : std::nullopt,
         },
         .visionModel = {},
         // Metadata
@@ -319,7 +363,7 @@ std::string randomPrompt(uint nToken, uint dVocab, ulong seed) {
     std::default_random_engine rng(seed);
     std::ostringstream prompt;
     for (auto i = 0u; i < nToken; ++i) {
-        prompt << "_" << std::uniform_int_distribution<uint>(0, dVocab - 3)(rng);
+        prompt << "_" << std::uniform_int_distribution<uint>(0, dVocab - 128)(rng);
     }
     return prompt.str();
 }
