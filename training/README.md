@@ -76,3 +76,4 @@ python squashedtensors.py meta-llama/Llama-3.2-11B-Vision-Instruct models/v3/vis
 
  - Dataset: `s3://graphcore-research-us-east-1/2024-10-squashedllama/data/`
  - Trained checkpoints: `s3://graphcore-research-us-east-1/2024-10-squashedllama/checkpoints/`
+ - Converted models for inference: `s3://graphcore-research-us-east-1/2024-10-squashedllama/models/`
