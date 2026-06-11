@@ -43,10 +43,10 @@ data class Image(
 )
 
 object Settings {
-    val maxGeneratedTokens = 100
-    val temperature = 0.0  // Greedy for testing
+    val maxGeneratedTokens = 256
+    val temperature = 0.6
     val topK = 50
-    val topP = 1.0
+    val topP = 0.9
 }
 
 enum class ProgressPhase {
