@@ -42,12 +42,14 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
@@ -182,116 +184,133 @@ fun MainScreen(
     onTakePhoto: () -> Unit = {},
     onCaptureCameraImage: (Bitmap) -> Unit = {},
     onClearImage: () -> Unit = {},
+    onShowAbout: () -> Unit = {},
     onSubmitPrompt: (String) -> Unit = {}
 ) {
     Surface(modifier = modifier, color = MaterialTheme.colorScheme.surface) {
-        Column(
-            modifier = Modifier
-                .padding(24.dp)
-                .imePadding(),
-            verticalArrangement = Arrangement.Bottom
-        ) {
-            var prompt by rememberSaveable { mutableStateOf("") }
-            val focusManager = LocalFocusManager.current
-            val textStyle = MaterialTheme.typography.bodyLarge
-            val submitPrompt = {
-                focusManager.clearFocus()
-                onSubmitPrompt(prompt)
-            }
-
-            ImageSelector(
-                enabled = selectedModel.supportsImage,
-                selectedImage = selectedImage.takeIf { selectedModel.supportsImage },
-                cameraActive = cameraActive && selectedModel.supportsImage,
-                onSelectImage = onSelectImage,
-                onTakePhoto = onTakePhoto,
-                onCaptureCameraImage = onCaptureCameraImage,
-                onClearImage = onClearImage,
-                modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(Modifier.height(8.dp))
-            ModelSelector(
-                selectedModel = selectedModel,
-                onModelSelected = onModelSelected,
-                modifier = Modifier.fillMaxWidth()
-            )
-            ProgressBar(
-                label = "Loading",
-                progress = loadingProgress,
-                modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
+        Box(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(24.dp)
+                    .imePadding(),
+                verticalArrangement = Arrangement.Bottom
             ) {
-                OutlinedTextField(
-                    value = prompt,
-                    onValueChange = { prompt = it },
-                    enabled = ready,
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                    keyboardActions = KeyboardActions(onSend = { submitPrompt() }),
-                    label = { Text("Prompt") },
-                    trailingIcon = {
-                        if (prompt.isNotEmpty()) {
-                            IconButton(onClick = { prompt = "" }) {
-                                Icon(
-                                    imageVector = Icons.Filled.Clear,
-                                    contentDescription = "Clear prompt"
-                                )
-                            }
-                        }
-                    },
-                    textStyle = textStyle,
-                    modifier = Modifier.weight(1f),
-                )
-                IconButton(
-                    onClick = { submitPrompt() },
-                    enabled = ready,
-                    modifier = Modifier
-                        .padding(start = 8.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.Send,
-                        contentDescription = "Send",
-                        tint = if (ready) Color.Gray else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
-                    )
+                var prompt by rememberSaveable { mutableStateOf("") }
+                val focusManager = LocalFocusManager.current
+                val textStyle = MaterialTheme.typography.bodyLarge
+                val submitPrompt = {
+                    focusManager.clearFocus()
+                    onSubmitPrompt(prompt)
                 }
+
+                ImageSelector(
+                    enabled = selectedModel.supportsImage,
+                    selectedImage = selectedImage.takeIf { selectedModel.supportsImage },
+                    cameraActive = cameraActive && selectedModel.supportsImage,
+                    onSelectImage = onSelectImage,
+                    onTakePhoto = onTakePhoto,
+                    onCaptureCameraImage = onCaptureCameraImage,
+                    onClearImage = onClearImage,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(8.dp))
+                ModelSelector(
+                    selectedModel = selectedModel,
+                    onModelSelected = onModelSelected,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                ProgressBar(
+                    label = "Loading",
+                    progress = loadingProgress,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = prompt,
+                        onValueChange = { prompt = it },
+                        enabled = ready,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                        keyboardActions = KeyboardActions(onSend = { submitPrompt() }),
+                        label = { Text("Prompt") },
+                        trailingIcon = {
+                            if (prompt.isNotEmpty()) {
+                                IconButton(onClick = { prompt = "" }) {
+                                    Icon(
+                                        imageVector = Icons.Filled.Clear,
+                                        contentDescription = "Clear prompt"
+                                    )
+                                }
+                            }
+                        },
+                        textStyle = textStyle,
+                        modifier = Modifier.weight(1f),
+                    )
+                    IconButton(
+                        onClick = { submitPrompt() },
+                        enabled = ready,
+                        modifier = Modifier
+                            .padding(start = 8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Send,
+                            contentDescription = "Send",
+                            tint = if (ready) Color.Gray else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                        )
+                    }
+                }
+                ProgressBar(
+                    label = "Prefill",
+                    progress = prefillProgress,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(16.dp))
+                OutlinedTextField(
+                    value = output,
+                    onValueChange = {},
+                    readOnly = true,
+                    enabled = ready,
+                    minLines = 3,
+                    label = { Text("Output") },
+                    textStyle = when {
+                        outputIsError -> textStyle.copy(color = MaterialTheme.colorScheme.error)
+                        promptForOutput != prompt -> textStyle.copy(color = Color.Gray)
+                        else -> textStyle
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(16.dp))
+                fun fmtTime(time: Double?): String {
+                    return if (time == null) "--" else "%.1f s".format(time)
+                }
+                fun fmtRate(rate: Double?): String {
+                    return if (rate == null) "--" else "%.1f tok/s".format(rate)
+                }
+                Text(
+                    String.format(
+                        "Prefill ${fmtTime(prefillTime)} | Generation ${fmtRate(generationRate)}"
+                    ),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.Gray,
+                )
             }
-            ProgressBar(
-                label = "Prefill",
-                progress = prefillProgress,
-                modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(Modifier.height(16.dp))
-            OutlinedTextField(
-                value = output,
-                onValueChange = {},
-                readOnly = true,
-                enabled = ready,
-                minLines = 3,
-                label = { Text("Output") },
-                textStyle = when {
-                    outputIsError -> textStyle.copy(color = MaterialTheme.colorScheme.error)
-                    promptForOutput != prompt -> textStyle.copy(color = Color.Gray)
-                    else -> textStyle
-                },
-                modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(Modifier.height(16.dp))
-            fun fmtTime(time: Double?): String {
-                return if (time == null) "--" else "%.1f s".format(time)
+            IconButton(
+                onClick = onShowAbout,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .statusBarsPadding()
+                    .padding(16.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Settings,
+                    contentDescription = "About",
+                    tint = Color.Gray
+                )
             }
-            fun fmtRate(rate: Double?): String {
-                return if (rate == null) "--" else "%.1f tok/s".format(rate)
-            }
-            Text(
-                String.format(
-                    "Prefill ${fmtTime(prefillTime)} | Generation ${fmtRate(generationRate)}"
-                ),
-                style = MaterialTheme.typography.labelSmall,
-                color = Color.Gray,
-            )
         }
     }
 }
@@ -579,6 +598,7 @@ class MainActivity : ComponentActivity() {
         var prefillTime by mutableStateOf<Double?>(null)
         var generationRate by mutableStateOf<Double?>(null)
         var cameraActive by mutableStateOf(false)
+        var showAbout by mutableStateOf(false)
 
         Worker.setListener { event ->
             when (event) {
@@ -648,65 +668,76 @@ class MainActivity : ComponentActivity() {
             }
 
             CustomTheme(largeFonts = false) {
-                MainScreen(
-                    ready = (loadedModel == selectedModel),
-                    selectedModel = selectedModel,
-                    selectedImage = selectedImage,
-                    cameraActive = cameraActive,
-                    output = output,
-                    outputIsError = outputIsError,
-                    promptForOutput = promptForOutput,
-                    loadingProgress = loadingProgress,
-                    prefillProgress = prefillProgress,
-                    prefillTime = prefillTime,
-                    generationRate = generationRate,
-                    modifier = Modifier.fillMaxSize(),
-                    onModelSelected = { model: Model ->
-                        cameraActive = false
-                        selectedModel = model
-                        Worker.send(Worker.Command.Load(model))
-                    },
-                    onSelectImage = {
-                        imagePicker.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                        )
-                    },
-                    onTakePhoto = {
-                        if (
-                            ContextCompat.checkSelfPermission(
-                                context,
-                                Manifest.permission.CAMERA
-                            ) == PackageManager.PERMISSION_GRANTED
-                        ) {
-                            selectedImage = null
-                            cameraActive = true
-                        } else {
-                            cameraPermission.launch(Manifest.permission.CAMERA)
-                        }
-                    },
-                    onCaptureCameraImage = { bitmap ->
-                        thread {
-                            val image = selectedImageFromBitmap(bitmap, "Camera image")
-                            runOnUiThread {
-                                selectedImage = image
-                                cameraActive = false
-                            }
-                        }
-                    },
-                    onClearImage = {
-                        selectedImage = null
-                        cameraActive = false
-                    },
-                    onSubmitPrompt = { prompt ->
-                        val image = selectedImage.takeIf { selectedModel.supportsImage }
-                        Worker.send(
-                            Worker.Command.Generate(
-                                prompt = prompt,
-                                image = image?.image
+                if (showAbout) {
+                    AboutScreen(
+                        onBack = { showAbout = false },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    MainScreen(
+                        ready = (loadedModel == selectedModel),
+                        selectedModel = selectedModel,
+                        selectedImage = selectedImage,
+                        cameraActive = cameraActive,
+                        output = output,
+                        outputIsError = outputIsError,
+                        promptForOutput = promptForOutput,
+                        loadingProgress = loadingProgress,
+                        prefillProgress = prefillProgress,
+                        prefillTime = prefillTime,
+                        generationRate = generationRate,
+                        modifier = Modifier.fillMaxSize(),
+                        onModelSelected = { model: Model ->
+                            cameraActive = false
+                            selectedModel = model
+                            Worker.send(Worker.Command.Load(model))
+                        },
+                        onSelectImage = {
+                            imagePicker.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                             )
-                        )
-                    },
-                )
+                        },
+                        onTakePhoto = {
+                            if (
+                                ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.CAMERA
+                                ) == PackageManager.PERMISSION_GRANTED
+                            ) {
+                                selectedImage = null
+                                cameraActive = true
+                            } else {
+                                cameraPermission.launch(Manifest.permission.CAMERA)
+                            }
+                        },
+                        onCaptureCameraImage = { bitmap ->
+                            thread {
+                                val image = selectedImageFromBitmap(bitmap, "Camera image")
+                                runOnUiThread {
+                                    selectedImage = image
+                                    cameraActive = false
+                                }
+                            }
+                        },
+                        onClearImage = {
+                            selectedImage = null
+                            cameraActive = false
+                        },
+                        onShowAbout = {
+                            cameraActive = false
+                            showAbout = true
+                        },
+                        onSubmitPrompt = { prompt ->
+                            val image = selectedImage.takeIf { selectedModel.supportsImage }
+                            Worker.send(
+                                Worker.Command.Generate(
+                                    prompt = prompt,
+                                    image = image?.image
+                                )
+                            )
+                        },
+                    )
+                }
             }
         }
     }
