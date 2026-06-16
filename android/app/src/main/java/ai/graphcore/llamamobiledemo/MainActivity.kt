@@ -264,6 +264,11 @@ fun MainScreen(
                     )
                 }
                 Spacer(Modifier.height(8.dp))
+                ProgressBar(
+                    label = "Prefill",
+                    progress = prefillProgress,
+                    modifier = Modifier.fillMaxWidth()
+                )
 
                 // ### Stats
                 fun fmtTime(time: Double?): String {
@@ -272,13 +277,15 @@ fun MainScreen(
                 fun fmtRate(rate: Double?): String {
                     return if (rate == null) "--" else "%.1f tok/s".format(rate)
                 }
-                Text(
-                    String.format(
-                        "Prefill ${fmtTime(prefillTime)} | Generation ${fmtRate(generationRate)}"
-                    ),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color.Gray,
-                )
+                if (prefillProgress == null) {
+                    Text(
+                        String.format(
+                            "Prefill ${fmtTime(prefillTime)} | Generation ${fmtRate(generationRate)}"
+                        ),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.Gray,
+                    )
+                }
                 Spacer(Modifier.height(16.dp))
 
                 // ### Image
@@ -367,11 +374,6 @@ fun MainScreen(
                         )
                     }
                 }
-                ProgressBar(
-                    label = "Prefill",
-                    progress = prefillProgress,
-                    modifier = Modifier.fillMaxWidth()
-                )
                 Spacer(Modifier.height(8.dp))
             }
             pendingModelAction?.let { action ->
