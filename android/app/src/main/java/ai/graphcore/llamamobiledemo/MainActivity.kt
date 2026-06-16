@@ -858,7 +858,21 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        val deviceSupported = DeviceCapabilities.supportsRequiredCpuFeatures()
+        val unsupportedReason = if (deviceSupported) "" else DeviceCapabilities.unsupportedReason()
+
         setContent {
+            if (!deviceSupported) {
+                CustomTheme(largeFonts = false) {
+                    UnsupportedDeviceScreen(
+                        reason = unsupportedReason,
+                        modifier = Modifier.fillMaxSize(),
+                        onOk = { finish() }
+                    )
+                }
+                return@setContent
+            }
+
             val context = LocalContext.current
             val modelStore = remember { ModelStore(context) }
             var modelDownloadStates by remember {

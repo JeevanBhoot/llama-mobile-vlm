@@ -29,6 +29,14 @@ android {
         buildConfigField("String", "BUILD_DATE", "\"${LocalDate.now()}\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
+        externalNativeBuild {
+            ndkBuild {
+                arguments += "APP_PLATFORM=android-34"
+            }
+        }
         vectorDrawables {
             useSupportLibrary = true
         }
@@ -67,6 +75,11 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+    externalNativeBuild {
+        ndkBuild {
+            path = file("src/main/cpp/Android.mk")
+        }
     }
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.1"
