@@ -10,6 +10,15 @@ plugins {
 android {
     namespace = "ai.graphcore.llamamobiledemo"
     compileSdk = 35
+    val releaseKeystore = providers.gradleProperty("LLAMA_MOBILE_KEYSTORE").orNull
+    val releaseKeystorePassword = providers.gradleProperty("LLAMA_MOBILE_KEYSTORE_PASSWORD").orNull
+    val releaseKeyAlias = providers.gradleProperty("LLAMA_MOBILE_KEY_ALIAS").orNull
+    val releaseKeyPassword = providers.gradleProperty("LLAMA_MOBILE_KEY_PASSWORD").orNull
+        ?: releaseKeystorePassword
+    val hasReleaseSigning = !releaseKeystore.isNullOrBlank() &&
+        !releaseKeystorePassword.isNullOrBlank() &&
+        !releaseKeyAlias.isNullOrBlank() &&
+        !releaseKeyPassword.isNullOrBlank()
 
     defaultConfig {
         applicationId = "ai.graphcore.llamamobiledemo"
@@ -25,8 +34,22 @@ android {
         }
     }
 
+    if (hasReleaseSigning) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(releaseKeystore!!)
+                storePassword = releaseKeystorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
