@@ -4,6 +4,8 @@ package ai.graphcore.llamamobiledemo
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.content.res.Configuration
@@ -13,6 +15,7 @@ import android.graphics.ImageDecoder
 import android.net.Uri
 import android.os.Bundle
 import android.util.Size
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -213,29 +216,89 @@ fun MainScreen(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(24.dp)
+                    .statusBarsPadding()
+                    .padding(start = 24.dp, end = 24.dp, top = 42.dp, bottom = 24.dp)
                     .imePadding(),
-                verticalArrangement = Arrangement.Bottom
+                verticalArrangement = Arrangement.Top
             ) {
                 var prompt by rememberSaveable { mutableStateOf("") }
+                val context = LocalContext.current
                 val focusManager = LocalFocusManager.current
                 val textStyle = MaterialTheme.typography.bodyLarge
                 val submitPrompt = {
                     focusManager.clearFocus()
                     onSubmitPrompt(prompt)
                 }
+                val copyOutput = {
+                    val clipboard = context.getSystemService(
+                        Context.CLIPBOARD_SERVICE
+                    ) as ClipboardManager
+                    clipboard.setPrimaryClip(ClipData.newPlainText("Output", output))
+                    Toast.makeText(context, "Copied output", Toast.LENGTH_SHORT).show()
+                }
 
+                // ### Output
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                ) {
+                    OutlinedTextField(
+                        value = output,
+                        onValueChange = {},
+                        readOnly = true,
+                        enabled = ready,
+                        minLines = 3,
+                        label = { Text("Output") },
+                        textStyle = when {
+                            outputIsError -> textStyle.copy(color = MaterialTheme.colorScheme.error)
+                            promptForOutput != prompt -> textStyle.copy(color = Color.Gray)
+                            else -> textStyle
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    Box(
+                        modifier = Modifier
+                            .matchParentSize()
+                            .clickable(enabled = output.isNotEmpty()) { copyOutput() }
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+
+                // ### Stats
+                fun fmtTime(time: Double?): String {
+                    return if (time == null) "--" else "%.1f s".format(time)
+                }
+                fun fmtRate(rate: Double?): String {
+                    return if (rate == null) "--" else "%.1f tok/s".format(rate)
+                }
+                Text(
+                    String.format(
+                        "Prefill ${fmtTime(prefillTime)} | Generation ${fmtRate(generationRate)}"
+                    ),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.Gray,
+                )
+                Spacer(Modifier.height(16.dp))
+
+                // ### Image
+                val visibleImage = selectedImage.takeIf { selectedModel.supportsImage }
+                val visibleCameraActive = cameraActive && selectedModel.supportsImage
                 ImageSelector(
                     enabled = selectedModel.supportsImage,
-                    selectedImage = selectedImage.takeIf { selectedModel.supportsImage },
-                    cameraActive = cameraActive && selectedModel.supportsImage,
+                    selectedImage = visibleImage,
+                    cameraActive = visibleCameraActive,
                     onSelectImage = onSelectImage,
                     onTakePhoto = onTakePhoto,
                     onCaptureCameraImage = onCaptureCameraImage,
                     onClearImage = onClearImage,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(if (visibleImage != null || visibleCameraActive) 240.dp else 120.dp)
                 )
                 Spacer(Modifier.height(8.dp))
+
+                // ### Select Model
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
@@ -261,6 +324,8 @@ fun MainScreen(
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(Modifier.height(8.dp))
+
+                // ### Prompt
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
@@ -294,7 +359,11 @@ fun MainScreen(
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.Send,
                             contentDescription = "Send",
-                            tint = if (ready) Color.Gray else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                            tint = if (ready) {
+                                MaterialTheme.colorScheme.onSurface
+                            } else {
+                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                            }
                         )
                     }
                 }
@@ -303,35 +372,7 @@ fun MainScreen(
                     progress = prefillProgress,
                     modifier = Modifier.fillMaxWidth()
                 )
-                Spacer(Modifier.height(16.dp))
-                OutlinedTextField(
-                    value = output,
-                    onValueChange = {},
-                    readOnly = true,
-                    enabled = ready,
-                    minLines = 3,
-                    label = { Text("Output") },
-                    textStyle = when {
-                        outputIsError -> textStyle.copy(color = MaterialTheme.colorScheme.error)
-                        promptForOutput != prompt -> textStyle.copy(color = Color.Gray)
-                        else -> textStyle
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(Modifier.height(16.dp))
-                fun fmtTime(time: Double?): String {
-                    return if (time == null) "--" else "%.1f s".format(time)
-                }
-                fun fmtRate(rate: Double?): String {
-                    return if (rate == null) "--" else "%.1f tok/s".format(rate)
-                }
-                Text(
-                    String.format(
-                        "Prefill ${fmtTime(prefillTime)} | Generation ${fmtRate(generationRate)}"
-                    ),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color.Gray,
-                )
+                Spacer(Modifier.height(8.dp))
             }
             pendingModelAction?.let { action ->
                 ModelActionDialog(
@@ -352,7 +393,7 @@ fun MainScreen(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .statusBarsPadding()
-                    .padding(16.dp)
+                    .padding(12.dp, 0.dp)
             ) {
                 Icon(
                     imageVector = Icons.Filled.Settings,
@@ -425,7 +466,7 @@ fun ModelActionButton(
                 Icon(
                     painter = painterResource(R.drawable.ic_delete_24),
                     contentDescription = "Delete model",
-                    tint = Color.Gray
+                    tint = MaterialTheme.colorScheme.onSurface
                 )
             }
         }
@@ -439,7 +480,7 @@ fun ModelActionButton(
                 Icon(
                     painter = painterResource(R.drawable.ic_download_24),
                     contentDescription = "Download model",
-                    tint = Color.Gray
+                    tint = MaterialTheme.colorScheme.onSurface
                 )
             }
         }
@@ -522,8 +563,7 @@ fun ImageSelector(
     modifier: Modifier = Modifier
 ) {
     Surface(
-        modifier = modifier
-            .aspectRatio(1f),
+        modifier = modifier,
         shape = MaterialTheme.shapes.medium,
         color = MaterialTheme.colorScheme.surface,
         border = if (selectedImage == null) {

@@ -98,7 +98,8 @@ object DummyGenerator : Generator {
     @Volatile
     private var currentProgress: Double? = null
     private val tokens = listOf(
-        "Response: ", "I'm ", "a ", "dummy", ", ", "I ", "have ", "no ", "wise ", "words", "."
+        "Response: ", "I'm ", "a ", "dummy", "model", ", ",
+        "I ", "have ", "no ", "wise ", "words", "."
     )
 
     override fun load(path: String) {
