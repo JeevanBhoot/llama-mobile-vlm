@@ -4,8 +4,6 @@ package ai.graphcore.llamamobiledemo
 
 import android.Manifest
 import android.annotation.SuppressLint
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.content.res.Configuration
@@ -15,7 +13,6 @@ import android.graphics.ImageDecoder
 import android.net.Uri
 import android.os.Bundle
 import android.util.Size
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -44,6 +41,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.text.KeyboardActions
@@ -222,47 +220,30 @@ fun MainScreen(
                 verticalArrangement = Arrangement.Top
             ) {
                 var prompt by rememberSaveable { mutableStateOf("") }
-                val context = LocalContext.current
                 val focusManager = LocalFocusManager.current
                 val textStyle = MaterialTheme.typography.bodyLarge
                 val submitPrompt = {
                     focusManager.clearFocus()
                     onSubmitPrompt(prompt)
                 }
-                val copyOutput = {
-                    val clipboard = context.getSystemService(
-                        Context.CLIPBOARD_SERVICE
-                    ) as ClipboardManager
-                    clipboard.setPrimaryClip(ClipData.newPlainText("Output", output))
-                    Toast.makeText(context, "Copied output", Toast.LENGTH_SHORT).show()
-                }
 
                 // ### Output
-                Box(
+                OutlinedTextField(
+                    value = output,
+                    onValueChange = {},
+                    readOnly = true,
+                    enabled = ready,
+                    minLines = 3,
+                    label = { Text("Output") },
+                    textStyle = when {
+                        outputIsError -> textStyle.copy(color = MaterialTheme.colorScheme.error)
+                        promptForOutput != prompt -> textStyle.copy(color = Color.Gray)
+                        else -> textStyle
+                    },
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
-                ) {
-                    OutlinedTextField(
-                        value = output,
-                        onValueChange = {},
-                        readOnly = true,
-                        enabled = ready,
-                        minLines = 3,
-                        label = { Text("Output") },
-                        textStyle = when {
-                            outputIsError -> textStyle.copy(color = MaterialTheme.colorScheme.error)
-                            promptForOutput != prompt -> textStyle.copy(color = Color.Gray)
-                            else -> textStyle
-                        },
-                        modifier = Modifier.fillMaxSize()
-                    )
-                    Box(
-                        modifier = Modifier
-                            .matchParentSize()
-                            .clickable(enabled = output.isNotEmpty()) { copyOutput() }
-                    )
-                }
+                )
                 Spacer(Modifier.height(8.dp))
                 ProgressBar(
                     label = "Prefill",
@@ -355,7 +336,9 @@ fun MainScreen(
                             }
                         },
                         textStyle = textStyle,
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(max = 160.dp),
                     )
                     IconButton(
                         onClick = { submitPrompt() },
