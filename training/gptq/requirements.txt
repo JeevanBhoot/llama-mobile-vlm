@@ -1,0 +1,7 @@
+device-smi==0.4.1
+hf_transfer>=0.1.9
+logbar==0.0.3
+protobuf>=5.29.3
+threadpoolctl>=3.5.0
+tokenicer==0.0.4
+gptqmodel==2.0.0
