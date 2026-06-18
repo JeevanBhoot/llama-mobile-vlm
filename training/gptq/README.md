@@ -1,10 +1,15 @@
-# Standard GPTQ Baselines
+# GPTQ Baselines
 
-This directory contains GPTQModel INT4 and INT3 baselines for
+This directory contains GPTQ INT4 and INT3 baselines for
 `meta-llama/Llama-3.2-11B-Vision-Instruct`.
 
-The script quantizes with C4 calibration and evaluates with the existing
-`eval.vqa` benchmark harness.
+There are two flows:
+
+- `gptq.standard`: GPTQModel reference artifacts.
+- `gptq.local`: local GPTQ implementation that saves dense dequantized
+  Hugging Face artifacts for parity checks and future S3D8 packing work.
+
+Both flows use C4 calibration and the existing `eval.vqa` benchmark harness.
 
 ## Prerequisites
 
@@ -13,6 +18,11 @@ From `training/`:
 ```sh
 source .venv/bin/activate
 uv pip install -r requirements.txt --torch-backend cu130
+```
+
+Install GPTQModel only for the reference flow or parity tests:
+
+```sh
 uv pip install setuptools wheel
 uv pip install --no-build-isolation-package gptqmodel -r gptq/requirements.txt
 ```
@@ -20,7 +30,7 @@ uv pip install --no-build-isolation-package gptqmodel -r gptq/requirements.txt
 Set up a Hugging Face token with access to
 `meta-llama/Llama-3.2-11B-Vision-Instruct`.
 
-## Quantize
+## GPTQModel Reference Quantize
 
 INT4:
 
@@ -109,7 +119,7 @@ Useful non-default algorithm knobs:
 - `--damp-auto-increment`
 - `--mse`
 
-## Evaluate
+## GPTQModel Reference Evaluate
 
 Evaluate the INT4 artifact:
 
@@ -152,10 +162,76 @@ Evaluation defaults:
 - Evaluation batch size: `1`
 - Primary summary metric: `avg_primary`
 
+## Local GPTQ Quantize
+
+The local implementation mirrors GPTQModel's layer-level GPTQ math but writes a
+dense dequantized Hugging Face model. It is an accuracy and parity artifact, not
+a packed INT3/INT4 deployment artifact.
+
+INT4:
+
+```sh
+python -m gptq.local quantize \
+  --bits 4 \
+  --output-dir out/gptq/llama-3.2-vision-local-gptq-int4-c4
+```
+
+INT3:
+
+```sh
+python -m gptq.local quantize \
+  --bits 3 \
+  --output-dir out/gptq/llama-3.2-vision-local-gptq-int3-c4
+```
+
+The local flow quantizes the same Mllama language-model self-attention and MLP
+projection layers as the current GPTQModel Mllama definition and skips
+cross-attention decoder layers.
+
+Local GPTQ defaults:
+
+- Model: `meta-llama/Llama-3.2-11B-Vision-Instruct`
+- Calibration dataset: `allenai/c4`
+- Calibration file: `en/c4-train.00001-of-01024.json.gz`
+- Calibration samples: `1024`
+- Calibration max tokens per sample: `2048`
+- Bits: `3` or `4`
+- Group size: `128`
+- Block size: `128`
+- Activation order: disabled
+- Act-group-aware activation ordering: enabled
+- Static groups: disabled
+- Symmetric quantization: enabled
+- Damp percent: `0.05`
+- Damp auto increment: `0.01`
+- Torch dtype: `bfloat16`
+
+## Local GPTQ Evaluate
+
+Evaluate the local INT4 artifact:
+
+```sh
+python -m gptq.local evaluate \
+  out/gptq/llama-3.2-vision-local-gptq-int4-c4 \
+  --output-dir out/gptq/llama-3.2-vision-local-gptq-int4-c4/evaluation \
+  --tasks vqa chartqa docvqa ai2d \
+  --n-examples 1024
+```
+
+Evaluate the local INT3 artifact:
+
+```sh
+python -m gptq.local evaluate \
+  out/gptq/llama-3.2-vision-local-gptq-int3-c4 \
+  --output-dir out/gptq/llama-3.2-vision-local-gptq-int3-c4/evaluation \
+  --tasks vqa chartqa docvqa ai2d \
+  --n-examples 1024
+```
+
 ## Notes
 
-This is an accuracy-only PTQ baseline. The saved GPTQModel artifact is not
-an Arm deployment artifact for the C++ inference library.
+These are accuracy-only PTQ baselines. GPTQModel artifacts and local dense
+artifacts are not Arm deployment artifacts for the C++ inference library.
 
 GPTQModel Mllama quantization skips cross-attention layers that require
 `pixel_values`.

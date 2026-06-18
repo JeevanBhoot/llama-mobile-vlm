@@ -3,8 +3,8 @@
 """Standard GPTQ baselines using GPTQModel and C4 calibration."""
 
 import argparse
-import json
 import subprocess
+
 import datasets
 import transformers
 from pathlib import Path
@@ -12,6 +12,14 @@ from typing import Any, Iterable
 from gptqmodel import GPTQModel, QuantizeConfig
 
 from eval import vqa
+from gptq.common import (
+    directory_size,
+    load_c4_calibration,
+    summarise_results,
+    tokenise_calibration,
+    write_json,
+    write_jsonl,
+)
 
 DEFAULT_MODEL_NAME = "meta-llama/Llama-3.2-11B-Vision-Instruct"
 DEFAULT_C4_DATA_FILES = "en/c4-train.00001-of-01024.json.gz"
@@ -30,138 +38,6 @@ METADATA_FILENAME = "metadata.json"
 
 def default_output_dir(bits: int) -> Path:
     return Path(f"out/gptq/llama-3.2-vision-gptq-int{bits}-c4")
-
-
-def load_c4_calibration(
-    n_samples: int = DEFAULT_CALIBRATION_SAMPLES,
-    data_files: str = DEFAULT_C4_DATA_FILES,
-    split: str = DEFAULT_C4_SPLIT,
-) -> list[str]:
-    ds = datasets.load_dataset(
-        "allenai/c4",
-        data_files=data_files,
-        split=split,
-    )
-    ds = ds.select(range(n_samples))
-    return list(ds["text"])
-
-
-def tokenise_calibration(
-    texts: Iterable[str],
-    tokenizer: transformers.PreTrainedTokenizerBase,
-    max_tokens: int,
-) -> list[dict[str, Any]]:
-    return [
-        dict(
-            tokenizer(
-                text,
-                return_tensors="pt",
-                truncation=True,
-                max_length=max_tokens,
-            )
-        )
-        for text in texts
-    ]
-
-
-def directory_size(path: Path) -> int:
-    return sum(p.stat().st_size for p in path.rglob("*") if p.is_file())
-
-
-def write_json(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
-
-
-def write_jsonl(path: Path, records: Iterable[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w") as f:
-        for record in records:
-            print(json.dumps(record), file=f)
-
-
-def load_jsonl(path: Path) -> list[dict[str, Any]]:
-    records = []
-    rewrite = False
-    with path.open() as f:
-        for line in f:
-            if not line.strip():
-                continue
-            try:
-                records.append(json.loads(line))
-            except json.JSONDecodeError:
-                rewrite = True
-                break
-    if rewrite:
-        write_jsonl(path, records)
-    return records
-
-
-def normalise_id(value: Any) -> str:
-    return str(value)
-
-
-def eval_id_column(data: datasets.Dataset) -> str:
-    for column_name in ("id", "question_id", "questionId"):
-        if column_name in data.column_names:
-            return column_name
-    raise ValueError(
-        "Could not find an evaluation id column. Expected one of "
-        "'id', 'question_id', or 'questionId'."
-    )
-
-
-def select_missing_eval_examples(
-    data: datasets.Dataset, records: list[dict[str, Any]]
-) -> datasets.Dataset:
-    seen_ids = {normalise_id(record["id"]) for record in records}
-    if not seen_ids:
-        return data
-
-    id_column = eval_id_column(data)
-    missing_indices = [
-        idx
-        for idx, id in enumerate(data[id_column])
-        if normalise_id(id) not in seen_ids
-    ]
-    return data.select(missing_indices)
-
-
-def task_records_for_data(
-    data: datasets.Dataset, records: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    records_by_id = {normalise_id(record["id"]): record for record in records}
-    id_column = eval_id_column(data)
-    out = []
-    missing_ids = []
-    for id in data[id_column]:
-        key = normalise_id(id)
-        if key in records_by_id:
-            out.append(records_by_id[key])
-        else:
-            missing_ids.append(id)
-
-    if missing_ids:
-        raise ValueError(
-            f"Missing {len(missing_ids)} cached evaluation records; "
-            f"first missing id: {missing_ids[0]!r}"
-        )
-    return out
-
-
-def append_eval_results(
-    path: Path,
-    results: Iterable[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    written = []
-    with path.open("a") as f:
-        for record in results:
-            print(json.dumps(record), file=f, flush=True)
-            written.append(record)
-    return written
 
 
 def config_to_metadata(config: QuantizeConfig) -> dict[str, Any]:
@@ -246,33 +122,6 @@ def make_quantize_call_kwargs(
         "calibration_data_min_length": calibration_data_min_length,
     }
     return {k: v for k, v in kwargs.items() if v is not None}
-
-
-def summarise_results(
-    task_results: dict[str, list[dict[str, Any]]],
-    include_relaxed_metrics: bool = False,
-) -> dict[str, Any]:
-    summary: dict[str, Any] = {"tasks": {}}
-    primary_scores = []
-    for task_name, results in task_results.items():
-        if not results:
-            raise ValueError(f"No results for task {task_name!r}")
-
-        metrics = list(vqa.TASKS[task_name].METRICS)
-        if include_relaxed_metrics:
-            metrics += vqa.TASKS[task_name].RELAXED_METRICS
-
-        task_summary = {"n_examples": len(results)}
-        for metric in metrics:
-            task_summary[metric] = sum(float(x[metric]) for x in results) / len(
-                results
-            )
-
-        primary_scores.append(float(task_summary[metrics[0]]))
-        summary["tasks"][task_name] = task_summary
-
-    summary["avg_primary"] = sum(primary_scores) / len(primary_scores)
-    return summary
 
 
 def load_eval_data(
@@ -383,6 +232,8 @@ def quantize(
     metadata = {
         "model_name": model_name,
         "output_dir": str(output_dir),
+        "bits": bits,
+        "group_size": group_size,
         "quantization_batch_size": batch_size,
         "calibration_max_tokens": calibration_max_tokens,
         "dtype": dtype,
@@ -472,7 +323,9 @@ def evaluate(
         task_results[task_name] = task_records_for_data(data, existing_results)
 
     summary = summarise_results(
-        task_results, include_relaxed_metrics=include_relaxed_metrics
+        task_results,
+        task_definitions=vqa.TASKS,
+        include_relaxed_metrics=include_relaxed_metrics,
     )
     summary.update(
         {
@@ -719,7 +572,6 @@ def _add_eval_settings_args(
     parser.add_argument(
         "--tasks",
         nargs="+",
-        choices=tuple(vqa.TASKS),
         default=list(DEFAULT_TASKS),
         help="Evaluation tasks to run",
     )
