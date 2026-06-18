@@ -44,7 +44,6 @@ import datasets
 import regex as re
 import torch
 from PIL.ImageFile import ImageFile
-from torchaudio.functional import edit_distance
 from tqdm import tqdm
 from transformers import MllamaForConditionalGeneration, MllamaProcessor
 
@@ -103,6 +102,26 @@ PUNCTUATION = [
     "?",
     "!",
 ]
+
+
+def edit_distance(a: str, b: str) -> int:
+    if len(a) < len(b):
+        a, b = b, a
+
+    previous = list(range(len(b) + 1))
+    for i, char_a in enumerate(a, start=1):
+        current = [i]
+        for j, char_b in enumerate(b, start=1):
+            current.append(
+                min(
+                    previous[j] + 1,
+                    current[j - 1] + 1,
+                    previous[j - 1] + int(char_a != char_b),
+                )
+            )
+        previous = current
+
+    return previous[-1]
 
 
 def _process_text(text: str) -> str:

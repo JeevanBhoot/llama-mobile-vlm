@@ -1,7 +1,8 @@
-device-smi==0.4.1
+device-smi==0.5.5
 hf_transfer>=0.1.9
-logbar==0.0.3
-protobuf>=5.29.3
+logbar==0.4.3
+protobuf>=7.34.0
 threadpoolctl>=3.5.0
-tokenicer==0.0.4
-gptqmodel==2.0.0
+tokenicer==0.0.13
+gptqmodel==7.1.0
+torchvision==0.27.1

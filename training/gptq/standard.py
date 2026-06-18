@@ -15,12 +15,15 @@ from eval import vqa
 DEFAULT_MODEL_NAME = "meta-llama/Llama-3.2-11B-Vision-Instruct"
 DEFAULT_C4_DATA_FILES = "en/c4-train.00001-of-01024.json.gz"
 DEFAULT_C4_SPLIT = "train"
-DEFAULT_CALIBRATION_SAMPLES = 1024
-DEFAULT_CALIBRATION_MAX_TOKENS = 2048
+DEFAULT_CALIBRATION_SAMPLES = 512
+DEFAULT_CALIBRATION_MAX_TOKENS = 1024
 DEFAULT_GROUP_SIZE = 128
-DEFAULT_TORCH_DTYPE = "bfloat16"
+DEFAULT_DTYPE = "bfloat16"
 DEFAULT_TASKS = ("vqa", "chartqa", "docvqa", "ai2d")
-SUPPORTED_BITS = (3, 4)
+SUPPORTED_BITS = (2, 3, 4, 5, 6, 8)
+SUPPORTED_FORMATS = ("gptq", "gptq_v2", "marlin", "bitblas")
+SUPPORTED_CALIBRATION_SORTS = ("asc", "desc", "shuffle")
+SUPPORTED_GC_MODES = ("interval", "on_stage_end")
 METADATA_FILENAME = "metadata.json"
 
 
@@ -48,11 +51,13 @@ def tokenise_calibration(
     max_tokens: int,
 ) -> list[dict[str, Any]]:
     return [
-        tokenizer(
-            text,
-            return_tensors="pt",
-            truncation=True,
-            max_length=max_tokens,
+        dict(
+            tokenizer(
+                text,
+                return_tensors="pt",
+                truncation=True,
+                max_length=max_tokens,
+            )
         )
         for text in texts
     ]
@@ -74,6 +79,90 @@ def write_jsonl(path: Path, records: Iterable[dict[str, Any]]) -> None:
     with path.open("w") as f:
         for record in records:
             print(json.dumps(record), file=f)
+
+
+def config_to_metadata(config: QuantizeConfig) -> dict[str, Any]:
+    if hasattr(config, "to_dict"):
+        return config.to_dict()
+    return {
+        key: serialise_metadata_value(value)
+        for key, value in vars(config).items()
+        if not key.startswith("_")
+    }
+
+
+def serialise_metadata_value(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(k): serialise_metadata_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [serialise_metadata_value(x) for x in value]
+    if hasattr(value, "value"):
+        return value.value
+    if hasattr(value, "to_dict"):
+        return value.to_dict()
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def make_quantize_config(
+    bits: int,
+    group_size: int,
+    format: str,
+    device: str | None,
+    pack_dtype: str | None,
+    desc_act: bool | None,
+    sym: bool,
+    act_group_aware: bool | None,
+    static_groups: bool,
+    damp_percent: float | None,
+    damp_auto_increment: float | None,
+    mse: float,
+    offload_to_disk: bool,
+    offload_to_disk_path: str | None,
+    calibration_data_device: str | None,
+    gc_mode: str,
+    wait_for_submodule_finalizers: bool,
+) -> QuantizeConfig:
+    kwargs: dict[str, Any] = {
+        "bits": bits,
+        "group_size": group_size,
+        "format": format,
+        "device": device,
+        "pack_dtype": pack_dtype,
+        "desc_act": desc_act,
+        "sym": sym,
+        "act_group_aware": act_group_aware,
+        "static_groups": static_groups,
+        "damp_percent": damp_percent,
+        "damp_auto_increment": damp_auto_increment,
+        "mse": mse,
+        "offload_to_disk": offload_to_disk,
+        "offload_to_disk_path": offload_to_disk_path,
+        "calibration_data_device": calibration_data_device,
+        "gc_mode": gc_mode,
+        "wait_for_submodule_finalizers": wait_for_submodule_finalizers,
+    }
+    return QuantizeConfig(**{k: v for k, v in kwargs.items() if v is not None})
+
+
+def make_quantize_call_kwargs(
+    calibration_concat_size: int | None,
+    calibration_sort: str,
+    batch_size: int,
+    backend: str,
+    calibration_data_min_length: int,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "calibration_concat_size": calibration_concat_size,
+        "calibration_sort": calibration_sort,
+        "batch_size": batch_size,
+        "backend": backend,
+        "calibration_data_min_length": calibration_data_min_length,
+    }
+    return {k: v for k, v in kwargs.items() if v is not None}
 
 
 def summarise_results(
@@ -106,26 +195,67 @@ def summarise_results(
 def quantize(
     model_name: str,
     output_dir: Path,
-    bits: int,
-    group_size: int = DEFAULT_GROUP_SIZE,
-    batch_size: int = 1,
     calibration_samples: int = DEFAULT_CALIBRATION_SAMPLES,
     calibration_max_tokens: int = DEFAULT_CALIBRATION_MAX_TOKENS,
-    calibration_gpu_cache: bool = False,
-    buffered_fwd: bool = False,
     c4_data_files: str = DEFAULT_C4_DATA_FILES,
     c4_split: str = DEFAULT_C4_SPLIT,
+    dtype: str = DEFAULT_DTYPE,
+    bits: int = 4,
+    group_size: int = DEFAULT_GROUP_SIZE,
+    format: str = "gptq",
+    pack_dtype: str | None = None,
+    desc_act: bool | None = None,
+    sym: bool = True,
+    act_group_aware: bool | None = None,
+    static_groups: bool = False,
+    damp_percent: float | None = None,
+    damp_auto_increment: float | None = None,
+    mse: float = 0.0,
     device: str | None = None,
-    torch_dtype: str = DEFAULT_TORCH_DTYPE,
+    backend: str = "auto",
+    offload_to_disk: bool = True,
+    offload_to_disk_path: str | None = None,
+    calibration_data_device: str | None = None,
+    gc_mode: str = "interval",
+    wait_for_submodule_finalizers: bool = False,
+    calibration_concat_size: int | None = None,
+    calibration_sort: str = "desc",
+    batch_size: int = 1,
+    calibration_data_min_length: int = 10,
 ) -> dict[str, Any]:
     calibration_texts = load_c4_calibration(
         n_samples=calibration_samples,
         data_files=c4_data_files,
         split=c4_split,
     )
-    quant_config = QuantizeConfig(bits=bits, group_size=group_size, device=device)
+    quant_config = make_quantize_config(
+        bits=bits,
+        group_size=group_size,
+        format=format,
+        device=device,
+        pack_dtype=pack_dtype,
+        desc_act=desc_act,
+        sym=sym,
+        act_group_aware=act_group_aware,
+        static_groups=static_groups,
+        damp_percent=damp_percent,
+        damp_auto_increment=damp_auto_increment,
+        mse=mse,
+        offload_to_disk=offload_to_disk,
+        offload_to_disk_path=offload_to_disk_path,
+        calibration_data_device=calibration_data_device,
+        gc_mode=gc_mode,
+        wait_for_submodule_finalizers=wait_for_submodule_finalizers,
+    )
+    quantize_call_kwargs = make_quantize_call_kwargs(
+        calibration_concat_size=calibration_concat_size,
+        calibration_sort=calibration_sort,
+        batch_size=batch_size,
+        backend=backend,
+        calibration_data_min_length=calibration_data_min_length,
+    )
 
-    model = GPTQModel.load(model_name, quant_config, torch_dtype=torch_dtype)
+    model = GPTQModel.load(model_name, quant_config, dtype=dtype)
     calibration_dataset = tokenise_calibration(
         calibration_texts,
         tokenizer=model.tokenizer,
@@ -133,9 +263,7 @@ def quantize(
     )
     model.quantize(
         calibration_dataset,
-        batch_size=batch_size,
-        calibration_enable_gpu_cache=calibration_gpu_cache,
-        buffered_fwd=buffered_fwd,
+        **quantize_call_kwargs,
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -144,13 +272,11 @@ def quantize(
     metadata = {
         "model_name": model_name,
         "output_dir": str(output_dir),
-        "bits": bits,
-        "group_size": group_size,
         "quantization_batch_size": batch_size,
         "calibration_max_tokens": calibration_max_tokens,
-        "calibration_gpu_cache": calibration_gpu_cache,
-        "buffered_fwd": buffered_fwd,
-        "torch_dtype": torch_dtype,
+        "dtype": dtype,
+        "quantize_config": config_to_metadata(quant_config),
+        "quantize_args": serialise_metadata_value(quantize_call_kwargs),
         "calibration": {
             "dataset": "allenai/c4",
             "data_files": c4_data_files,
@@ -235,40 +361,6 @@ def _add_quantize_args(parser: argparse.ArgumentParser) -> None:
         help="Directory for the saved GPTQModel artifact",
     )
     parser.add_argument(
-        "--group-size",
-        type=int,
-        default=DEFAULT_GROUP_SIZE,
-        help="Group size for scaling factors in the quantization format",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=1,
-        help="Calibration batch size",
-    )
-    parser.add_argument(
-        "--calibration-samples",
-        type=int,
-        default=DEFAULT_CALIBRATION_SAMPLES,
-        help="Number of C4 calibration samples",
-    )
-    parser.add_argument(
-        "--calibration-max-tokens",
-        type=int,
-        default=2048,
-        help="Maximum tokens per calibration sample",
-    )
-    parser.add_argument(
-        "--calibration-gpu-cache",
-        action="store_true",
-        help="Cache calibration activations on GPU",
-    )
-    parser.add_argument(
-        "--buffered-fwd",
-        action="store_true",
-        help="Buffer forward inputs on CPU to reduce VRAM use",
-    )
-    parser.add_argument(
         "--c4-data-files",
         default=DEFAULT_C4_DATA_FILES,
         help="C4 data file passed to datasets.load_dataset",
@@ -279,14 +371,142 @@ def _add_quantize_args(parser: argparse.ArgumentParser) -> None:
         help="C4 split passed to datasets.load_dataset",
     )
     parser.add_argument(
+        "--calibration-samples",
+        type=int,
+        default=DEFAULT_CALIBRATION_SAMPLES,
+        help="Number of C4 calibration samples",
+    )
+    parser.add_argument(
+        "--calibration-max-tokens",
+        type=int,
+        default=DEFAULT_CALIBRATION_MAX_TOKENS,
+        help="Maximum tokens per calibration sample",
+    )
+    parser.add_argument(
+        "--dtype",
+        default=DEFAULT_DTYPE,
+        help="dtype passed to GPTQModel.load",
+    )
+    parser.add_argument(
+        "--group-size",
+        type=int,
+        default=DEFAULT_GROUP_SIZE,
+        help="Quantization group size for per-group scales",
+    )
+    parser.add_argument(
+        "--format",
+        choices=SUPPORTED_FORMATS,
+        default="gptq",
+        help="GPTQ checkpoint format",
+    )
+    parser.add_argument(
+        "--pack-dtype",
+        default=None,
+        help="Packed weight dtype, for example int32, int16, or int8",
+    )
+    parser.add_argument(
+        "--sym",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use symmetric quantization",
+    )
+    parser.add_argument(
+        "--desc-act",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Activation-order quantization; GPTQModel default is used when omitted",
+    )
+    parser.add_argument(
+        "--static-groups",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use GPTQ static groups",
+    )
+    parser.add_argument(
+        "--act-group-aware",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use GPTQModel act_group_aware quality recovery",
+    )
+    parser.add_argument(
+        "--damp-percent",
+        type=float,
+        default=None,
+        help="GPTQ dampening percentage",
+    )
+    parser.add_argument(
+        "--damp-auto-increment",
+        type=float,
+        default=None,
+        help="GPTQ dampening auto-increment",
+    )
+    parser.add_argument(
+        "--mse",
+        type=float,
+        default=0.0,
+        help="GPTQ mse grid-search strength",
+    )
+    parser.add_argument(
         "--device",
         default=None,
         help="Device used for GPTQ quantization",
     )
     parser.add_argument(
-        "--torch-dtype",
-        default=DEFAULT_TORCH_DTYPE,
-        help="Torch dtype for loading the base model",
+        "--backend",
+        default="auto",
+        help="GPTQModel quantization backend",
+    )
+    parser.add_argument(
+        "--calibration-concat-size",
+        type=int,
+        default=None,
+        help="Concatenate calibration tokens into fixed-size chunks",
+    )
+    parser.add_argument(
+        "--calibration-sort",
+        choices=SUPPORTED_CALIBRATION_SORTS,
+        default="desc",
+        help="Calibration sample ordering",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="Calibration batch size",
+    )
+    parser.add_argument(
+        "--calibration-data-min-length",
+        type=int,
+        default=10,
+        help="Drop calibration samples shorter than this many tokens",
+    )
+    parser.add_argument(
+        "--calibration-data-device",
+        default=None,
+        help="Device for captured calibration data, e.g. cpu, cuda:1, or balanced",
+    )
+    parser.add_argument(
+        "--offload-to-disk",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Offload completed module state to disk during quantization",
+    )
+    parser.add_argument(
+        "--offload-to-disk-path",
+        default=None,
+        help="Directory for GPTQModel disk offload",
+    )
+    parser.add_argument(
+        "--gc-mode",
+        choices=SUPPORTED_GC_MODES,
+        default="interval",
+        help="GPTQModel garbage-collection mode",
+    )
+    parser.add_argument(
+        "--wait-for-submodule-finalizers",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Wait for packing/offload finalizers before moving to the next layer",
     )
 
 
@@ -367,17 +587,33 @@ def main(argv: list[str] | None = None) -> None:
         quantize(
             model_name=args.model_name,
             output_dir=output_dir,
-            bits=args.bits,
-            group_size=args.group_size,
-            batch_size=args.batch_size,
             calibration_samples=args.calibration_samples,
             calibration_max_tokens=args.calibration_max_tokens,
-            calibration_gpu_cache=args.calibration_gpu_cache,
-            buffered_fwd=args.buffered_fwd,
             c4_data_files=args.c4_data_files,
             c4_split=args.c4_split,
+            dtype=args.dtype,
+            bits=args.bits,
+            group_size=args.group_size,
+            format=args.format,
+            pack_dtype=args.pack_dtype,
+            desc_act=args.desc_act,
+            sym=args.sym,
+            static_groups=args.static_groups,
+            act_group_aware=args.act_group_aware,
+            damp_percent=args.damp_percent,
+            damp_auto_increment=args.damp_auto_increment,
+            mse=args.mse,
             device=args.device,
-            torch_dtype=args.torch_dtype,
+            backend=args.backend,
+            calibration_concat_size=args.calibration_concat_size,
+            calibration_sort=args.calibration_sort,
+            batch_size=args.batch_size,
+            calibration_data_min_length=args.calibration_data_min_length,
+            calibration_data_device=args.calibration_data_device,
+            offload_to_disk=args.offload_to_disk,
+            offload_to_disk_path=args.offload_to_disk_path,
+            gc_mode=args.gc_mode,
+            wait_for_submodule_finalizers=args.wait_for_submodule_finalizers,
         )
     elif args.command == "evaluate":
         output_dir = args.output_dir or args.model_dir / "evaluation"
