@@ -1,36 +1,107 @@
-# On-device inference library
+# On-Device Inference Library
 
-## Development
+This directory contains the "vanilla" C++ inference library, command-line demo, unit tests, and benchmarks for Llama-Mobile `.sqt` models.
 
-```sh
-./dev
-./dev -p all tests
+See this guide for usage instructions, or jump straight into [`src/core/ops.cpp`](src/core/ops.cpp) to see the core operator implementations.
 
-# Try out a language model
-./dev run cli ../models/Llama-3.2-1B-Instruct-BF16.sqt
-
-# E.g.
-echo "I don't much like" | ./dev run cli -- ../models/Llama-3.2-1B-Instruct-BF16.sqt -g 64
-
-# E.g. vision model
-echo "What colour shirt is the person to the left of the laptop wearing?" | ./dev run cli -- ../models/Llama-3.2-11B-Vision-Instruct-BF16.sqt -g 64 --image ../models/test.jpg
-
-# E.g. on Android
-adb push ../models/Llama-3.2-1B-Instruct-BF16.sqt /data/local/tmp/Llama-3.2-1B-Instruct-BF16.sqt
-./dev -p android run cli -- Llama-3.2-1B-Instruct-BF16.sqt -g 16
-```
 
 ## Setup
 
 ```sh
 ./dev setup
 sudo apt install clang clang-format gdb libomp-dev ninja-build
-# If android: install NDK to /opt/android-sdk/ndk/latest
 ```
 
-### Profiling using perf
+For Android builds, install the Android NDK at `/opt/android-sdk/ndk/latest`. Most commands can be run as `./dev -p android ...` to apply them to the Android target.
 
-Install `linux-tools-generic`. On AWS Graviton, you may have to `sudo ln -s /usr/lib/linux-tools-6.8.0-85/perf /usr/local/bin/perf` and `rm /usr/bin/perf`.
+
+## Tests
+
+```sh
+./dev tests
+```
+
+Run all configured platforms, including Android when the NDK is available:
+
+```sh
+./dev -p all tests
+```
+
+
+## Prebuilt Models
+
+Download the public release models:
+
+```sh
+mkdir -p models
+aws s3 sync --no-sign-request \
+  s3://graphcore-research-public/2026-llama-mobile/models/20260611/ \
+  models/
+```
+
+
+## CLI Generation
+
+Text model:
+
+```sh
+echo "What is blue?" | ./dev run cli -- models/text-1B-int8.sqt -g 128
+```
+
+Vision-language model:
+
+```sh
+echo "Describe this image." | ./dev run cli -- models/vision-11B-s3d8.sqt -g 64 --image TEST_IMAGE.jpg
+```
+
+See also `./dev run cli -- --help`. The CLI reads one prompt per input line. Use `--benchmark` to save per-step timings to `cli.benchmark.jsonl`.
+
+
+## Benchmarks
+
+Build and run a model-shaped benchmark:
+
+```sh
+./dev run benchmark -- text_model_1B
+```
+
+Run selected lower-level benchmarks:
+
+```sh
+./dev run benchmark -- tensor_mlp
+./dev run benchmark -- _tensor_matmulT_s3d8
+```
+
+Emit JSON lines to stdout and repeat each benchmark:
+
+```sh
+./dev run benchmark -- --json --repeat 5 text_model_1B
+```
+
+Benchmark prefixes select registered benchmark names. Public, paper-relevant
+entry points include `text_model_1B`, `tensor_mlp`, and the `_tensor_*`
+operator benchmarks. Names beginning with `_` are lower-level diagnostic
+benchmarks and may be more hardware-specific.
+
+
+## Android Target
+
+Build and run the CLI on an attached Android device (check with `adb devices`):
+
+```sh
+adb push models/text-1B-int8.sqt /data/local/tmp/text-1B-int8.sqt
+./dev -p android run cli -- text-1B-int8.sqt -g 16
+```
+
+The Android target is optimized for Armv9-A with BF16 and I8MM support. The
+helper script pins threads on Pixel 8a devices; other devices run without that
+device-specific taskset.
+
+
+## Profiling Using `perf`
+
+Install `linux-tools-generic`. On AWS Graviton, you may have to symlink the
+matching `perf` binary into `/usr/local/bin`.
 
 ```conf
 # Add to /etc/sysctl.conf, then restart
@@ -44,7 +115,8 @@ perf report
 perf report -d benchmark
 ```
 
-### VSCode C++ configuration
+
+## VSCode C++ Configuration
 
 <details markdown>
 
@@ -89,14 +161,15 @@ perf report -d benchmark
 
 </details>
 
-## License information
 
- - Clang (compiler), Apache 2.0
- - Ninja (build system), Apache 2.0
- - Ninja utility `third-party/ninja_syntax.py`, Apache 2.0
- - Android NDK, [License](https://android.googlesource.com/platform/prebuilts/ndk/+/master/NOTICE)
- - C++ Libraries
-   - nlohmann/json, MIT License
-   - jarro2783/cxxopts, MIT License
-   - catchorg/Catch2, Boost Software License 1.0
-   - nothings/stb/{stb_image.h, stb_image_resize2.h}, Public Domain
+## License Information
+
+- Clang (compiler), Apache 2.0
+- Ninja (build system), Apache 2.0
+- Ninja utility `third-party/ninja_syntax.py`, Apache 2.0
+- Android NDK, [License](https://android.googlesource.com/platform/prebuilts/ndk/+/master/NOTICE)
+- C++ libraries:
+  - nlohmann/json, MIT License
+  - jarro2783/cxxopts, MIT License
+  - catchorg/Catch2, Boost Software License 1.0
+  - nothings/stb/{stb_image.h, stb_image_resize2.h}, Public Domain
