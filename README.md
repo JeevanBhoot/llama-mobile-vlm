@@ -27,10 +27,11 @@ For a standalone Python demo of the QAT vision model using Transformers, see [`d
 
 ```sh
 pip install torch transformers accelerate safetensors pillow requests
-mkdir -p models/
-wget https://graphcore-research-public.s3.eu-west-1.amazonaws.com/2026-llama-mobile/proud-sponge-1878-bf16.safetensors -O models/proud-sponge-1878-bf16.safetensors
-python demo.py --checkpoint models/proud-sponge-1878-bf16.safetensors --int8-activations
+wget https://graphcore-research-public.s3.eu-west-1.amazonaws.com/2026-llama-mobile/hf_models/vision-11B-s3d8-as-bf16.safetensors
+echo "What is this an image of?" | python demo.py --checkpoint vision-11B-s3d8-as-bf16.safetensors --int8-activations --image https://picsum.photos/id/36/4179/2790
 ```
+
+To run the original bfloat16 baseline model, omit `--checkpoint` and `--int8-activations`. Run without `echo ... |` to enter an interactive prompt.
 
 
 ## Inference Library Quick Start

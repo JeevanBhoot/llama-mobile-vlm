@@ -12,7 +12,7 @@ They are `.sqt` files using the format documented in [`file_format.md`](file_for
 
 | File | Size | Source model | Weights | Intended use |
 | --- | ---: | --- | --- | --- |
-| `vision-11B-s3d8.sqt` | 3.73 GB | `meta-llama/Llama-3.2-11B-Vision-Instruct` | S3D8 weights / INT8 activations, QAT | Trained model supporting the paper's main task results |
+| `vision-11B-s3d8.sqt` | 3.73 GB | `meta-llama/Llama-3.2-11B-Vision-Instruct` | S3D8 weights / INT8 activations, QAT | Trained model supporting the paper's main task results [proud-sponge-1878] |
 | `vision-11B-bf16.sqt` | 21.32 GB | `meta-llama/Llama-3.2-11B-Vision-Instruct` | BF16 baseline | Vision-language baseline for quality and performance comparisons |
 | `text-1B-s3d8.sqt` | 506 MB | `meta-llama/Llama-3.2-1B-Instruct` | S3D8 direct cast | Smallest text-only model for smoke testing (note: direct-cast performance of S3D8 is poor) |
 | `text-1B-int8.sqt` | 1.50 GB | `meta-llama/Llama-3.2-1B-Instruct` | INT8 direct cast | Lightweight text-only CLI and benchmark smoke tests |
@@ -88,4 +88,21 @@ python squashedtensors.py meta-llama/Llama-3.2-11B-Vision-Instruct models/v3/vis
 
 # Vision | QAT S3D8
 python squashedtensors.py meta-llama/Llama-3.2-11B-Vision-Instruct models/v3/vision-11B-s3d8.sqt --checkpoint tmp/proud-sponge-1878.safetensors --comment "Llama 3.2 11B Vision Instruct, QAT (S3D8) [proud-sponge-1878]"
+```
+
+
+## HuggingFace-compatible checkpoints
+
+We also provide checkpoints matching `vision-11B-s3d8.sqt`, in HuggingFace-compatible `.safetensors` formats.
+
+A checkpoint with weights converted to S3D8 then rounded back to BF16 for compatibility with HuggingFace's `AutoModelForCausalLM` loading:
+
+```text
+s3://graphcore-research-public/2026-llama-mobile/hf_models/vision-11B-s3d8-as-bf16.safetensors
+```
+
+The original training checkpoint with master weight state and separate block scales:
+
+```text
+s3://graphcore-research-public/2026-llama-mobile/hf_models/vision-11B-s3d8-training.safetensors
 ```

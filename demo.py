@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager, nullcontext
 import io
+import sys
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Iterator
 
@@ -19,7 +20,7 @@ import transformers
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run a prompt/image example with Meta Llama 3.2 Vision Instruct, "
+            "Run an interactive prompt/image chat with Meta Llama 3.2 Vision Instruct, "
             "optionally loading the released Llama-Mobile QAT BF16 checkpoint."
         ),
         epilog=(
@@ -40,13 +41,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--image",
-        default="https://picsum.photos/id/36/4179/2790",
         help="Image URL or local path.",
-    )
-    parser.add_argument(
-        "--prompt",
-        default="What is this an image of?",
-        help="User prompt.",
     )
     parser.add_argument(
         "--max-new-tokens",
@@ -119,31 +114,76 @@ def int8_activations(model: torch.nn.Module) -> Iterator[None]:
             handle.remove()
 
 
-def ask(
+def user_message(prompt: str, include_image: bool) -> dict[str, object]:
+    content = [{"type": "text", "text": prompt}]
+    if include_image:
+        content.append({"type": "image"})
+    return {"role": "user", "content": content}
+
+
+def assistant_message(response: str) -> dict[str, object]:
+    return {"role": "assistant", "content": [{"type": "text", "text": response}]}
+
+
+def generate_response(
     model: transformers.MllamaForConditionalGeneration,
     processor: transformers.AutoProcessor,
-    prompt: str,
-    image: PIL.Image.Image,
+    messages: list[dict[str, object]],
+    image: PIL.Image.Image | None,
     max_new_tokens: int,
     do_sample: bool,
 ) -> str:
-    message = {
-        "role": "user",
-        "content": [{"type": "text", "text": prompt}, {"type": "image"}],
+    processor_args = {
+        "text": processor.apply_chat_template(messages, add_generation_prompt=True),
+        "add_special_tokens": False,
+        "return_tensors": "pt",
     }
-    inputs = processor(
-        text=processor.apply_chat_template([message], add_generation_prompt=True),
-        images=image,
-        add_special_tokens=False,
-        return_tensors="pt",
-    )
+    if image is not None:
+        processor_args["images"] = image
+
+    inputs = processor(**processor_args)
+    model_inputs = inputs.to(model.device)
     sample_args = {} if do_sample else {"do_sample": False, "temperature": None, "top_p": None}
     outputs = model.generate(
-        **inputs.to(model.device),
+        **model_inputs,
         max_new_tokens=max_new_tokens,
         **sample_args,
     )
-    return processor.tokenizer.decode(outputs[0], skip_special_tokens=True)
+    input_token_count = model_inputs["input_ids"].shape[-1]
+    return processor.tokenizer.decode(outputs[0][input_token_count:], skip_special_tokens=True).strip()
+
+
+def chat(
+    model: transformers.MllamaForConditionalGeneration,
+    processor: transformers.AutoProcessor,
+    image: PIL.Image.Image | None,
+    max_new_tokens: int,
+    do_sample: bool,
+) -> None:
+    messages: list[dict[str, object]] = []
+    include_image = image is not None
+
+    while True:
+        try:
+            prompt = input("> " if sys.stdin.isatty() else "")
+        except EOFError:
+            break
+        prompt = prompt.strip()
+        if not prompt:
+            continue
+
+        messages.append(user_message(prompt, include_image))
+        include_image = False
+        response = generate_response(
+            model=model,
+            processor=processor,
+            messages=messages,
+            image=image,
+            max_new_tokens=max_new_tokens,
+            do_sample=do_sample,
+        )
+        print(response, flush=True)
+        messages.append(assistant_message(response))
 
 
 def main() -> None:
@@ -162,18 +202,13 @@ def main() -> None:
         state_dict = safetensors.torch.load_file(args.checkpoint, device="cpu")
         model.load_state_dict(state_dict)
 
-    image = load_image(args.image)
-    context = int8_activations(model) if args.int8_activations else nullcontext()
-    with context:
-        print(
-            ask(
-                model=model,
-                processor=processor,
-                prompt=args.prompt,
-                image=image,
-                max_new_tokens=args.max_new_tokens,
-                do_sample=args.do_sample,
-            )
+    with (int8_activations(model) if args.int8_activations else nullcontext()):
+        chat(
+            model=model,
+            processor=processor,
+            image=(load_image(args.image) if args.image else None),
+            max_new_tokens=args.max_new_tokens,
+            do_sample=args.do_sample,
         )
 
 
