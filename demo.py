@@ -353,7 +353,7 @@ def load_model(args: argparse.Namespace, dtype: torch.dtype) -> transformers.Mll
         model.to(dtype=dtype)
         load_checkpoint(model, args.checkpoint)
         materialize_mllama_rotary_buffers(model, dtype)
-        return model.to(resolve_device(args.device))
+        return model.to(device=resolve_device(args.device), dtype=dtype)
 
     model = transformers.MllamaForConditionalGeneration.from_pretrained(
         args.model,
