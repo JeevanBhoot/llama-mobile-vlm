@@ -30,7 +30,7 @@ uv run pytest tests/
 
 Sync from AWS S3:
 ```sh
-aws s3 sync s3://graphcore-research-us-east-1/2024-10-squashedllama/data/ data/
+aws s3 sync --region=eu-west-1 s3://graphcore-research-us-east-1/2024-10-squashedllama/data/ data/
 ```
 
 If missing `aws` client (for fetching data from S3 buckets):

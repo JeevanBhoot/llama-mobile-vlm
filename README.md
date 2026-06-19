@@ -48,8 +48,11 @@ Download prebuilt models:
 
 ```sh
 mkdir -p models/
-aws s3 cp --no-sign-request s3://graphcore-research-public/2026-llama-mobile/models/20260611/text-1B-int8.sqt models/
-aws s3 cp --no-sign-request s3://graphcore-research-public/2026-llama-mobile/models/20260611/vision-11B-s3d8.sqt models/
+aws s3 cp --no-sign-request --region=eu-west-1 s3://graphcore-research-public/2026-llama-mobile/models/20260611/text-1B-int8.sqt models/
+aws s3 cp --no-sign-request --region=eu-west-1 s3://graphcore-research-public/2026-llama-mobile/models/20260611/vision-11B-s3d8.sqt models/
+# OR
+wget https://graphcore-research-public.s3.eu-west-1.amazonaws.com/2026-llama-mobile/models/20260611/text-1B-int8.sqt -O models/text-1B-int8.sqt
+wget https://graphcore-research-public.s3.eu-west-1.amazonaws.com/2026-llama-mobile/models/20260611/vision-11B-s3d8.sqt -O models/vision-11B-s3d8.sqt
 ```
 
 Run text generation:

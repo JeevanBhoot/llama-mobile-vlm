@@ -35,6 +35,7 @@ Download the public release models:
 ```sh
 mkdir -p models
 aws s3 sync --no-sign-request \
+  --region=eu-west-1 \
   s3://graphcore-research-public/2026-llama-mobile/models/20260611/ \
   models/
 ```
