@@ -93,16 +93,27 @@ python squashedtensors.py meta-llama/Llama-3.2-11B-Vision-Instruct models/v3/vis
 
 ## HuggingFace-compatible checkpoints
 
-We also provide checkpoints matching `vision-11B-s3d8.sqt`, in HuggingFace-compatible `.safetensors` formats.
+We also provide checkpoints matching `vision-11B-s3d8.sqt`, in `.safetensors`
+formats for the standalone Python demo.
 
-A checkpoint with weights converted to S3D8 then rounded back to BF16 for compatibility with HuggingFace's `AutoModelForCausalLM` loading:
+The compressed demo checkpoint stores S3D8 weights packed as bytes, plus BF16
+per-channel scales and small INT8 lookup tables. `demo.py` keeps these weights
+packed in model state and dequantizes them layer-by-layer for PyTorch inference:
 
 ```text
-s3://graphcore-research-public/2026-llama-mobile/hf_models/vision-11B-s3d8-as-bf16.safetensors
+s3://graphcore-research-public/2026-llama-mobile/hf_models/vision-11B-s3d8-packed.safetensors
 ```
 
-The original training checkpoint with master weight state and separate block scales:
+The original training checkpoint stores QAT master weights and centroids:
 
 ```text
 s3://graphcore-research-public/2026-llama-mobile/hf_models/vision-11B-s3d8-training.safetensors
+```
+
+**Conversion commands:**
+
+To convert the training checkpoint into the compressed demo checkpoint:
+
+```sh
+python training/compress_s3d8_checkpoint.py vision-11B-s3d8-training.safetensors vision-11B-s3d8-packed.safetensors
 ```

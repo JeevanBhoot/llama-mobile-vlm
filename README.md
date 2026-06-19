@@ -23,15 +23,15 @@ Including:
 
 ## Standalone Python Demo
 
-For a standalone Python demo of the QAT vision model using Transformers, see [`demo.py`](demo.py). It loads Meta Llama 3.2 Vision Instruct, optionally applies the released QAT BF16 checkpoint, and can simulate INT8 activations.
+For a standalone Python demo of the QAT vision model using Transformers, see [`demo.py`](demo.py). It loads Meta Llama 3.2 Vision Instruct, optionally applies the released packed S3D8 checkpoint, and can simulate INT8 activations.
 
 ```sh
 pip install torch transformers accelerate safetensors pillow requests
-wget https://graphcore-research-public.s3.eu-west-1.amazonaws.com/2026-llama-mobile/hf_models/vision-11B-s3d8-as-bf16.safetensors
-echo "What is this an image of?" | python demo.py --checkpoint vision-11B-s3d8-as-bf16.safetensors --int8-activations --image https://picsum.photos/id/36/4179/2790
+wget https://graphcore-research-public.s3.eu-west-1.amazonaws.com/2026-llama-mobile/hf_models/vision-11B-s3d8-packed.safetensors
+echo "What is this an image of?" | python demo.py --checkpoint vision-11B-s3d8-packed.safetensors --int8-activations --image https://picsum.photos/id/36/4179/2790
 ```
 
-To run the original bfloat16 baseline model, omit `--checkpoint` and `--int8-activations`. Run without `echo ... |` to enter an interactive prompt.
+To run the original bfloat16 baseline model, omit `--checkpoint` and `--int8-activations`. Run without `echo ... |` to enter an interactive prompt. Note that the demo is not optimised for performance.
 
 
 ## Inference Library Quick Start
