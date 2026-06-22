@@ -28,6 +28,13 @@ uv pip install -r requirements.txt --index https://download.pytorch.org/whl/cu12
 uv run pytest tests/
 ```
 
+S3 paths default to the original internal project bucket, but can be overridden
+for compatible bucket layouts:
+
+```sh
+export LLAMA_MOBILE_S3_REPO_PATH=s3://my-bucket/llama-mobile
+```
+
 Sync from AWS S3:
 ```sh
 aws s3 sync --region=eu-west-1 s3://graphcore-research-us-east-1/2024-10-squashedllama/data/ data/

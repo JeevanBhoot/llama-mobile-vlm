@@ -43,7 +43,9 @@ from utility import (
 )
 
 WANDB_PROJECT = "llama-mobile"
-CHECKPOINT_PATH = S3_REPO_PATH + "/checkpoints/{name}.safetensors"
+CHECKPOINT_PATH = (
+    f"{S3_REPO_PATH.rstrip('/')}/checkpoints/{{name}}.safetensors"
+)
 
 
 def _log(*msg: Any) -> None:

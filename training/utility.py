@@ -3,6 +3,7 @@
 import copy
 import dataclasses
 import json
+import os
 import subprocess
 import tempfile
 import typing
@@ -19,9 +20,16 @@ from transformers import MllamaVisionModel, PreTrainedTokenizerBase
 
 T = TypeVar("T")
 
+DEFAULT_S3_REPO_PATH = "s3://graphcore-research-us-east-1/2024-10-squashedllama"
+
+
+def _join_s3_path(prefix: str, *parts: str) -> str:
+    return "/".join([prefix.rstrip("/"), *(part.strip("/") for part in parts)])
+
+
 LOCAL_DATA_PATH = f"{Path(__file__).parent}/data"
-S3_REPO_PATH = "s3://graphcore-research-us-east-1/2024-10-squashedllama"
-S3_DATA_PATH = f"{S3_REPO_PATH}/data"
+S3_REPO_PATH = os.getenv("LLAMA_MOBILE_S3_REPO_PATH", DEFAULT_S3_REPO_PATH)
+S3_DATA_PATH = _join_s3_path(S3_REPO_PATH, "data")
 
 LLAMA_PROMPT_TEMPLATES = dict(
     instruct="<|start_header_id|>user<|end_header_id|>"
