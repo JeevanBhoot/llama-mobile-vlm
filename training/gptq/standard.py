@@ -4,6 +4,7 @@
 
 import argparse
 import json
+import subprocess
 import datasets
 import transformers
 from pathlib import Path
@@ -192,6 +193,34 @@ def summarise_results(
     return summary
 
 
+def load_eval_data(
+    task_name: str,
+    n_examples: int,
+    load_vqa_from_s3: bool = False,
+    vqa_s3_path: str | None = None,
+    vqa_s3_local_path: Path | None = None,
+) -> datasets.Dataset:
+    if task_name == "vqa" and vqa_s3_path is not None:
+        local_path = vqa_s3_local_path
+        if local_path is None:
+            local_path = Path("data/datasets") / Path(vqa_s3_path.rstrip("/")).name
+        subprocess.run(
+            ["aws", "s3", "sync", "--no-sign-request", vqa_s3_path, str(local_path)],
+            check=True,
+        )
+        ds = datasets.load_from_disk(str(local_path))
+        ds = ds.select_columns(
+            ["question_id", "image_id", "question", "image", "answers"]
+        )
+        ds = ds.shuffle(625464)
+        return ds.select(range(n_examples))
+
+    kwargs: dict[str, Any] = {"limit": n_examples}
+    if task_name == "vqa":
+        kwargs["load_from_s3"] = load_vqa_from_s3
+    return vqa.TASKS[task_name].data(**kwargs)
+
+
 def quantize(
     model_name: str,
     output_dir: Path,
@@ -299,6 +328,9 @@ def evaluate(
     n_examples: int = 1024,
     batch_size: int = 1,
     include_relaxed_metrics: bool = False,
+    load_vqa_from_s3: bool = False,
+    vqa_s3_path: str | None = None,
+    vqa_s3_local_path: Path | None = None,
     device: str | None = None,
 ) -> dict[str, Any]:
     qmodel = GPTQModel.load(str(model_dir))
@@ -311,7 +343,13 @@ def evaluate(
 
     task_results = {}
     for task_name in tasks:
-        data = vqa.TASKS[task_name].data(limit=n_examples)
+        data = load_eval_data(
+            task_name,
+            n_examples=n_examples,
+            load_vqa_from_s3=load_vqa_from_s3,
+            vqa_s3_path=vqa_s3_path,
+            vqa_s3_local_path=vqa_s3_local_path,
+        )
         results = list(
             vqa.evaluate(
                 model=model,
@@ -335,6 +373,11 @@ def evaluate(
             "n_examples_per_task": n_examples,
             "evaluation_batch_size": batch_size,
             "include_relaxed_metrics": include_relaxed_metrics,
+            "load_vqa_from_s3": load_vqa_from_s3,
+            "vqa_s3_path": vqa_s3_path,
+            "vqa_s3_local_path": str(vqa_s3_local_path)
+            if vqa_s3_local_path
+            else None,
             "artifact_size_bytes": artifact_size_bytes,
         }
     )
@@ -527,6 +570,22 @@ def _add_evaluate_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Device used for evaluation",
     )
+    parser.add_argument(
+        "--load-vqa-from-s3",
+        action="store_true",
+        help="Load VQAv2 from the legacy S3 cache instead of Hugging Face",
+    )
+    parser.add_argument(
+        "--vqa-s3-path",
+        default=None,
+        help="Temporary VQAv2 S3 dataset path to sync with --no-sign-request",
+    )
+    parser.add_argument(
+        "--vqa-s3-local-path",
+        type=Path,
+        default=None,
+        help="Optional local destination for --vqa-s3-path",
+    )
 
 
 def _add_eval_settings_args(
@@ -625,6 +684,9 @@ def main(argv: list[str] | None = None) -> None:
             n_examples=args.n_examples,
             batch_size=args.batch_size,
             include_relaxed_metrics=args.include_relaxed_metrics,
+            load_vqa_from_s3=args.load_vqa_from_s3,
+            vqa_s3_path=args.vqa_s3_path,
+            vqa_s3_local_path=args.vqa_s3_local_path,
             device=args.device,
         )
     else:
