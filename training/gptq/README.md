@@ -1,15 +1,16 @@
 # GPTQ Baselines
 
-This directory contains GPTQ INT4 and INT3 baselines for
+This directory contains two GPTQ flows for
 `meta-llama/Llama-3.2-11B-Vision-Instruct`.
 
-There are two flows:
+| Flow | Module | Quantization implementation | Saved artifact | Primary use |
+| --- | --- | --- | --- | --- |
+| GPTQModel reference | `gptq.standard` | GPTQModel | GPTQModel artifact | Run the external GPTQModel baseline. |
+| Local dense GPTQ | `gptq.local` | Local PyTorch GPTQ implementation | Dense dequantized Hugging Face model | Evaluate GPTQ quality with standard Transformers loading and report estimated packed tensor storage. |
 
-- `gptq.standard`: GPTQModel reference artifacts.
-- `gptq.local`: local GPTQ implementation that saves dense dequantized
-  Hugging Face artifacts for parity checks and future S3D8 packing work.
-
-Both flows use C4 calibration and the existing `eval.vqa` benchmark harness.
+Both flows use C4 calibration and the `eval.vqa` benchmark harness. GPTQModel's
+Mllama definition quantizes language-model self-attention and MLP projections.
+Cross-attention layers that require `pixel_values` are skipped.
 
 ## Prerequisites
 
@@ -20,7 +21,7 @@ source .venv/bin/activate
 uv pip install -r requirements.txt --torch-backend cu130
 ```
 
-Install GPTQModel only for the reference flow or parity tests:
+Install GPTQModel for the `gptq.standard` flow:
 
 ```sh
 uv pip install setuptools wheel
@@ -31,6 +32,9 @@ Set up a Hugging Face token with access to
 `meta-llama/Llama-3.2-11B-Vision-Instruct`.
 
 ## GPTQModel Reference Quantize
+
+`gptq.standard` calls GPTQModel directly. It writes the artifact format produced
+by GPTQModel and records run metadata in `metadata.json`.
 
 INT4:
 
@@ -48,19 +52,7 @@ python -m gptq.standard quantize \
   --output-dir out/gptq/llama-3.2-vision-gptq-int3-c4
 ```
 
-Each command writes a GPTQModel artifact to `--output-dir` and records run
-metadata in `metadata.json`.
-
-To quantize a different Hugging Face model, set `--model-name`:
-
-```sh
-python -m gptq.standard quantize \
-  --bits 4 \
-  --model-name meta-llama/Llama-3.2-3B \
-  --output-dir out/gptq/llama-3.2-3b-gptq-int4-c4
-```
-
-Quantization defaults:
+Default quantization settings:
 
 - Model: `meta-llama/Llama-3.2-11B-Vision-Instruct`
 - Calibration dataset: `allenai/c4`
@@ -78,8 +70,7 @@ Quantization defaults:
 - GC mode: `interval`
 - Calibration sort: `desc`
 
-The calibration batch size is already `1`. For lower memory use, use one or
-more of these options:
+Use these options to reduce quantization memory:
 
 - Reduce `--calibration-samples`.
 - Reduce `--calibration-max-tokens`.
@@ -102,22 +93,17 @@ python -m gptq.standard quantize \
   --wait-for-submodule-finalizers
 ```
 
-The quantize command intentionally exposes only the practical GPTQ knobs for
-paper baselines: number format, core GPTQ algorithm settings, calibration size,
-device/backend, and memory controls. Advanced GPTQModel features are left at
-their GPTQModel defaults so runs stay easy to reproduce.
+Common algorithm options:
 
-Useful non-default algorithm knobs:
-
-- `--group-size`
-- `--format`
-- `--pack-dtype`
-- `--desc-act` / `--no-desc-act`
-- `--act-group-aware` / `--no-act-group-aware`
-- `--static-groups`
-- `--damp-percent`
-- `--damp-auto-increment`
-- `--mse`
+- `--group-size`: number of input columns per quantization group.
+- `--format`: GPTQModel output format.
+- `--pack-dtype`: packed weight dtype passed to GPTQModel.
+- `--desc-act` / `--no-desc-act`: activation-order quantization.
+- `--act-group-aware` / `--no-act-group-aware`: GPTQModel act-group-aware ordering.
+- `--static-groups`: precompute group quantizers before activation ordering.
+- `--damp-percent`: Hessian damping percentage.
+- `--damp-auto-increment`: damping increment used during Cholesky recovery.
+- `--mse`: MSE grid-search strength for quantizer scale selection.
 
 ## GPTQModel Reference Evaluate
 
@@ -141,9 +127,8 @@ python -m gptq.standard evaluate \
   --n-examples 1024
 ```
 
-The evaluator reuses `eval.vqa`, so prompts, splits, fixed subsets,
-generation lengths, and metrics match the existing S3D8/QAT evaluation
-path.
+The evaluator uses `eval.vqa`, so prompts, splits, fixed subsets, generation
+lengths, and metrics are shared with the existing VQA evaluation code.
 
 Evaluation writes:
 
@@ -164,18 +149,17 @@ Evaluation defaults:
 
 ## Local GPTQ Quantize
 
-The local implementation mirrors GPTQModel's layer-level GPTQ math but writes a
-dense dequantized Hugging Face model. It is an accuracy and parity artifact, not
-a packed INT3/INT4 deployment artifact.
+`gptq.local` runs the local PyTorch GPTQ implementation and saves a dense
+dequantized Hugging Face model. The quantized values are dequantized back into
+the model weights before saving, so the artifact can be loaded with standard
+Transformers APIs.
 
-The quantize command also writes `estimated_packed_storage` to `metadata.json`
-and prints a short storage summary. This estimate counts state-dict tensor
-storage only: quantized target weights are counted as packed `bits` values,
-scale/zero tensors are counted using `--storage-scale-zero-dtype`, optional
-`g_idx` storage is reported separately, and all excluded tensors such as
-cross-attention, vision encoder, embeddings, norms, and heads remain dense at
-their current dtype. Tokenizer files, configs, and container overhead are not
-included in the packed estimate.
+The saved model is dense. Use `estimated_packed_storage` in `metadata.json` for
+the estimated packed tensor storage. The estimate counts quantized target
+weights as packed `bits` values, scale/zero tensors using
+`--storage-scale-zero-dtype`, optional `g_idx` storage separately, and all
+unquantized tensors at their current dense dtype. Tokenizer files, config files,
+and container overhead are excluded from the estimate.
 
 INT4:
 
@@ -194,8 +178,8 @@ python -m gptq.local quantize \
 ```
 
 The local flow quantizes the same Mllama language-model self-attention and MLP
-projection layers as the current GPTQModel Mllama definition and skips
-cross-attention decoder layers.
+projection layers as the GPTQModel Mllama definition. Cross-attention decoder
+layers are skipped.
 
 Local GPTQ defaults:
 
@@ -215,6 +199,20 @@ Local GPTQ defaults:
 - Damp auto increment: `0.01`
 - Torch dtype: `bfloat16`
 - Packed storage scale/zero dtype assumption: `bfloat16`
+
+After quantization, the command prints:
+
+```text
+Estimated packed tensor storage (without g_idx): ...
+Estimated packed tensor storage (with g_idx): ...
+Dense local artifact size: ...
+```
+
+The same information is written to:
+
+```sh
+jq .estimated_packed_storage out/gptq/llama-3.2-vision-local-gptq-int4-c4/metadata.json
+```
 
 ## Local GPTQ Evaluate
 
@@ -243,5 +241,7 @@ python -m gptq.local evaluate \
 These are accuracy-only PTQ baselines. GPTQModel artifacts and local dense
 artifacts are not Arm deployment artifacts for the C++ inference library.
 
-GPTQModel Mllama quantization skips cross-attention layers that require
-`pixel_values`.
+The GPTQModel artifact size and the local dense artifact size are different
+because the two flows save different artifact formats. Compare quality using the
+evaluation summaries. Compare storage using the GPTQModel artifact size or the
+local `estimated_packed_storage` field.

@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Graphcore Ltd. All rights reserved.
 
-"""Local dense GPTQ baseline for parity and S3D8 follow-up work."""
+"""Local dense GPTQ baseline."""
 
 import argparse
 import dataclasses
