@@ -4,6 +4,7 @@
 
 import argparse
 import dataclasses
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -32,6 +33,7 @@ DEFAULT_TORCH_DTYPE = "bfloat16"
 DEFAULT_TASKS = ("vqa", "chartqa", "docvqa", "ai2d")
 SUPPORTED_BITS = (3, 4)
 METADATA_FILENAME = "metadata.json"
+DEFAULT_STORAGE_SCALE_ZERO_DTYPE = "bfloat16"
 
 TARGET_MODULE_GROUPS = (
     ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"),
@@ -44,6 +46,11 @@ DTYPES = {
     "bfloat16": torch.bfloat16,
     "float16": torch.float16,
     "float32": torch.float32,
+}
+DTYPE_STORAGE_BYTES = {
+    "bfloat16": 2,
+    "float16": 2,
+    "float32": 4,
 }
 
 
@@ -238,6 +245,108 @@ def load_model(
     return model
 
 
+def estimate_packed_storage(
+    model: torch.nn.Module,
+    layer_logs: list[dict[str, Any]],
+    bits: int,
+    scale_zero_dtype: str,
+) -> dict[str, Any]:
+    if scale_zero_dtype not in DTYPE_STORAGE_BYTES:
+        raise ValueError(
+            f"Unsupported storage scale/zero dtype {scale_zero_dtype!r}; "
+            f"expected one of {tuple(DTYPE_STORAGE_BYTES)}"
+        )
+
+    scale_zero_bytes_per_value = DTYPE_STORAGE_BYTES[scale_zero_dtype]
+    logs_by_weight_name = {
+        f"{log['full_name']}.weight": log
+        for log in layer_logs
+    }
+    unmatched_quantized_names = set(logs_by_weight_name)
+
+    dense_state_dict_bytes = 0
+    unquantized_dense_bytes = 0
+    unquantized_tensor_count = 0
+    unquantized_value_count = 0
+    quantized_dense_bytes = 0
+    quantized_value_count = 0
+    packed_weight_bytes = 0
+    scale_zero_bytes = 0
+    g_idx_bytes = 0
+
+    for name, tensor in model.state_dict().items():
+        n_values = tensor.numel()
+        dense_bytes = n_values * tensor.element_size()
+        dense_state_dict_bytes += dense_bytes
+
+        log = logs_by_weight_name.get(name)
+        if log is None:
+            unquantized_dense_bytes += dense_bytes
+            unquantized_tensor_count += 1
+            unquantized_value_count += n_values
+            continue
+
+        unmatched_quantized_names.discard(name)
+        quantized_dense_bytes += dense_bytes
+        quantized_value_count += n_values
+        packed_weight_bytes += math.ceil(n_values * bits / 8)
+        scale_zero_values = math.prod(log["scale_shape"]) + math.prod(
+            log["zero_shape"]
+        )
+        scale_zero_bytes += scale_zero_values * scale_zero_bytes_per_value
+        g_idx_bytes += math.prod(log["g_idx_shape"]) * 4
+
+    packed_without_g_idx = (
+        unquantized_dense_bytes + packed_weight_bytes + scale_zero_bytes
+    )
+    packed_with_g_idx = packed_without_g_idx + g_idx_bytes
+
+    total_values = unquantized_value_count + quantized_value_count
+    quantized_bytes_without_g_idx = packed_weight_bytes + scale_zero_bytes
+    quantized_bytes_with_g_idx = quantized_bytes_without_g_idx + g_idx_bytes
+
+    return {
+        "assumptions": {
+            "scope": "state_dict tensors only; tokenizer/config files are excluded",
+            "quantized_weight_bits": bits,
+            "scale_zero_dtype": scale_zero_dtype,
+            "g_idx_dtype": "int32",
+            "unquantized_tensors": "stored densely at their current dtype",
+            "packed_weight_padding": "rounded up to whole bytes per tensor",
+        },
+        "dense_state_dict_bytes": dense_state_dict_bytes,
+        "estimated_packed_without_g_idx_bytes": packed_without_g_idx,
+        "estimated_packed_with_g_idx_bytes": packed_with_g_idx,
+        "overall_bits_per_value_without_g_idx": (
+            packed_without_g_idx * 8 / total_values if total_values else 0.0
+        ),
+        "overall_bits_per_value_with_g_idx": (
+            packed_with_g_idx * 8 / total_values if total_values else 0.0
+        ),
+        "quantized_effective_bits_per_value_without_g_idx": (
+            quantized_bytes_without_g_idx * 8 / quantized_value_count
+            if quantized_value_count
+            else 0.0
+        ),
+        "quantized_effective_bits_per_value_with_g_idx": (
+            quantized_bytes_with_g_idx * 8 / quantized_value_count
+            if quantized_value_count
+            else 0.0
+        ),
+        "total_state_dict_values": total_values,
+        "quantized_values": quantized_value_count,
+        "unquantized_values": unquantized_value_count,
+        "quantized_dense_bytes": quantized_dense_bytes,
+        "unquantized_dense_bytes": unquantized_dense_bytes,
+        "packed_weight_bytes": packed_weight_bytes,
+        "scale_zero_bytes": scale_zero_bytes,
+        "g_idx_bytes": g_idx_bytes,
+        "quantized_tensor_count": len(layer_logs) - len(unmatched_quantized_names),
+        "unquantized_tensor_count": unquantized_tensor_count,
+        "unmatched_quantized_tensor_names": sorted(unmatched_quantized_names),
+    }
+
+
 def quantize(
     model_name: str,
     output_dir: Path,
@@ -259,6 +368,7 @@ def quantize(
     damp_auto_increment: float = 0.01,
     blocksize: int = 128,
     mse: float = 0.0,
+    storage_scale_zero_dtype: str = DEFAULT_STORAGE_SCALE_ZERO_DTYPE,
 ) -> dict[str, Any]:
     if bits not in SUPPORTED_BITS:
         raise ValueError(f"Unsupported bits={bits}, expected one of {SUPPORTED_BITS}")
@@ -319,6 +429,12 @@ def quantize(
     if hasattr(tokenizer, "save_pretrained"):
         tokenizer.save_pretrained(output_dir)
 
+    packed_storage = estimate_packed_storage(
+        model,
+        layer_logs=layer_logs,
+        bits=bits,
+        scale_zero_dtype=storage_scale_zero_dtype,
+    )
     metadata = {
         "model_name": model_name,
         "output_dir": str(output_dir),
@@ -341,6 +457,7 @@ def quantize(
         "target_module_groups": TARGET_MODULE_GROUPS,
         "n_quantized_modules": len(layer_logs),
         "quantization_log": layer_logs,
+        "estimated_packed_storage": packed_storage,
         "artifact_size_bytes": directory_size(output_dir),
     }
     write_json(output_dir / METADATA_FILENAME, metadata)
@@ -442,6 +559,12 @@ def _add_quantize_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--torch-dtype", choices=tuple(DTYPES), default=DEFAULT_TORCH_DTYPE
     )
+    parser.add_argument(
+        "--storage-scale-zero-dtype",
+        choices=tuple(DTYPE_STORAGE_BYTES),
+        default=DEFAULT_STORAGE_SCALE_ZERO_DTYPE,
+        help="Assumed dtype for packed GPTQ scale/zero storage estimates",
+    )
 
 
 def _add_evaluate_args(parser: argparse.ArgumentParser) -> None:
@@ -481,7 +604,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "quantize":
         output_dir = args.output_dir or default_output_dir(args.bits)
-        quantize(
+        metadata = quantize(
             model_name=args.model_name,
             output_dir=output_dir,
             bits=args.bits,
@@ -502,6 +625,23 @@ def main(argv: list[str] | None = None) -> None:
             damp_auto_increment=args.damp_auto_increment,
             blocksize=args.blocksize,
             mse=args.mse,
+            storage_scale_zero_dtype=args.storage_scale_zero_dtype,
+        )
+        storage = metadata["estimated_packed_storage"]
+        gib = 1024**3
+        print(
+            "Estimated packed tensor storage "
+            f"(without g_idx): {storage['estimated_packed_without_g_idx_bytes'] / gib:.3f} GiB, "
+            f"{storage['overall_bits_per_value_without_g_idx']:.3f} bits/value overall"
+        )
+        print(
+            "Estimated packed tensor storage "
+            f"(with g_idx): {storage['estimated_packed_with_g_idx_bytes'] / gib:.3f} GiB, "
+            f"{storage['overall_bits_per_value_with_g_idx']:.3f} bits/value overall"
+        )
+        print(
+            "Dense local artifact size: "
+            f"{metadata['artifact_size_bytes'] / gib:.3f} GiB"
         )
     elif args.command == "evaluate":
         output_dir = args.output_dir or args.model_dir / "evaluation"

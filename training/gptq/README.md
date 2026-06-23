@@ -168,6 +168,15 @@ The local implementation mirrors GPTQModel's layer-level GPTQ math but writes a
 dense dequantized Hugging Face model. It is an accuracy and parity artifact, not
 a packed INT3/INT4 deployment artifact.
 
+The quantize command also writes `estimated_packed_storage` to `metadata.json`
+and prints a short storage summary. This estimate counts state-dict tensor
+storage only: quantized target weights are counted as packed `bits` values,
+scale/zero tensors are counted using `--storage-scale-zero-dtype`, optional
+`g_idx` storage is reported separately, and all excluded tensors such as
+cross-attention, vision encoder, embeddings, norms, and heads remain dense at
+their current dtype. Tokenizer files, configs, and container overhead are not
+included in the packed estimate.
+
 INT4:
 
 ```sh
@@ -205,6 +214,7 @@ Local GPTQ defaults:
 - Damp percent: `0.05`
 - Damp auto increment: `0.01`
 - Torch dtype: `bfloat16`
+- Packed storage scale/zero dtype assumption: `bfloat16`
 
 ## Local GPTQ Evaluate
 

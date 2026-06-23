@@ -59,14 +59,24 @@ class TinyDecoderLayer(torch.nn.Module):
         return (hidden_states + self.self_attn(hidden_states) + self.mlp(hidden_states),)
 
 
+class TinyLanguageModelInner(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.layers = torch.nn.ModuleList([TinyDecoderLayer(8)])
+
+
+class TinyLanguageModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.model = TinyLanguageModelInner()
+
+
 class TinyMllama(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.config = SimpleNamespace(use_cache=True)
         self.embed_tokens = torch.nn.Embedding(32, 8)
-        self.language_model = SimpleNamespace(
-            model=SimpleNamespace(layers=torch.nn.ModuleList([TinyDecoderLayer(8)]))
-        )
+        self.language_model = TinyLanguageModel()
         self.layers = self.language_model.model.layers
 
     def forward(self, input_ids, **kwargs):
@@ -116,6 +126,15 @@ def test_quantize_writes_dense_artifact(monkeypatch, tmp_path) -> None:
 
     assert metadata["artifact_type"] == "dense_dequantized_local_gptq"
     assert metadata["n_quantized_modules"] == 7
+    storage = metadata["estimated_packed_storage"]
+    assert storage["quantized_tensor_count"] == 7
+    assert storage["unmatched_quantized_tensor_names"] == []
+    assert storage["estimated_packed_without_g_idx_bytes"] < storage[
+        "dense_state_dict_bytes"
+    ]
+    assert storage["estimated_packed_with_g_idx_bytes"] >= storage[
+        "estimated_packed_without_g_idx_bytes"
+    ]
     assert (tmp_path / "model.safetensors").exists()
     assert (tmp_path / "processor_config.json").exists()
     assert (tmp_path / local.METADATA_FILENAME).exists()
