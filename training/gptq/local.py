@@ -5,6 +5,7 @@
 import argparse
 import dataclasses
 import math
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -15,19 +16,29 @@ import transformers
 from eval import vqa
 from gptq.algorithm import GPTQConfig, GPTQLinearQuantizer
 from gptq.common import (
+    DEFAULT_CALIBRATION_DATA_MIN_LENGTH,
+    DEFAULT_CALIBRATION_MAX_TOKENS,
+    DEFAULT_CALIBRATION_SAMPLES,
+    DEFAULT_CALIBRATION_SORT,
+    DEFAULT_EVAL_DEVICE,
+    SUPPORTED_CALIBRATION_SORTS,
+    batch_tokenized_calibration,
     directory_size,
     load_c4_calibration,
+    load_eval_data,
+    prepare_jsonl_output,
+    prepare_tokenized_calibration,
+    resolve_eval_device,
+    select_remaining_eval_data,
     summarise_results,
     tokenise_calibration,
     write_json,
-    write_jsonl,
+    write_jsonl_stream,
 )
 
 DEFAULT_MODEL_NAME = "meta-llama/Llama-3.2-11B-Vision-Instruct"
 DEFAULT_C4_DATA_FILES = "en/c4-train.00001-of-01024.json.gz"
 DEFAULT_C4_SPLIT = "train"
-DEFAULT_CALIBRATION_SAMPLES = 1024
-DEFAULT_CALIBRATION_MAX_TOKENS = 2048
 DEFAULT_GROUP_SIZE = 128
 DEFAULT_TORCH_DTYPE = "bfloat16"
 DEFAULT_TASKS = ("vqa", "chartqa", "docvqa", "ai2d")
@@ -67,8 +78,25 @@ class LayerInputs:
         return len(self.args)
 
 
+@dataclass(frozen=True)
+class TextLayerStack:
+    prefix: str
+    language_model: torch.nn.Module
+    layers: torch.nn.ModuleList
+
+
 def default_output_dir(bits: int) -> Path:
     return Path(f"out/gptq/llama-3.2-vision-local-gptq-int{bits}-c4")
+
+
+def format_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{int(minutes)}m {seconds:.0f}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{int(hours)}h {int(minutes)}m"
 
 
 def _move_to_device(x: Any, device: torch.device | str) -> Any:
@@ -95,17 +123,37 @@ def _detach_to_device(x: Any, device: torch.device | str) -> Any:
     return x
 
 
-def mllama_text_layers(model: torch.nn.Module) -> torch.nn.ModuleList:
-    return model.language_model.model.layers
+def mllama_text_layers(model: torch.nn.Module) -> TextLayerStack:
+    for prefix in ("model.language_model.layers", "language_model.model.layers"):
+        module = model
+        try:
+            parts = prefix.split(".")
+            for attr in parts[:-1]:
+                module = getattr(module, attr)
+            layers = getattr(module, parts[-1])
+        except AttributeError:
+            continue
+
+        if isinstance(layers, torch.nn.ModuleList):
+            return TextLayerStack(
+                prefix=prefix,
+                language_model=module,
+                layers=layers,
+            )
+
+    raise AttributeError(
+        "Unable to resolve Mllama text decoder layers. Tried "
+        "model.language_model.layers and language_model.model.layers."
+    )
 
 
 def collect_first_layer_inputs(
     model: torch.nn.Module,
+    layers: torch.nn.ModuleList,
     calibration_dataset: Iterable[dict[str, Any]],
     device: str,
     calibration_gpu_cache: bool = False,
 ) -> LayerInputs:
-    layers = mllama_text_layers(model)
     storage_device = device if calibration_gpu_cache else "cpu"
     cached_args = []
     cached_kwargs = []
@@ -148,6 +196,10 @@ def _run_layer(
     args = [_move_to_device(arg, device) for arg in args]
     kwargs = {k: _move_to_device(v, device) for k, v in kwargs.items()}
     return layer(*args, **kwargs)
+
+
+def is_mllama_cross_attention_layer(layer: torch.nn.Module) -> bool:
+    return layer.__class__.__name__.lower() == "mllamacrossattentiondecoderlayer"
 
 
 def _quantize_subset(
@@ -202,20 +254,47 @@ def quantize_layer(
     inputs: LayerInputs,
     config: GPTQConfig,
     device: str,
+    progress_name: str | None = None,
+    verbose: bool = True,
 ) -> tuple[LayerInputs, list[dict[str, Any]]]:
+    if is_mllama_cross_attention_layer(layer):
+        if verbose and progress_name is not None:
+            print(f"{progress_name}: skipped cross-attention layer", flush=True)
+        return inputs, []
+
     layer_modules = dict(layer.named_modules())
     logs = []
 
-    if layer.__class__.__name__.lower() != "mllamacrossattentiondecoderlayer":
-        for group in TARGET_MODULE_GROUPS:
-            subset = {
-                name: layer_modules[name]
-                for name in group
-                if name in layer_modules
-                and isinstance(layer_modules[name], torch.nn.Linear)
-            }
-            if subset:
-                logs.extend(_quantize_subset(layer, subset, inputs, config, device))
+    for group in TARGET_MODULE_GROUPS:
+        subset = {
+            name: layer_modules[name]
+            for name in group
+            if name in layer_modules
+            and isinstance(layer_modules[name], torch.nn.Linear)
+        }
+        if subset:
+            if verbose and progress_name is not None:
+                print(
+                    f"{progress_name}: quantizing {', '.join(subset)}",
+                    flush=True,
+                )
+            group_start = time.perf_counter()
+            group_logs = _quantize_subset(layer, subset, inputs, config, device)
+            if verbose and progress_name is not None:
+                for log in group_logs:
+                    print(
+                        f"{progress_name}: {log['module']} "
+                        f"loss={log['avg_loss']:.6g} "
+                        f"damp={log['damp_percent']:.5g} "
+                        f"time={format_duration(log['duration'])}",
+                        flush=True,
+                    )
+                print(
+                    f"{progress_name}: group done in "
+                    f"{format_duration(time.perf_counter() - group_start)}",
+                    flush=True,
+                )
+            logs.extend(group_logs)
 
     next_args = []
     next_kwargs = []
@@ -355,6 +434,8 @@ def quantize(
     batch_size: int = 1,
     calibration_samples: int = DEFAULT_CALIBRATION_SAMPLES,
     calibration_max_tokens: int = DEFAULT_CALIBRATION_MAX_TOKENS,
+    calibration_sort: str = DEFAULT_CALIBRATION_SORT,
+    calibration_data_min_length: int = DEFAULT_CALIBRATION_DATA_MIN_LENGTH,
     calibration_gpu_cache: bool = False,
     c4_data_files: str = DEFAULT_C4_DATA_FILES,
     c4_split: str = DEFAULT_C4_SPLIT,
@@ -369,15 +450,38 @@ def quantize(
     blocksize: int = 128,
     mse: float = 0.0,
     storage_scale_zero_dtype: str = DEFAULT_STORAGE_SCALE_ZERO_DTYPE,
+    verbose: bool = True,
 ) -> dict[str, Any]:
     if bits not in SUPPORTED_BITS:
         raise ValueError(f"Unsupported bits={bits}, expected one of {SUPPORTED_BITS}")
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+    if calibration_sort not in SUPPORTED_CALIBRATION_SORTS:
+        raise ValueError(
+            f"Unsupported calibration_sort={calibration_sort!r}, expected one of "
+            f"{SUPPORTED_CALIBRATION_SORTS}"
+        )
 
     dtype = DTYPES[torch_dtype]
+    quantize_start = time.perf_counter()
+    if verbose:
+        print(
+            f"Loading model {model_name!r} with dtype={torch_dtype} on {device}",
+            flush=True,
+        )
     model = load_model(model_name, dtype=dtype, device=device)
+    if verbose:
+        print("Loading processor/tokenizer", flush=True)
     processor = transformers.AutoProcessor.from_pretrained(model_name)
     tokenizer = processor.tokenizer
 
+    if verbose:
+        print(
+            "Loading C4 calibration "
+            f"samples={calibration_samples} split={c4_split} "
+            f"data_files={c4_data_files}",
+            flush=True,
+        )
     calibration_texts = load_c4_calibration(
         n_samples=calibration_samples,
         data_files=c4_data_files,
@@ -387,6 +491,21 @@ def quantize(
         calibration_texts,
         tokenizer=tokenizer,
         max_tokens=calibration_max_tokens,
+    )
+    prepared_calibration_dataset = prepare_tokenized_calibration(
+        calibration_dataset,
+        calibration_sort=calibration_sort,
+        calibration_data_min_length=calibration_data_min_length,
+    )
+    if not prepared_calibration_dataset:
+        raise ValueError(
+            "No calibration examples remain after min-length filtering. "
+            "Lower --calibration-data-min-length or increase calibration data."
+        )
+    calibration_batches = batch_tokenized_calibration(
+        prepared_calibration_dataset,
+        tokenizer=tokenizer,
+        batch_size=batch_size,
     )
 
     config = GPTQConfig(
@@ -402,27 +521,88 @@ def quantize(
         mse=mse,
     )
 
-    forward_pass_use_cache = getattr(model.config, "use_cache", False)
-    model.config.use_cache = False
+    text_layer_stack = mllama_text_layers(model)
+    text_config = getattr(text_layer_stack.language_model, "config", None)
+    config_had_use_cache = hasattr(text_config, "use_cache")
+    forward_pass_use_cache = (
+        text_config.use_cache if config_had_use_cache else None
+    )
+    if config_had_use_cache:
+        text_config.use_cache = False
     try:
+        if verbose:
+            print(
+                f"Capturing first-layer inputs from {len(calibration_batches)} "
+                f"calibration batches ({len(prepared_calibration_dataset)} examples)",
+                flush=True,
+            )
         layer_inputs = collect_first_layer_inputs(
             model,
-            calibration_dataset,
+            text_layer_stack.layers,
+            calibration_batches,
             device=device,
             calibration_gpu_cache=calibration_gpu_cache,
         )
+        if verbose:
+            print(
+                f"Captured {len(layer_inputs)} first-layer input batches",
+                flush=True,
+            )
 
         layer_logs = []
-        for layer_index, layer in enumerate(mllama_text_layers(model)):
-            layer_inputs, logs = quantize_layer(layer, layer_inputs, config, device)
+        total_layers = len(text_layer_stack.layers)
+        quantized_layer_count = 0
+        if verbose:
+            print(
+                f"Quantizing {total_layers} text decoder layers "
+                f"from {text_layer_stack.prefix}",
+                flush=True,
+            )
+        for layer_index, layer in enumerate(text_layer_stack.layers):
+            layer_start = time.perf_counter()
+            progress_name = (
+                f"[layer {layer_index + 1}/{total_layers} "
+                f"{layer.__class__.__name__}]"
+            )
+            if verbose:
+                print(f"{progress_name}: start", flush=True)
+            layer_inputs, logs = quantize_layer(
+                layer,
+                layer_inputs,
+                config,
+                device,
+                progress_name=progress_name,
+                verbose=verbose,
+            )
             for log in logs:
                 log["layer"] = layer_index
                 log["full_name"] = (
-                    f"language_model.model.layers.{layer_index}.{log['module']}"
+                    f"{text_layer_stack.prefix}.{layer_index}.{log['module']}"
                 )
             layer_logs.extend(logs)
+            if logs:
+                quantized_layer_count += 1
+            if verbose:
+                completed = layer_index + 1
+                elapsed = time.perf_counter() - quantize_start
+                eta = elapsed / completed * (total_layers - completed)
+                print(
+                    f"{progress_name}: done modules={len(logs)} "
+                    f"layer_time={format_duration(time.perf_counter() - layer_start)} "
+                    f"elapsed={format_duration(elapsed)} "
+                    f"eta={format_duration(eta)}",
+                    flush=True,
+                )
     finally:
-        model.config.use_cache = forward_pass_use_cache
+        if config_had_use_cache:
+            text_config.use_cache = forward_pass_use_cache
+    if verbose:
+        print(
+            f"Quantized {len(layer_logs)} modules across "
+            f"{quantized_layer_count} non-cross-attention layers",
+            flush=True,
+        )
+        print(f"Saving dense dequantized model to {output_dir}", flush=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(output_dir, safe_serialization=True)
     processor.save_pretrained(output_dir)
@@ -435,6 +615,13 @@ def quantize(
         bits=bits,
         scale_zero_dtype=storage_scale_zero_dtype,
     )
+    if verbose:
+        print(
+            "Estimated packed storage "
+            f"without g_idx={packed_storage['estimated_packed_without_g_idx_bytes'] / 1024**3:.3f} GiB, "
+            f"with g_idx={packed_storage['estimated_packed_with_g_idx_bytes'] / 1024**3:.3f} GiB",
+            flush=True,
+        )
     metadata = {
         "model_name": model_name,
         "output_dir": str(output_dir),
@@ -443,6 +630,10 @@ def quantize(
         "group_size": group_size,
         "quantization_batch_size": batch_size,
         "calibration_max_tokens": calibration_max_tokens,
+        "calibration_sort": calibration_sort,
+        "calibration_data_min_length": calibration_data_min_length,
+        "calibration_prepared_examples": len(prepared_calibration_dataset),
+        "calibration_batches": len(calibration_batches),
         "calibration_gpu_cache": calibration_gpu_cache,
         "torch_dtype": torch_dtype,
         "gptq": dataclasses.asdict(config),
@@ -472,16 +663,30 @@ def evaluate(
     n_examples: int = 1024,
     batch_size: int = 1,
     include_relaxed_metrics: bool = False,
-    device: str | None = None,
+    load_vqa_from_s3: bool = False,
+    vqa_s3_path: str | None = None,
+    vqa_s3_local_path: Path | None = None,
+    device: str = DEFAULT_EVAL_DEVICE,
     torch_dtype: str = DEFAULT_TORCH_DTYPE,
+    resume: bool = False,
+    overwrite: bool = False,
 ) -> dict[str, Any]:
+    device = resolve_eval_device(device)
+    tasks = list(tasks)
+    task_output_state = {
+        task_name: prepare_jsonl_output(
+            output_dir / f"{task_name}.jsonl",
+            resume=resume,
+            overwrite=overwrite,
+        )
+        for task_name in tasks
+    }
     dtype = DTYPES[torch_dtype]
     model = transformers.MllamaForConditionalGeneration.from_pretrained(
         model_dir,
         torch_dtype=dtype,
     )
-    if device is not None:
-        model.to(device)
+    model.to(device)
     model.eval()
 
     processor_path = processor_name or str(model_dir)
@@ -490,8 +695,19 @@ def evaluate(
 
     task_results = {}
     for task_name in tasks:
-        data = vqa.TASKS[task_name].data(limit=n_examples)
-        results = list(
+        output_path = output_dir / f"{task_name}.jsonl"
+        existing_results, output_mode = task_output_state[task_name]
+        data = load_eval_data(
+            vqa.TASKS,
+            task_name,
+            n_examples=n_examples,
+            load_vqa_from_s3=load_vqa_from_s3,
+            vqa_s3_path=vqa_s3_path,
+            vqa_s3_local_path=vqa_s3_local_path,
+        )
+        data = select_remaining_eval_data(data, len(existing_results))
+        results = write_jsonl_stream(
+            output_path,
             vqa.evaluate(
                 model=model,
                 processor=processor,
@@ -499,10 +715,35 @@ def evaluate(
                 data=data,
                 batch_size=batch_size,
                 include_relaxed_metrics=include_relaxed_metrics,
-            )
+            ),
+            existing_records=existing_results,
+            mode=output_mode,
         )
         task_results[task_name] = results
-        write_jsonl(output_dir / f"{task_name}.jsonl", results)
+        partial_summary = summarise_results(
+            task_results,
+            task_definitions=vqa.TASKS,
+            include_relaxed_metrics=include_relaxed_metrics,
+        )
+        partial_summary.update(
+            {
+                "model_dir": str(model_dir),
+                "processor_name": processor_path,
+                "n_examples_per_task": n_examples,
+                "evaluation_batch_size": batch_size,
+                "include_relaxed_metrics": include_relaxed_metrics,
+                "load_vqa_from_s3": load_vqa_from_s3,
+                "vqa_s3_path": vqa_s3_path,
+                "vqa_s3_local_path": str(vqa_s3_local_path)
+                if vqa_s3_local_path
+                else None,
+                "device": device,
+                "torch_dtype": torch_dtype,
+                "artifact_size_bytes": artifact_size_bytes,
+                "partial": True,
+            }
+        )
+        write_json(output_dir / "summary.partial.json", partial_summary)
 
     summary = summarise_results(
         task_results,
@@ -516,7 +757,13 @@ def evaluate(
             "n_examples_per_task": n_examples,
             "evaluation_batch_size": batch_size,
             "include_relaxed_metrics": include_relaxed_metrics,
+            "load_vqa_from_s3": load_vqa_from_s3,
+            "vqa_s3_path": vqa_s3_path,
+            "vqa_s3_local_path": str(vqa_s3_local_path)
+            if vqa_s3_local_path
+            else None,
             "torch_dtype": torch_dtype,
+            "device": device,
             "artifact_size_bytes": artifact_size_bytes,
         }
     )
@@ -545,12 +792,24 @@ def _add_quantize_args(parser: argparse.ArgumentParser) -> None:
     _add_gptq_args(parser)
     parser.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
     parser.add_argument("--output-dir", type=Path)
-    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--batch-size", type=int, default=1, help="Calibration batch size")
     parser.add_argument(
         "--calibration-samples", type=int, default=DEFAULT_CALIBRATION_SAMPLES
     )
     parser.add_argument(
         "--calibration-max-tokens", type=int, default=DEFAULT_CALIBRATION_MAX_TOKENS
+    )
+    parser.add_argument(
+        "--calibration-sort",
+        choices=SUPPORTED_CALIBRATION_SORTS,
+        default=DEFAULT_CALIBRATION_SORT,
+        help="Calibration sample ordering before batching",
+    )
+    parser.add_argument(
+        "--calibration-data-min-length",
+        type=int,
+        default=DEFAULT_CALIBRATION_DATA_MIN_LENGTH,
+        help="Drop calibration samples shorter than this many tokens",
     )
     parser.add_argument("--calibration-gpu-cache", action="store_true")
     parser.add_argument("--c4-data-files", default=DEFAULT_C4_DATA_FILES)
@@ -565,6 +824,7 @@ def _add_quantize_args(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_STORAGE_SCALE_ZERO_DTYPE,
         help="Assumed dtype for packed GPTQ scale/zero storage estimates",
     )
+    parser.add_argument("--quiet", action="store_true")
 
 
 def _add_evaluate_args(parser: argparse.ArgumentParser) -> None:
@@ -575,12 +835,34 @@ def _add_evaluate_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--n-examples", type=int, default=1024)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--include-relaxed-metrics", action="store_true")
-    parser.add_argument("--device", default=None)
+    parser.add_argument(
+        "--load-vqa-from-s3",
+        action="store_true",
+        help="Load VQAv2 from the legacy S3 cache instead of Hugging Face",
+    )
+    parser.add_argument(
+        "--vqa-s3-path",
+        default=None,
+        help="Temporary VQAv2 S3 dataset path to sync with --no-sign-request",
+    )
+    parser.add_argument(
+        "--vqa-s3-local-path",
+        type=Path,
+        default=None,
+        help="Optional local destination for --vqa-s3-path",
+    )
+    parser.add_argument(
+        "--device",
+        default=DEFAULT_EVAL_DEVICE,
+        help="Evaluation device. Use --device cpu only for intentional CPU runs.",
+    )
     parser.add_argument(
         "--torch-dtype",
         choices=tuple(DTYPES),
         default=DEFAULT_TORCH_DTYPE,
     )
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--overwrite", action="store_true")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -612,6 +894,8 @@ def main(argv: list[str] | None = None) -> None:
             batch_size=args.batch_size,
             calibration_samples=args.calibration_samples,
             calibration_max_tokens=args.calibration_max_tokens,
+            calibration_sort=args.calibration_sort,
+            calibration_data_min_length=args.calibration_data_min_length,
             calibration_gpu_cache=args.calibration_gpu_cache,
             c4_data_files=args.c4_data_files,
             c4_split=args.c4_split,
@@ -626,6 +910,7 @@ def main(argv: list[str] | None = None) -> None:
             blocksize=args.blocksize,
             mse=args.mse,
             storage_scale_zero_dtype=args.storage_scale_zero_dtype,
+            verbose=not args.quiet,
         )
         storage = metadata["estimated_packed_storage"]
         gib = 1024**3
@@ -653,8 +938,13 @@ def main(argv: list[str] | None = None) -> None:
             n_examples=args.n_examples,
             batch_size=args.batch_size,
             include_relaxed_metrics=args.include_relaxed_metrics,
+            load_vqa_from_s3=args.load_vqa_from_s3,
+            vqa_s3_path=args.vqa_s3_path,
+            vqa_s3_local_path=args.vqa_s3_local_path,
             device=args.device,
             torch_dtype=args.torch_dtype,
+            resume=args.resume,
+            overwrite=args.overwrite,
         )
     else:
         raise ValueError(f"Unsupported command {args.command!r}")

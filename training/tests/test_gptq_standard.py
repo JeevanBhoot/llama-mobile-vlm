@@ -63,6 +63,10 @@ def test_summarise_results_rejects_empty_task() -> None:
 
 
 def test_quantize_writes_metadata(monkeypatch, tmp_path) -> None:
+    class DummyQuantizeConfig:
+        def __init__(self, **kwargs):
+            vars(self).update(kwargs)
+
     class DummyGPTQModel:
         tokenizer = mock.Mock()
 
@@ -79,7 +83,12 @@ def test_quantize_writes_metadata(monkeypatch, tmp_path) -> None:
         def save(self, output_dir):
             Path(output_dir, "model.safetensors").write_text("weights")
 
-    monkeypatch.setattr(standard, "GPTQModel", DummyGPTQModel)
+    monkeypatch.setattr(standard, "_get_gptq_model_cls", lambda: DummyGPTQModel)
+    monkeypatch.setattr(
+        standard,
+        "_get_quantize_config_cls",
+        lambda: DummyQuantizeConfig,
+    )
     monkeypatch.setattr(standard, "load_c4_calibration", lambda **_: ["sample"])
     monkeypatch.setattr(
         standard,
@@ -107,7 +116,9 @@ def test_evaluate_writes_outputs(monkeypatch, tmp_path) -> None:
     qmodel = mock.Mock()
     qmodel.model = mock.Mock()
     qmodel.model.eval = mock.Mock()
-    monkeypatch.setattr(standard.GPTQModel, "load", mock.Mock(return_value=qmodel))
+    gptq_model_cls = mock.Mock()
+    gptq_model_cls.load.return_value = qmodel
+    monkeypatch.setattr(standard, "_get_gptq_model_cls", lambda: gptq_model_cls)
     monkeypatch.setattr(
         standard.transformers.AutoProcessor, "from_pretrained", mock.Mock()
     )
@@ -118,8 +129,11 @@ def test_evaluate_writes_outputs(monkeypatch, tmp_path) -> None:
         output_dir=tmp_path / "eval",
         tasks=["vqa"],
         n_examples=1,
+        device="cpu",
     )
 
     assert summary["tasks"]["vqa"]["accuracy"] == 1.0
+    qmodel.to.assert_called_once_with("cpu")
     assert (tmp_path / "eval" / "summary.json").exists()
+    assert (tmp_path / "eval" / "summary.partial.json").exists()
     assert (tmp_path / "eval" / "vqa.jsonl").exists()

@@ -3,44 +3,72 @@
 """Standard GPTQ baselines using GPTQModel and C4 calibration."""
 
 import argparse
-import subprocess
-
-import datasets
-import transformers
 from pathlib import Path
 from typing import Any, Iterable
-from gptqmodel import GPTQModel, QuantizeConfig
+
+import transformers
 
 from eval import vqa
 from gptq.common import (
+    DEFAULT_CALIBRATION_DATA_MIN_LENGTH,
+    DEFAULT_CALIBRATION_MAX_TOKENS,
+    DEFAULT_CALIBRATION_SAMPLES,
+    DEFAULT_CALIBRATION_SORT,
+    DEFAULT_EVAL_DEVICE,
+    SUPPORTED_CALIBRATION_SORTS,
     directory_size,
     load_c4_calibration,
+    load_eval_data,
+    prepare_jsonl_output,
+    resolve_eval_device,
+    select_remaining_eval_data,
     summarise_results,
     tokenise_calibration,
     write_json,
-    write_jsonl,
+    write_jsonl_stream,
 )
 
 DEFAULT_MODEL_NAME = "meta-llama/Llama-3.2-11B-Vision-Instruct"
 DEFAULT_C4_DATA_FILES = "en/c4-train.00001-of-01024.json.gz"
 DEFAULT_C4_SPLIT = "train"
-DEFAULT_CALIBRATION_SAMPLES = 512
-DEFAULT_CALIBRATION_MAX_TOKENS = 1024
 DEFAULT_GROUP_SIZE = 128
 DEFAULT_DTYPE = "bfloat16"
 DEFAULT_TASKS = ("vqa", "chartqa", "docvqa", "ai2d")
 SUPPORTED_BITS = (2, 3, 4, 5, 6, 8)
 SUPPORTED_FORMATS = ("gptq", "gptq_v2", "marlin", "bitblas")
-SUPPORTED_CALIBRATION_SORTS = ("asc", "desc", "shuffle")
 SUPPORTED_GC_MODES = ("interval", "on_stage_end")
 METADATA_FILENAME = "metadata.json"
+GPTQMODEL_INSTALL_HINT = (
+    "Install GPTQModel with: uv pip install --no-build-isolation-package "
+    "gptqmodel -r gptq/requirements.txt"
+)
 
 
 def default_output_dir(bits: int) -> Path:
     return Path(f"out/gptq/llama-3.2-vision-gptq-int{bits}-c4")
 
 
-def config_to_metadata(config: QuantizeConfig) -> dict[str, Any]:
+def _get_gptq_model_cls() -> Any:
+    try:
+        from gptqmodel import GPTQModel
+    except ImportError as error:
+        raise ImportError(
+            f"GPTQModel is required for gptq.standard. {GPTQMODEL_INSTALL_HINT}"
+        ) from error
+    return GPTQModel
+
+
+def _get_quantize_config_cls() -> Any:
+    try:
+        from gptqmodel import QuantizeConfig
+    except ImportError as error:
+        raise ImportError(
+            f"GPTQModel is required for gptq.standard. {GPTQMODEL_INSTALL_HINT}"
+        ) from error
+    return QuantizeConfig
+
+
+def config_to_metadata(config: Any) -> dict[str, Any]:
     if hasattr(config, "to_dict"):
         return config.to_dict()
     return {
@@ -84,7 +112,7 @@ def make_quantize_config(
     calibration_data_device: str | None,
     gc_mode: str,
     wait_for_submodule_finalizers: bool,
-) -> QuantizeConfig:
+) -> Any:
     kwargs: dict[str, Any] = {
         "bits": bits,
         "group_size": group_size,
@@ -104,7 +132,8 @@ def make_quantize_config(
         "gc_mode": gc_mode,
         "wait_for_submodule_finalizers": wait_for_submodule_finalizers,
     }
-    return QuantizeConfig(**{k: v for k, v in kwargs.items() if v is not None})
+    quantize_config_cls = _get_quantize_config_cls()
+    return quantize_config_cls(**{k: v for k, v in kwargs.items() if v is not None})
 
 
 def make_quantize_call_kwargs(
@@ -122,34 +151,6 @@ def make_quantize_call_kwargs(
         "calibration_data_min_length": calibration_data_min_length,
     }
     return {k: v for k, v in kwargs.items() if v is not None}
-
-
-def load_eval_data(
-    task_name: str,
-    n_examples: int,
-    load_vqa_from_s3: bool = False,
-    vqa_s3_path: str | None = None,
-    vqa_s3_local_path: Path | None = None,
-) -> datasets.Dataset:
-    if task_name == "vqa" and vqa_s3_path is not None:
-        local_path = vqa_s3_local_path
-        if local_path is None:
-            local_path = Path("data/datasets") / Path(vqa_s3_path.rstrip("/")).name
-        subprocess.run(
-            ["aws", "s3", "sync", "--no-sign-request", vqa_s3_path, str(local_path)],
-            check=True,
-        )
-        ds = datasets.load_from_disk(str(local_path))
-        ds = ds.select_columns(
-            ["question_id", "image_id", "question", "image", "answers"]
-        )
-        ds = ds.shuffle(625464)
-        return ds.select(range(n_examples))
-
-    kwargs: dict[str, Any] = {"limit": n_examples}
-    if task_name == "vqa":
-        kwargs["load_from_s3"] = load_vqa_from_s3
-    return vqa.TASKS[task_name].data(**kwargs)
 
 
 def quantize(
@@ -179,9 +180,9 @@ def quantize(
     gc_mode: str = "interval",
     wait_for_submodule_finalizers: bool = False,
     calibration_concat_size: int | None = None,
-    calibration_sort: str = "desc",
+    calibration_sort: str = DEFAULT_CALIBRATION_SORT,
     batch_size: int = 1,
-    calibration_data_min_length: int = 10,
+    calibration_data_min_length: int = DEFAULT_CALIBRATION_DATA_MIN_LENGTH,
 ) -> dict[str, Any]:
     calibration_texts = load_c4_calibration(
         n_samples=calibration_samples,
@@ -215,7 +216,8 @@ def quantize(
         calibration_data_min_length=calibration_data_min_length,
     )
 
-    model = GPTQModel.load(model_name, quant_config, dtype=dtype)
+    gptq_model_cls = _get_gptq_model_cls()
+    model = gptq_model_cls.load(model_name, quant_config, dtype=dtype)
     calibration_dataset = tokenise_calibration(
         calibration_texts,
         tokenizer=model.tokenizer,
@@ -264,63 +266,85 @@ def evaluate(
     load_vqa_from_s3: bool = False,
     vqa_s3_path: str | None = None,
     vqa_s3_local_path: Path | None = None,
-    device: str | None = None,
+    device: str = DEFAULT_EVAL_DEVICE,
     backend: str = "auto",
     dtype: str | None = None,
+    resume: bool = False,
+    overwrite: bool = False,
 ) -> dict[str, Any]:
-    output_dir.mkdir(parents=True, exist_ok=True)
+    device = resolve_eval_device(device)
+    tasks = list(tasks)
+    task_output_state = {
+        task_name: prepare_jsonl_output(
+            output_dir / f"{task_name}.jsonl",
+            resume=resume,
+            overwrite=overwrite,
+        )
+        for task_name in tasks
+    }
+    gptq_model_cls = _get_gptq_model_cls()
+    load_kwargs: dict[str, Any] = {"backend": backend}
+    if dtype is not None:
+        load_kwargs["dtype"] = dtype
+    qmodel = gptq_model_cls.load(str(model_dir), **load_kwargs)
+    qmodel.to(device)
+    model = qmodel.model
+    model.eval()
+    processor = transformers.AutoProcessor.from_pretrained(processor_name)
     artifact_size_bytes = directory_size(model_dir)
 
-    task_states = []
-    needs_evaluation = False
+    task_results = {}
     for task_name in tasks:
-        task_path = output_dir / f"{task_name}.jsonl"
+        output_path = output_dir / f"{task_name}.jsonl"
+        existing_results, output_mode = task_output_state[task_name]
         data = load_eval_data(
+            vqa.TASKS,
             task_name,
             n_examples=n_examples,
             load_vqa_from_s3=load_vqa_from_s3,
             vqa_s3_path=vqa_s3_path,
             vqa_s3_local_path=vqa_s3_local_path,
         )
-        existing_results = load_jsonl(task_path) if task_path.exists() else []
-        data_to_evaluate = select_missing_eval_examples(data, existing_results)
-        needs_evaluation = needs_evaluation or bool(len(data_to_evaluate))
-        task_states.append(
-            (task_name, task_path, data, existing_results, data_to_evaluate)
+        data = select_remaining_eval_data(data, len(existing_results))
+        results = write_jsonl_stream(
+            output_path,
+            vqa.evaluate(
+                model=model,
+                processor=processor,
+                task_name=task_name,
+                data=data,
+                batch_size=batch_size,
+                include_relaxed_metrics=include_relaxed_metrics,
+            ),
+            existing_records=existing_results,
+            mode=output_mode,
         )
-
-    model = None
-    processor = None
-    if needs_evaluation:
-        load_kwargs: dict[str, Any] = {"backend": backend}
-        if dtype is not None:
-            load_kwargs["dtype"] = dtype
-        qmodel = GPTQModel.load(str(model_dir), **load_kwargs)
-        if device is not None:
-            qmodel.to(device)
-        model = qmodel.model
-        model.eval()
-        processor = transformers.AutoProcessor.from_pretrained(processor_name)
-
-    task_results = {}
-    for task_name, task_path, data, existing_results, data_to_evaluate in task_states:
-        if len(data_to_evaluate):
-            assert model is not None
-            assert processor is not None
-            new_results = append_eval_results(
-                task_path,
-                vqa.evaluate(
-                    model=model,
-                    processor=processor,
-                    task_name=task_name,
-                    data=data_to_evaluate,
-                    batch_size=batch_size,
-                    include_relaxed_metrics=include_relaxed_metrics,
-                ),
-            )
-            existing_results.extend(new_results)
-
-        task_results[task_name] = task_records_for_data(data, existing_results)
+        task_results[task_name] = results
+        partial_summary = summarise_results(
+            task_results,
+            task_definitions=vqa.TASKS,
+            include_relaxed_metrics=include_relaxed_metrics,
+        )
+        partial_summary.update(
+            {
+                "model_dir": str(model_dir),
+                "processor_name": processor_name,
+                "n_examples_per_task": n_examples,
+                "evaluation_batch_size": batch_size,
+                "include_relaxed_metrics": include_relaxed_metrics,
+                "load_vqa_from_s3": load_vqa_from_s3,
+                "vqa_s3_path": vqa_s3_path,
+                "vqa_s3_local_path": str(vqa_s3_local_path)
+                if vqa_s3_local_path
+                else None,
+                "device": device,
+                "backend": backend,
+                "dtype": dtype,
+                "artifact_size_bytes": artifact_size_bytes,
+                "partial": True,
+            }
+        )
+        write_json(output_dir / "summary.partial.json", partial_summary)
 
     summary = summarise_results(
         task_results,
@@ -339,6 +363,7 @@ def evaluate(
             "vqa_s3_local_path": str(vqa_s3_local_path)
             if vqa_s3_local_path
             else None,
+            "device": device,
             "backend": backend,
             "dtype": dtype,
             "artifact_size_bytes": artifact_size_bytes,
@@ -471,7 +496,7 @@ def _add_quantize_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--calibration-sort",
         choices=SUPPORTED_CALIBRATION_SORTS,
-        default="desc",
+        default=DEFAULT_CALIBRATION_SORT,
         help="Calibration sample ordering",
     )
     parser.add_argument(
@@ -483,7 +508,7 @@ def _add_quantize_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--calibration-data-min-length",
         type=int,
-        default=10,
+        default=DEFAULT_CALIBRATION_DATA_MIN_LENGTH,
         help="Drop calibration samples shorter than this many tokens",
     )
     parser.add_argument(
@@ -530,8 +555,8 @@ def _add_evaluate_args(parser: argparse.ArgumentParser) -> None:
     _add_eval_settings_args(parser, batch_size_arg="--batch-size")
     parser.add_argument(
         "--device",
-        default=None,
-        help="Device used for evaluation",
+        default=DEFAULT_EVAL_DEVICE,
+        help="Evaluation device. Use --device cpu only for intentional CPU runs.",
     )
     parser.add_argument(
         "--backend",
@@ -559,6 +584,8 @@ def _add_evaluate_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Optional local destination for --vqa-s3-path",
     )
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--overwrite", action="store_true")
 
 
 def _add_eval_settings_args(
@@ -662,6 +689,8 @@ def main(argv: list[str] | None = None) -> None:
             device=args.device,
             backend=args.backend,
             dtype=args.dtype,
+            resume=args.resume,
+            overwrite=args.overwrite,
         )
     else:
         raise ValueError(f"Unsupported command {args.command!r}")

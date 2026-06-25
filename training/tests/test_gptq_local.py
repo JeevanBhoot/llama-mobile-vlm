@@ -5,6 +5,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest import mock
 
+import pytest
 import torch
 
 
@@ -22,6 +23,7 @@ def fake_vqa_module(evaluate=None):
 
 sys.modules["eval.vqa"] = fake_vqa_module()
 
+import gptq.common as common
 import gptq.local as local
 
 
@@ -59,16 +61,34 @@ class TinyDecoderLayer(torch.nn.Module):
         return (hidden_states + self.self_attn(hidden_states) + self.mlp(hidden_states),)
 
 
-class TinyLanguageModelInner(torch.nn.Module):
+class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.layers = torch.nn.ModuleList([TinyDecoderLayer(8)])
+        self.called = False
+
+    def forward(self, hidden_states, **kwargs):
+        self.called = True
+        raise ValueError("cross attention should be skipped for text-only calibration")
 
 
 class TinyLanguageModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.model = TinyLanguageModelInner()
+        self.config = SimpleNamespace(use_cache=True)
+        self.cross_layer = MllamaCrossAttentionDecoderLayer()
+        self.layers = torch.nn.ModuleList(
+            [
+                TinyDecoderLayer(8),
+                self.cross_layer,
+                TinyDecoderLayer(8),
+            ]
+        )
+
+
+class TinyMllamaModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.language_model = TinyLanguageModel()
 
 
 class TinyMllama(torch.nn.Module):
@@ -76,12 +96,14 @@ class TinyMllama(torch.nn.Module):
         super().__init__()
         self.config = SimpleNamespace(use_cache=True)
         self.embed_tokens = torch.nn.Embedding(32, 8)
-        self.language_model = TinyLanguageModel()
-        self.layers = self.language_model.model.layers
+        self.model = TinyMllamaModel()
+        self.layers = self.model.language_model.layers
 
     def forward(self, input_ids, **kwargs):
         hidden_states = self.embed_tokens(input_ids)
         for layer in self.layers:
+            if local.is_mllama_cross_attention_layer(layer):
+                continue
             hidden_states = layer(hidden_states)[0]
         return SimpleNamespace(logits=hidden_states)
 
@@ -98,7 +120,8 @@ class DummyProcessor:
 
 def test_quantize_writes_dense_artifact(monkeypatch, tmp_path) -> None:
     torch.manual_seed(625464)
-    monkeypatch.setattr(local, "load_model", lambda *_, **__: TinyMllama())
+    model = TinyMllama()
+    monkeypatch.setattr(local, "load_model", lambda *_, **__: model)
     monkeypatch.setattr(
         local.transformers.AutoProcessor,
         "from_pretrained",
@@ -119,15 +142,32 @@ def test_quantize_writes_dense_artifact(monkeypatch, tmp_path) -> None:
         output_dir=tmp_path,
         bits=4,
         group_size=128,
+        batch_size=2,
         calibration_samples=2,
+        calibration_data_min_length=0,
         device="cpu",
         torch_dtype="float32",
+        verbose=False,
     )
 
     assert metadata["artifact_type"] == "dense_dequantized_local_gptq"
-    assert metadata["n_quantized_modules"] == 7
+    assert metadata["n_quantized_modules"] == 14
+    assert metadata["quantization_batch_size"] == 2
+    assert metadata["calibration_prepared_examples"] == 2
+    assert metadata["calibration_batches"] == 1
+    assert model.model.language_model.config.use_cache is True
+    assert not model.model.language_model.cross_layer.called
+    assert all(
+        log["full_name"].startswith(
+            (
+                "model.language_model.layers.0.",
+                "model.language_model.layers.2.",
+            )
+        )
+        for log in metadata["quantization_log"]
+    )
     storage = metadata["estimated_packed_storage"]
-    assert storage["quantized_tensor_count"] == 7
+    assert storage["quantized_tensor_count"] == 14
     assert storage["unmatched_quantized_tensor_names"] == []
     assert storage["estimated_packed_without_g_idx_bytes"] < storage[
         "dense_state_dict_bytes"
@@ -160,9 +200,162 @@ def test_evaluate_writes_outputs(monkeypatch, tmp_path) -> None:
         output_dir=tmp_path / "eval",
         tasks=["vqa"],
         n_examples=1,
+        device="cpu",
         torch_dtype="float32",
     )
 
+    fake_vqa.TASKS["vqa"].data.assert_called_once_with(
+        limit=1,
+        load_from_s3=False,
+    )
     assert summary["tasks"]["vqa"]["accuracy"] == 1.0
+    assert summary["load_vqa_from_s3"] is False
+    assert summary["vqa_s3_path"] is None
+    assert summary["vqa_s3_local_path"] is None
     assert (tmp_path / "eval" / "summary.json").exists()
+    assert (tmp_path / "eval" / "summary.partial.json").exists()
     assert (tmp_path / "eval" / "vqa.jsonl").exists()
+
+
+def test_evaluate_streams_jsonl_before_task_completes(monkeypatch, tmp_path) -> None:
+    def evaluate_then_fail(**kwargs):
+        yield {"id": 1, "output": "yes", "accuracy": 1.0}
+        raise RuntimeError("evaluation stopped")
+
+    fake_vqa = fake_vqa_module(evaluate=evaluate_then_fail)
+    model = mock.Mock()
+    model.eval = mock.Mock()
+    monkeypatch.setattr(
+        local.transformers.MllamaForConditionalGeneration,
+        "from_pretrained",
+        mock.Mock(return_value=model),
+    )
+    monkeypatch.setattr(local.transformers.AutoProcessor, "from_pretrained", mock.Mock())
+    monkeypatch.setattr(local, "vqa", fake_vqa)
+    (tmp_path / "model.safetensors").write_text("weights")
+
+    with pytest.raises(RuntimeError, match="evaluation stopped"):
+        local.evaluate(
+            model_dir=tmp_path,
+            output_dir=tmp_path / "eval",
+            tasks=["vqa"],
+            n_examples=1,
+            device="cpu",
+            torch_dtype="float32",
+        )
+
+    assert (tmp_path / "eval" / "vqa.jsonl").read_text().splitlines() == [
+        '{"id": 1, "output": "yes", "accuracy": 1.0}'
+    ]
+
+
+def test_evaluate_resume_appends_missing_examples(monkeypatch, tmp_path) -> None:
+    fake_vqa = fake_vqa_module(
+        evaluate=mock.Mock(return_value=[{"id": 2, "output": "no", "accuracy": 0.0}])
+    )
+    fake_vqa.TASKS["vqa"].data.return_value = ["done", "remaining"]
+    model = mock.Mock()
+    model.eval = mock.Mock()
+    monkeypatch.setattr(
+        local.transformers.MllamaForConditionalGeneration,
+        "from_pretrained",
+        mock.Mock(return_value=model),
+    )
+    monkeypatch.setattr(local.transformers.AutoProcessor, "from_pretrained", mock.Mock())
+    monkeypatch.setattr(local, "vqa", fake_vqa)
+    (tmp_path / "model.safetensors").write_text("weights")
+    output_dir = tmp_path / "eval"
+    output_dir.mkdir()
+    (output_dir / "vqa.jsonl").write_text(
+        '{"id": 1, "output": "yes", "accuracy": 1.0}\n'
+    )
+
+    summary = local.evaluate(
+        model_dir=tmp_path,
+        output_dir=output_dir,
+        tasks=["vqa"],
+        n_examples=2,
+        device="cpu",
+        torch_dtype="float32",
+        resume=True,
+    )
+
+    assert fake_vqa.evaluate.call_args.kwargs["data"] == ["remaining"]
+    assert summary["tasks"]["vqa"]["n_examples"] == 2
+    assert (output_dir / "vqa.jsonl").read_text().splitlines() == [
+        '{"id": 1, "output": "yes", "accuracy": 1.0}',
+        '{"id": 2, "output": "no", "accuracy": 0.0}',
+    ]
+
+
+def test_evaluate_refuses_existing_output_without_resume_or_overwrite(
+    monkeypatch, tmp_path
+) -> None:
+    fake_vqa = fake_vqa_module()
+    model = mock.Mock()
+    model.eval = mock.Mock()
+    monkeypatch.setattr(
+        local.transformers.MllamaForConditionalGeneration,
+        "from_pretrained",
+        mock.Mock(return_value=model),
+    )
+    monkeypatch.setattr(local.transformers.AutoProcessor, "from_pretrained", mock.Mock())
+    monkeypatch.setattr(local, "vqa", fake_vqa)
+    (tmp_path / "model.safetensors").write_text("weights")
+    output_dir = tmp_path / "eval"
+    output_dir.mkdir()
+    (output_dir / "vqa.jsonl").write_text(
+        '{"id": 1, "output": "yes", "accuracy": 1.0}\n'
+    )
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        local.evaluate(
+            model_dir=tmp_path,
+            output_dir=output_dir,
+            tasks=["vqa"],
+            n_examples=1,
+            device="cpu",
+            torch_dtype="float32",
+        )
+
+
+def test_load_eval_data_syncs_explicit_vqa_s3_path(monkeypatch, tmp_path) -> None:
+    selected_columns = mock.Mock()
+    shuffled = mock.Mock()
+    dataset = mock.Mock()
+    dataset.select_columns.return_value = selected_columns
+    selected_columns.shuffle.return_value = shuffled
+    shuffled.select.return_value = ["row"]
+
+    run = mock.Mock()
+    load_from_disk = mock.Mock(return_value=dataset)
+    monkeypatch.setattr(common.subprocess, "run", run)
+    monkeypatch.setattr(common.datasets, "load_from_disk", load_from_disk)
+
+    local_path = tmp_path / "vqav2-validation"
+    result = common.load_eval_data(
+        fake_vqa_module().TASKS,
+        "vqa",
+        n_examples=3,
+        vqa_s3_path="s3://bucket/path/vqav2-validation",
+        vqa_s3_local_path=local_path,
+    )
+
+    run.assert_called_once_with(
+        [
+            "aws",
+            "s3",
+            "sync",
+            "--no-sign-request",
+            "s3://bucket/path/vqav2-validation",
+            str(local_path),
+        ],
+        check=True,
+    )
+    load_from_disk.assert_called_once_with(str(local_path))
+    dataset.select_columns.assert_called_once_with(
+        ["question_id", "image_id", "question", "image", "answers"]
+    )
+    selected_columns.shuffle.assert_called_once_with(625464)
+    shuffled.select.assert_called_once_with(range(3))
+    assert result == ["row"]
