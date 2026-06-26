@@ -61,10 +61,19 @@ class TinyDecoderLayer(torch.nn.Module):
         return (hidden_states + self.self_attn(hidden_states) + self.mlp(hidden_states),)
 
 
+class TinyRotaryEmbedding(torch.nn.Module):
+    def forward(self, hidden_states, position_ids):
+        return (
+            torch.zeros_like(hidden_states),
+            torch.ones_like(hidden_states),
+        )
+
+
 class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.called = False
+        self.cross_attn = torch.nn.Linear(8, 8, bias=False)
 
     def forward(self, hidden_states, **kwargs):
         self.called = True
@@ -75,6 +84,9 @@ class TinyLanguageModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.config = SimpleNamespace(use_cache=True)
+        self.embed_tokens = torch.nn.Embedding(32, 8)
+        self.rotary_emb = TinyRotaryEmbedding()
+        self.cross_attention_layers = [1]
         self.cross_layer = MllamaCrossAttentionDecoderLayer()
         self.layers = torch.nn.ModuleList(
             [
@@ -95,14 +107,21 @@ class TinyMllama(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.config = SimpleNamespace(use_cache=True)
-        self.embed_tokens = torch.nn.Embedding(32, 8)
         self.model = TinyMllamaModel()
         self.layers = self.model.language_model.layers
+        self.forward_called = False
 
     def forward(self, input_ids, **kwargs):
-        hidden_states = self.embed_tokens(input_ids)
-        for layer in self.layers:
-            if local.is_mllama_cross_attention_layer(layer):
+        self.forward_called = True
+        hidden_states = self.model.language_model.embed_tokens(input_ids)
+        for layer_index, layer in enumerate(self.layers):
+            if local.is_mllama_cross_attention_layer(
+                layer,
+                layer_index=layer_index,
+                cross_attention_layers=frozenset(
+                    self.model.language_model.cross_attention_layers
+                ),
+            ):
                 continue
             hidden_states = layer(hidden_states)[0]
         return SimpleNamespace(logits=hidden_states)
@@ -116,6 +135,81 @@ class DummyProcessor:
 
     def save_pretrained(self, output_dir):
         Path(output_dir, "processor_config.json").write_text("{}")
+
+
+def test_collect_first_layer_inputs_uses_mllama_direct_text_path() -> None:
+    model = TinyMllama()
+    stack = local.mllama_text_layers(model)
+    input_ids = torch.tensor([[1, 2, 3]])
+    attention_mask = torch.ones_like(input_ids)
+
+    captured = local.collect_first_layer_inputs(
+        stack,
+        [{"input_ids": input_ids, "attention_mask": attention_mask}],
+        device="cpu",
+    )
+
+    assert model.forward_called is False
+    assert len(captured) == 1
+    torch.testing.assert_close(
+        captured.args[0][0],
+        model.model.language_model.embed_tokens(input_ids).detach(),
+    )
+    assert captured.kwargs[0]["attention_mask"] is None
+    torch.testing.assert_close(
+        captured.kwargs[0]["position_ids"],
+        torch.tensor([[0, 1, 2]]),
+    )
+    assert captured.kwargs[0]["use_cache"] is False
+    assert "position_embeddings" in captured.kwargs[0]
+
+
+def test_cross_attention_scope_is_structural() -> None:
+    class RenamedCrossAttentionLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.cross_attn = torch.nn.Linear(8, 8, bias=False)
+            self.called = False
+
+        def forward(self, hidden_states, **kwargs):
+            self.called = True
+            raise AssertionError("cross attention should not run")
+
+    layer = RenamedCrossAttentionLayer()
+    inputs = local.LayerInputs(
+        args=[[torch.randn(1, 3, 8)]],
+        kwargs=[{"position_ids": torch.tensor([[0, 1, 2]])}],
+    )
+
+    next_inputs, logs = local.quantize_layer(
+        layer,
+        inputs,
+        local.GPTQConfig(bits=4),
+        device="cpu",
+        verbose=False,
+    )
+
+    assert logs == []
+    assert layer.called is False
+    torch.testing.assert_close(next_inputs.args[0][0], inputs.args[0][0])
+
+
+def test_self_attention_scope_requires_all_gptqmodel_targets() -> None:
+    layer = TinyDecoderLayer(8)
+    del layer.self_attn.o_proj
+    inputs = local.LayerInputs(
+        args=[[torch.randn(1, 3, 8)]],
+        kwargs=[{"position_ids": torch.tensor([[0, 1, 2]])}],
+    )
+
+    with pytest.raises(ValueError, match="missing linear modules"):
+        local.quantize_layer(
+            layer,
+            inputs,
+            local.GPTQConfig(bits=4),
+            device="cpu",
+            verbose=False,
+        )
 
 
 def test_quantize_writes_dense_artifact(monkeypatch, tmp_path) -> None:
@@ -155,6 +249,15 @@ def test_quantize_writes_dense_artifact(monkeypatch, tmp_path) -> None:
     assert metadata["quantization_batch_size"] == 2
     assert metadata["calibration_prepared_examples"] == 2
     assert metadata["calibration_batches"] == 1
+    assert metadata["target_scope"] == "mllama_text_self_attention_decoder_layers"
+    assert metadata["skipped_cross_attention_layers"] == [
+        {
+            "layer": 1,
+            "full_name": "model.language_model.layers.1",
+            "class": "MllamaCrossAttentionDecoderLayer",
+            "reason": "mllama_text_only_cross_attention",
+        }
+    ]
     assert model.model.language_model.config.use_cache is True
     assert not model.model.language_model.cross_layer.called
     assert all(

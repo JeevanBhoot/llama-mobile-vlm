@@ -65,10 +65,6 @@ DTYPE_STORAGE_BYTES = {
 }
 
 
-class _StopForward(Exception):
-    pass
-
-
 @dataclass
 class LayerInputs:
     args: list[list[Any]]
@@ -83,6 +79,7 @@ class TextLayerStack:
     prefix: str
     language_model: torch.nn.Module
     layers: torch.nn.ModuleList
+    cross_attention_layers: frozenset[int]
 
 
 def default_output_dir(bits: int) -> Path:
@@ -139,6 +136,9 @@ def mllama_text_layers(model: torch.nn.Module) -> TextLayerStack:
                 prefix=prefix,
                 language_model=module,
                 layers=layers,
+                cross_attention_layers=frozenset(
+                    getattr(module, "cross_attention_layers", ())
+                ),
             )
 
     raise AttributeError(
@@ -147,42 +147,92 @@ def mllama_text_layers(model: torch.nn.Module) -> TextLayerStack:
     )
 
 
+def _prepare_first_layer_attention_mask(attention_mask: Any) -> Any:
+    if attention_mask is None or not torch.is_tensor(attention_mask):
+        return attention_mask
+    if (
+        attention_mask.ndim <= 2
+        and bool(attention_mask.to(dtype=torch.bool).all().item())
+    ):
+        return None
+    return attention_mask
+
+
+def _mllama_first_layer_kwargs(
+    language_model: torch.nn.Module,
+    batch: dict[str, Any],
+    use_cache: bool,
+) -> tuple[list[Any], dict[str, Any]]:
+    input_ids = batch.get("input_ids")
+    if input_ids is None:
+        raise ValueError("Mllama local GPTQ calibration requires input_ids")
+
+    attention_mask = batch.get("attention_mask")
+    position_ids = batch.get("position_ids")
+    past_key_values = batch.get("past_key_values")
+
+    embedding_weight = getattr(language_model.embed_tokens, "weight", None)
+    if torch.is_tensor(embedding_weight) and input_ids.device != embedding_weight.device:
+        input_ids = input_ids.to(device=embedding_weight.device)
+
+    inputs_embeds = language_model.embed_tokens(input_ids)
+    if getattr(inputs_embeds, "is_meta", False):
+        raise RuntimeError("Mllama input capture produced meta inputs_embeds")
+
+    if position_ids is None:
+        past_seen_tokens = (
+            past_key_values.get_seq_length() if past_key_values is not None else 0
+        )
+        position_ids = torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device)
+        position_ids = position_ids + past_seen_tokens
+        position_ids = position_ids.unsqueeze(0)
+    elif position_ids.device != inputs_embeds.device:
+        position_ids = position_ids.to(device=inputs_embeds.device)
+
+    position_embeddings = language_model.rotary_emb(
+        inputs_embeds,
+        position_ids=position_ids,
+    )
+
+    kwargs = {
+        "attention_mask": _prepare_first_layer_attention_mask(attention_mask),
+        "position_ids": position_ids,
+        "past_key_values": past_key_values,
+        "use_cache": use_cache,
+        "position_embeddings": position_embeddings,
+    }
+    return [inputs_embeds], kwargs
+
+
 def collect_first_layer_inputs(
-    model: torch.nn.Module,
-    layers: torch.nn.ModuleList,
+    text_layer_stack: TextLayerStack,
     calibration_dataset: Iterable[dict[str, Any]],
     device: str,
     calibration_gpu_cache: bool = False,
+    use_cache: bool = False,
 ) -> LayerInputs:
     storage_device = device if calibration_gpu_cache else "cpu"
     cached_args = []
     cached_kwargs = []
-
-    def store_input_hook(_, args, kwargs):
-        cached_args.append([_detach_to_device(arg, storage_device) for arg in args])
-        cached_kwargs.append(
-            {k: _detach_to_device(v, storage_device) for k, v in kwargs.items()}
-        )
-        raise _StopForward
-
-    handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
-    model.eval()
-    try:
-        with torch.inference_mode():
-            for example in calibration_dataset:
-                batch = {}
-                for key, value in example.items():
-                    if torch.is_tensor(value) and value.ndim == 1:
-                        batch[key] = value.unsqueeze(0)
-                    else:
-                        batch[key] = value
-                batch = _move_to_device(batch, device)
-                try:
-                    model(**batch)
-                except _StopForward:
-                    pass
-    finally:
-        handle.remove()
+    text_layer_stack.language_model.eval()
+    with torch.inference_mode():
+        for example in calibration_dataset:
+            batch = {}
+            for key, value in example.items():
+                if torch.is_tensor(value) and value.ndim == 1:
+                    batch[key] = value.unsqueeze(0)
+                else:
+                    batch[key] = value
+            batch = _move_to_device(batch, device)
+            args, kwargs = _mllama_first_layer_kwargs(
+                text_layer_stack.language_model,
+                batch,
+                use_cache=use_cache,
+            )
+            cached_args.append([_detach_to_device(arg, storage_device) for arg in args])
+            cached_kwargs.append(
+                {k: _detach_to_device(v, storage_device) for k, v in kwargs.items()}
+            )
 
     return LayerInputs(cached_args, cached_kwargs)
 
@@ -198,8 +248,62 @@ def _run_layer(
     return layer(*args, **kwargs)
 
 
-def is_mllama_cross_attention_layer(layer: torch.nn.Module) -> bool:
+def is_mllama_cross_attention_layer(
+    layer: torch.nn.Module,
+    layer_index: int | None = None,
+    cross_attention_layers: frozenset[int] = frozenset(),
+) -> bool:
+    if layer_index is not None and layer_index in cross_attention_layers:
+        return True
+    if hasattr(layer, "cross_attn"):
+        return True
     return layer.__class__.__name__.lower() == "mllamacrossattentiondecoderlayer"
+
+
+def mllama_layer_kind(
+    layer: torch.nn.Module,
+    layer_index: int | None = None,
+    cross_attention_layers: frozenset[int] = frozenset(),
+) -> str:
+    if is_mllama_cross_attention_layer(
+        layer,
+        layer_index=layer_index,
+        cross_attention_layers=cross_attention_layers,
+    ):
+        return "cross_attention"
+    if hasattr(layer, "self_attn"):
+        return "self_attention"
+    return "unknown"
+
+
+def validate_target_layer_modules(
+    layer: torch.nn.Module,
+    layer_index: int | None = None,
+) -> None:
+    if not hasattr(layer, "self_attn"):
+        label = f"layer {layer_index}" if layer_index is not None else "layer"
+        raise ValueError(
+            f"Unexpected Mllama text target scope for {label}: "
+            f"{layer.__class__.__name__} is neither a self-attention decoder "
+            "layer nor a recognized cross-attention decoder layer."
+        )
+
+    layer_modules = dict(layer.named_modules())
+    missing = [
+        name
+        for group in TARGET_MODULE_GROUPS
+        for name in group
+        if name not in layer_modules
+        or not isinstance(layer_modules[name], torch.nn.Linear)
+    ]
+    if missing:
+        label = f"layer {layer_index}" if layer_index is not None else "layer"
+        raise ValueError(
+            f"Unexpected Mllama text target scope for {label}: missing linear "
+            f"modules {missing}. Cross-attention layers should be listed in "
+            "language_model.cross_attention_layers or use class "
+            "MllamaCrossAttentionDecoderLayer."
+        )
 
 
 def _quantize_subset(
@@ -254,14 +358,21 @@ def quantize_layer(
     inputs: LayerInputs,
     config: GPTQConfig,
     device: str,
+    layer_index: int | None = None,
+    cross_attention_layers: frozenset[int] = frozenset(),
     progress_name: str | None = None,
     verbose: bool = True,
 ) -> tuple[LayerInputs, list[dict[str, Any]]]:
-    if is_mllama_cross_attention_layer(layer):
+    layer_kind = mllama_layer_kind(
+        layer,
+        layer_index=layer_index,
+        cross_attention_layers=cross_attention_layers,
+    )
+    if layer_kind == "cross_attention":
         if verbose and progress_name is not None:
             print(f"{progress_name}: skipped cross-attention layer", flush=True)
-        return inputs, []
-
+        return replay_text_only_cross_attention_layer(inputs), []
+    validate_target_layer_modules(layer, layer_index=layer_index)
     layer_modules = dict(layer.named_modules())
     logs = []
 
@@ -310,6 +421,19 @@ def quantize_layer(
             )
 
     return LayerInputs(next_args, next_kwargs), logs
+
+
+def replay_text_only_cross_attention_layer(
+    inputs: LayerInputs,
+) -> LayerInputs:
+    next_args = []
+    next_kwargs = []
+    for args, kwargs in zip(inputs.args, inputs.kwargs):
+        next_args.append([_detach_to_device(args[0], "cpu")])
+        next_kwargs.append(
+            {k: _detach_to_device(v, "cpu") for k, v in kwargs.items()}
+        )
+    return LayerInputs(next_args, next_kwargs)
 
 
 def load_model(
@@ -537,8 +661,7 @@ def quantize(
                 flush=True,
             )
         layer_inputs = collect_first_layer_inputs(
-            model,
-            text_layer_stack.layers,
+            text_layer_stack,
             calibration_batches,
             device=device,
             calibration_gpu_cache=calibration_gpu_cache,
@@ -552,6 +675,7 @@ def quantize(
         layer_logs = []
         total_layers = len(text_layer_stack.layers)
         quantized_layer_count = 0
+        skipped_cross_attention_layers = []
         if verbose:
             print(
                 f"Quantizing {total_layers} text decoder layers "
@@ -566,14 +690,30 @@ def quantize(
             )
             if verbose:
                 print(f"{progress_name}: start", flush=True)
+            is_cross_attention_layer = is_mllama_cross_attention_layer(
+                layer,
+                layer_index=layer_index,
+                cross_attention_layers=text_layer_stack.cross_attention_layers,
+            )
             layer_inputs, logs = quantize_layer(
                 layer,
                 layer_inputs,
                 config,
                 device,
+                layer_index=layer_index,
+                cross_attention_layers=text_layer_stack.cross_attention_layers,
                 progress_name=progress_name,
                 verbose=verbose,
             )
+            if is_cross_attention_layer:
+                skipped_cross_attention_layers.append(
+                    {
+                        "layer": layer_index,
+                        "full_name": f"{text_layer_stack.prefix}.{layer_index}",
+                        "class": layer.__class__.__name__,
+                        "reason": "mllama_text_only_cross_attention",
+                    }
+                )
             for log in logs:
                 log["layer"] = layer_index
                 log["full_name"] = (
@@ -645,6 +785,8 @@ def quantize(
             "field": "text",
         },
         "device": device,
+        "target_scope": "mllama_text_self_attention_decoder_layers",
+        "skipped_cross_attention_layers": skipped_cross_attention_layers,
         "target_module_groups": TARGET_MODULE_GROUPS,
         "n_quantized_modules": len(layer_logs),
         "quantization_log": layer_logs,
