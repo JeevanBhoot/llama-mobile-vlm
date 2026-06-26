@@ -757,9 +757,8 @@ def quantize(
     )
     if verbose:
         print(
-            "Estimated packed storage "
-            f"without g_idx={packed_storage['estimated_packed_without_g_idx_bytes'] / 1024**3:.3f} GiB, "
-            f"with g_idx={packed_storage['estimated_packed_with_g_idx_bytes'] / 1024**3:.3f} GiB",
+            "Estimated packed storage: "
+            f"{packed_storage['estimated_packed_with_g_idx_bytes'] / 1024**3:.3f} GiB",
             flush=True,
         )
     metadata = {
@@ -1057,13 +1056,8 @@ def main(argv: list[str] | None = None) -> None:
         storage = metadata["estimated_packed_storage"]
         gib = 1024**3
         print(
-            "Estimated packed tensor storage "
-            f"(without g_idx): {storage['estimated_packed_without_g_idx_bytes'] / gib:.3f} GiB, "
-            f"{storage['overall_bits_per_value_without_g_idx']:.3f} bits/value overall"
-        )
-        print(
-            "Estimated packed tensor storage "
-            f"(with g_idx): {storage['estimated_packed_with_g_idx_bytes'] / gib:.3f} GiB, "
+            "Estimated packed tensor storage: "
+            f"{storage['estimated_packed_with_g_idx_bytes'] / gib:.3f} GiB, "
             f"{storage['overall_bits_per_value_with_g_idx']:.3f} bits/value overall"
         )
         print(
