@@ -6,7 +6,9 @@ from types import ModuleType, SimpleNamespace
 from unittest import mock
 
 import pytest
+import safetensors.torch
 import torch
+import weight_formats.quantisation_training as QT
 
 
 def fake_vqa_module(evaluate=None):
@@ -303,6 +305,72 @@ def test_tokenise_calibration_returns_plain_dicts() -> None:
 
     assert type(result[0]) is dict
     torch.testing.assert_close(result[0]["input_ids"], torch.tensor([[1, 2, 3]]))
+
+
+def test_quantize_s3d8_writes_dense_and_quantized_artifacts(
+    monkeypatch, tmp_path
+) -> None:
+    torch.manual_seed(625464)
+    model = TinyMllama()
+    monkeypatch.setattr(local, "load_model", lambda *_, **__: model)
+    monkeypatch.setattr(
+        local.transformers.AutoProcessor,
+        "from_pretrained",
+        mock.Mock(return_value=DummyProcessor()),
+    )
+    monkeypatch.setattr(local, "load_c4_calibration", lambda **_: ["a", "b"])
+    monkeypatch.setattr(
+        local,
+        "tokenise_calibration",
+        lambda *_, **__: [
+            {"input_ids": torch.tensor([1, 2, 3, 4])},
+            {"input_ids": torch.tensor([4, 3, 2, 1])},
+        ],
+    )
+
+    metadata = local.quantize(
+        model_name="model",
+        output_dir=tmp_path,
+        bits=4,
+        quantization_format="s3d8",
+        group_size=128,
+        batch_size=2,
+        calibration_samples=2,
+        calibration_data_min_length=0,
+        device="cpu",
+        torch_dtype="float32",
+        verbose=False,
+    )
+
+    checkpoint_path = tmp_path / local.S3D8_CHECKPOINT_FILENAME
+    assert metadata["artifact_type"] == "dense_dequantized_local_gptq_s3d8"
+    assert metadata["format"] == "s3d8"
+    assert metadata["bits"] is None
+    assert metadata["effective_weight_bits"] == 8 / 3
+    assert metadata["quantized_checkpoint_path"] == str(checkpoint_path)
+    assert metadata["n_quantized_modules"] == 14
+    assert checkpoint_path.exists()
+    assert (tmp_path / "model.safetensors").exists()
+    assert (tmp_path / "processor_config.json").exists()
+
+    first_log = metadata["quantization_log"][0]
+    assert first_log["quantization_format"] == "s3d8"
+    assert first_log["centroid_shape"] == [32, 3]
+    assert "zero_shape" not in first_log
+    assert "g_idx_shape" not in first_log
+    storage = metadata["estimated_packed_storage"]
+    assert storage["quantized_tensor_count"] == 14
+    assert storage["g_idx_bytes"] == 0
+    assert storage["centroid_bytes"] > 0
+
+    state = safetensors.torch.load_file(checkpoint_path)
+    assert "_quantisation_meta" in state
+    loaded = TinyMllama()
+    QT.load_convert(loaded, state)
+    target = loaded.model.language_model.layers[0].self_attn.q_proj.weight
+    skipped = loaded.model.language_model.layers[1].cross_attn.weight
+    assert isinstance(target, QT.Sign3D8Weight)
+    assert isinstance(skipped, QT.UnquantisedWeight)
 
 
 def test_evaluate_writes_outputs(monkeypatch, tmp_path) -> None:

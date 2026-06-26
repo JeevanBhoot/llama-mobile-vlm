@@ -153,6 +153,18 @@ python -m gptq.local quantize \
   --output-dir out/gptq/llama-3.2-vision-local-gptq-int3-c4
 ```
 
+S3D8:
+
+```sh
+python -m gptq.local quantize \
+  --format s3d8 \
+  --output-dir out/gptq/llama-3.2-vision-local-gptq-s3d8-c4
+```
+
+S3D8 mode uses S3D8 inside the GPTQ column update and also writes
+`gptq-s3d8.safetensors`, which can be passed to `squashedtensors.py
+--checkpoint`.
+
 Quantize a different model:
 
 ```sh
@@ -219,8 +231,9 @@ pytest \
 
 ## Notes
 
-These are accuracy-only PTQ baselines. The generated checkpoints are not Arm
-deployment artifacts for the C++ inference library.
+INT3/INT4 local GPTQ checkpoints are accuracy-only dense PTQ baselines. S3D8
+local GPTQ also writes a quantisation checkpoint for the existing S3D8
+`squashedtensors.py` deployment path.
 
 Compare quality with `summary.json`. Compare storage with the GPTQModel
 checkpoint size or the local `estimated_packed_storage` field.

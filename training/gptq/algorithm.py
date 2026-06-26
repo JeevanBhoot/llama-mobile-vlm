@@ -5,13 +5,19 @@
 import math
 import time
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
+import weight_formats.fit as F
+import weight_formats.quantisation as Q
 from torch import Tensor
+
+from quant_formats import FMT_CHANNEL_S3D8
 
 
 @dataclass
 class GPTQConfig:
+    quantization_format: Literal["int", "s3d8"] = "int"
     bits: int = 4
     group_size: int = 128
     blocksize: int = 128
@@ -24,7 +30,11 @@ class GPTQConfig:
     mse: float = 0.0
 
     def __post_init__(self) -> None:
-        if self.bits not in (2, 3, 4, 8):
+        if self.quantization_format not in ("int", "s3d8"):
+            raise ValueError(
+                f"Unsupported GPTQ quantization format: {self.quantization_format}"
+            )
+        if self.quantization_format == "int" and self.bits not in (2, 3, 4, 8):
             raise ValueError(f"Unsupported GPTQ bit width: {self.bits}")
         if self.group_size != -1 and self.group_size <= 0:
             raise ValueError("group_size must be -1 or a positive integer")
@@ -53,6 +63,10 @@ class QuantizedLinear:
     duration: float
     avg_loss: float
     damp_percent: float
+    quantization_format: str = "int"
+    effective_bits: float | None = None
+    fitted_format: Q.TensorFormat | None = None
+    centroid_shape: tuple[int, ...] | None = None
 
 
 class UniformAffineQuantizer:
@@ -148,6 +162,93 @@ class UniformAffineQuantizer:
                 best[improved] = err[improved]
                 scale[improved] = scale1[improved]
                 zero[improved] = zero1[improved]
+
+
+def _fallback_s3d8_format() -> Q.LinearScalingFormat:
+    return Q.LinearScalingFormat(
+        Q.Sign3D8Format(
+            Q.VectorLUTFormat.create(
+                torch.cartesian_prod(
+                    torch.linspace(0, 127, 4),
+                    torch.linspace(0, 127, 4),
+                    torch.linspace(0, 127, 2),
+                ),
+                Q.TorchFormat(torch.int8),
+                "S3D8",
+                range=(0, 127),
+            )
+        ),
+        scale_format=Q.BFLOAT16,
+        block_shape=(1, None),
+        scaling="absmax",
+    )
+
+
+class S3D8Quantizer:
+    """S3D8 vector quantizer using deployable per-output-row scaling."""
+
+    effective_bits = 8 / 3
+
+    def __init__(
+        self,
+        fmt_spec: F.Scaled | Q.LinearScalingFormat = FMT_CHANNEL_S3D8,
+    ):
+        self.fmt_spec = fmt_spec
+        self.fmt: Q.LinearScalingFormat | None = None
+        self.scale = torch.empty(0)
+
+    def find_params(self, weight: Tensor) -> None:
+        if weight.ndim != 2:
+            raise ValueError(
+                f"S3D8 quantization expects a rank-2 weight, got {weight.ndim}"
+            )
+        if weight.numel() == 0:
+            raise ValueError("S3D8 quantization requires a non-empty weight")
+
+        n_vectors = ((weight.shape[0] + 2) // 3) * weight.shape[1]
+        if torch.count_nonzero(weight).item() == 0 or n_vectors < 32:
+            fmt = _fallback_s3d8_format()
+        else:
+            fmt = (
+                self.fmt_spec.fit(weight)
+                if isinstance(self.fmt_spec, F.Scaled)
+                else self.fmt_spec
+            )
+        if not isinstance(fmt, Q.LinearScalingFormat) or not isinstance(
+            fmt.element_format, Q.Sign3D8Format
+        ):
+            raise TypeError(f"Expected a Sign3D8 linear scaling format, got {fmt}")
+
+        _, scale = fmt.normalise(weight)
+        self.fmt = fmt
+        self.scale = scale[:, :1].contiguous()
+
+    @property
+    def centroid_shape(self) -> tuple[int, ...] | None:
+        if self.fmt is None:
+            return None
+        return (
+            len(self.fmt.element_format.lut.values),
+            self.fmt.element_format.lut.dim,
+        )
+
+    def quantize(self, x: Tensor) -> Tensor:
+        if self.fmt is None:
+            raise ValueError("S3D8 quantizer parameters have not been fitted")
+        squeeze = False
+        if x.ndim == 1:
+            x = x.unsqueeze(1)
+            squeeze = True
+        if x.ndim != 2 or x.shape[0] != self.scale.shape[0]:
+            raise ValueError(
+                "S3D8 quantization expects shape "
+                f"({self.scale.shape[0]}, columns), got {tuple(x.shape)}"
+            )
+
+        scale = self.scale.to(device=x.device)
+        q = self.fmt.element_format.quantise(Q.safe_div(x, scale)) * scale
+        q = q.to(dtype=x.dtype)
+        return q.flatten() if squeeze else q
 
 
 def _compute_local_perms(
@@ -253,7 +354,8 @@ class GPTQLinearQuantizer:
         start = time.time()
         W = self.weight.clone()
         quantizer = self._new_quantizer()
-        quantizer.find_params(W)
+        if self.config.quantization_format == "int":
+            quantizer.find_params(W)
 
         H = self.H
         self.H = None
@@ -268,7 +370,7 @@ class GPTQLinearQuantizer:
         now_idx = 1
 
         groups = []
-        if self.config.static_groups:
+        if self.config.quantization_format == "int" and self.config.static_groups:
             for i in range(0, self.columns, self.config.group_size):
                 group_quantizer = self._new_quantizer()
                 group_quantizer.find_params(W[:, i : i + self.config.group_size])
@@ -312,6 +414,9 @@ class GPTQLinearQuantizer:
             act_group_perm = None
             global_group_perm = None
 
+        if self.config.quantization_format == "s3d8":
+            quantizer.find_params(W)
+
         losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
         Hinv, damp_percent = self._inverse_hessian(H)
@@ -330,7 +435,10 @@ class GPTQLinearQuantizer:
                 w = W1[:, i]
                 d = Hinv1[i, i]
 
-                if self.config.group_size != -1:
+                if (
+                    self.config.quantization_format == "int"
+                    and self.config.group_size != -1
+                ):
                     if not self.config.static_groups:
                         if (i1 + i) % self.config.group_size == 0:
                             quantizer.find_params(
@@ -363,6 +471,28 @@ class GPTQLinearQuantizer:
         avg_loss = torch.sum(losses).item() / self.nsamples
         if math.isnan(avg_loss):
             raise ValueError("Quantization failed due to NaN loss")
+
+        if self.config.quantization_format == "s3d8":
+            assert isinstance(quantizer, S3D8Quantizer)
+            if self.config.desc_act:
+                assert invperm is not None
+                Q = Q[:, invperm]
+            elif self.config.act_group_aware:
+                assert act_group_perm is not None
+                Q = Q[:, _invert_perm(act_group_perm).to(device=Q.device)]
+            return QuantizedLinear(
+                weight=Q.reshape_as(self.module.weight).type_as(self.module.weight),
+                scale=quantizer.scale,
+                zero=torch.empty(0, device=Q.device),
+                g_idx=torch.empty(0, dtype=torch.int32, device=Q.device),
+                duration=time.time() - start,
+                avg_loss=avg_loss,
+                damp_percent=damp_percent,
+                quantization_format="s3d8",
+                effective_bits=quantizer.effective_bits,
+                fitted_format=quantizer.fmt,
+                centroid_shape=quantizer.centroid_shape,
+            )
 
         group_size = (
             self.config.group_size
@@ -407,7 +537,9 @@ class GPTQLinearQuantizer:
             damp_percent=damp_percent,
         )
 
-    def _new_quantizer(self) -> UniformAffineQuantizer:
+    def _new_quantizer(self) -> UniformAffineQuantizer | S3D8Quantizer:
+        if self.config.quantization_format == "s3d8":
+            return S3D8Quantizer()
         return UniformAffineQuantizer(
             bits=self.config.bits,
             sym=self.config.sym,

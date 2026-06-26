@@ -13,41 +13,16 @@ from typing import Literal
 import safetensors.torch
 import torch
 import transformers
-import weight_formats.fit as F
-import weight_formats.quantisation as Q
 import weight_formats.quantisation_training as QT
+from quant_formats import checkpoint_state, format_for
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
 from transformers.models.mllama.modeling_mllama import MllamaForConditionalGeneration
-
-FMT_CHANNEL_INT8 = Q.LinearScalingFormat(
-    Q.IntFormat(8),
-    scale_format=Q.BFLOAT16,
-    block_shape=(1, None),
-    scaling="absmax",
-)
-
-FMT_CHANNEL_S3D8 = F.Scaled(
-    8 / 3,
-    "s3d8",
-    scale_format=Q.BFLOAT16,
-    block_shape=(1, None),
-    scaling="absmax",
-    args=dict(threshold=1e-3),
-)
 
 DTYPES = {
     "bfloat16": torch.bfloat16,
     "float16": torch.float16,
     "float32": torch.float32,
 }
-
-
-def format_for(name: Literal["int8", "s3d8"]) -> Q.TensorFormat | F.Scaled:
-    if name == "int8":
-        return FMT_CHANNEL_INT8
-    if name == "s3d8":
-        return FMT_CHANNEL_S3D8
-    raise ValueError(f"Unsupported format {name!r}")
 
 
 def model_class(model_name_or_path: str) -> type[LlamaForCausalLM] | type[MllamaForConditionalGeneration]:
@@ -68,19 +43,6 @@ def load_model(model_name_or_path: str, dtype: torch.dtype, device: str) -> torc
     if device != "cpu":
         model.to(device)
     return model
-
-
-def checkpoint_state(model: torch.nn.Module, dtype: torch.dtype) -> dict[str, torch.Tensor]:
-    state = QT.save(model)
-    out = {}
-    for key, tensor in state.items():
-        if tensor.dtype.is_floating_point:
-            tensor = tensor.to(dtype)
-        # safetensors.save_file rejects shared storage. QT.convert preserves
-        # tied weights such as Llama embed_tokens/lm_head, so clone each tensor
-        # after moving it to CPU to make the checkpoint self-contained.
-        out[key] = tensor.cpu().contiguous().clone()
-    return out
 
 
 def direct_cast(

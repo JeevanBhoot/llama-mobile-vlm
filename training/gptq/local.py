@@ -6,12 +6,16 @@ import argparse
 import dataclasses
 import math
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+import safetensors.torch
 import torch
 import transformers
+import weight_formats.quantisation as Q
+import weight_formats.quantisation_training as QT
 
 from eval import vqa
 from gptq.algorithm import GPTQConfig, GPTQLinearQuantizer
@@ -36,6 +40,7 @@ from gptq.common import (
     write_json,
     write_jsonl_stream,
 )
+from quant_formats import checkpoint_state
 
 DEFAULT_MODEL_NAME = "meta-llama/Llama-3.2-11B-Vision-Instruct"
 DEFAULT_C4_DATA_FILES = "en/c4-train.00001-of-01024.json.gz"
@@ -44,8 +49,10 @@ DEFAULT_GROUP_SIZE = 128
 DEFAULT_TORCH_DTYPE = "bfloat16"
 DEFAULT_TASKS = ("vqa", "chartqa", "docvqa", "ai2d")
 SUPPORTED_BITS = (3, 4)
+SUPPORTED_FORMATS = ("int", "s3d8")
 METADATA_FILENAME = "metadata.json"
 DEFAULT_STORAGE_SCALE_ZERO_DTYPE = "bfloat16"
+S3D8_CHECKPOINT_FILENAME = "gptq-s3d8.safetensors"
 
 TARGET_MODULE_GROUPS = (
     ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"),
@@ -83,7 +90,9 @@ class TextLayerStack:
     cross_attention_layers: frozenset[int]
 
 
-def default_output_dir(bits: int) -> Path:
+def default_output_dir(bits: int, quantization_format: str = "int") -> Path:
+    if quantization_format == "s3d8":
+        return Path("out/gptq/llama-3.2-vision-local-gptq-s3d8-c4")
     return Path(f"out/gptq/llama-3.2-vision-local-gptq-int{bits}-c4")
 
 
@@ -337,19 +346,37 @@ def _quantize_subset(
     logs = []
     for name, module in subset.items():
         result = quantizers[name].quantize()
-        module.weight.data = result.weight.to(module.weight.device)
-        logs.append(
-            {
-                "module": name,
-                "shape": list(module.weight.shape),
-                "avg_loss": result.avg_loss,
-                "duration": result.duration,
-                "damp_percent": result.damp_percent,
-                "scale_shape": list(result.scale.shape),
-                "zero_shape": list(result.zero.shape),
-                "g_idx_shape": list(result.g_idx.shape),
-            }
-        )
+        module.weight.data = result.weight.to(module.weight.device).clone()
+        log = {
+            "module": name,
+            "shape": list(module.weight.shape),
+            "avg_loss": result.avg_loss,
+            "duration": result.duration,
+            "damp_percent": result.damp_percent,
+            "quantization_format": result.quantization_format,
+            "effective_bits": result.effective_bits or config.bits,
+            "scale_shape": list(result.scale.shape),
+        }
+        if result.quantization_format == "int":
+            log.update(
+                {
+                    "zero_shape": list(result.zero.shape),
+                    "g_idx_shape": list(result.g_idx.shape),
+                }
+            )
+        elif result.quantization_format == "s3d8":
+            log.update(
+                {
+                    "centroid_shape": list(result.centroid_shape or ()),
+                    "_fitted_format": result.fitted_format,
+                    "_scale": result.scale.detach().cpu().clone(),
+                }
+            )
+        else:
+            raise ValueError(
+                f"Unsupported quantization format {result.quantization_format!r}"
+            )
+        logs.append(log)
 
     return logs
 
@@ -452,8 +479,9 @@ def load_model(
 def estimate_packed_storage(
     model: torch.nn.Module,
     layer_logs: list[dict[str, Any]],
-    bits: int,
+    bits: float,
     scale_zero_dtype: str,
+    quantization_format: str = "int",
 ) -> dict[str, Any]:
     if scale_zero_dtype not in DTYPE_STORAGE_BYTES:
         raise ValueError(
@@ -476,6 +504,7 @@ def estimate_packed_storage(
     quantized_value_count = 0
     packed_weight_bytes = 0
     scale_zero_bytes = 0
+    centroid_bytes = 0
     g_idx_bytes = 0
 
     for name, tensor in model.state_dict().items():
@@ -493,30 +522,50 @@ def estimate_packed_storage(
         unmatched_quantized_names.discard(name)
         quantized_dense_bytes += dense_bytes
         quantized_value_count += n_values
-        packed_weight_bytes += math.ceil(n_values * bits / 8)
-        scale_zero_values = math.prod(log["scale_shape"]) + math.prod(
-            log["zero_shape"]
-        )
+        if quantization_format == "s3d8":
+            if len(log["shape"]) != 2:
+                raise ValueError(f"S3D8 storage estimate expects a 2D tensor: {log}")
+            rows, cols = log["shape"]
+            packed_rows = rows + (-rows % 3)
+            packed_cols = cols + (-cols % 16)
+            packed_weight_bytes += (packed_rows // 3) * packed_cols
+            centroid_bytes += math.prod(log["centroid_shape"])
+            scale_zero_values = math.prod(log["scale_shape"])
+        else:
+            packed_weight_bytes += math.ceil(n_values * bits / 8)
+            scale_zero_values = math.prod(log["scale_shape"]) + math.prod(
+                log["zero_shape"]
+            )
+            g_idx_bytes += math.prod(log["g_idx_shape"]) * 4
         scale_zero_bytes += scale_zero_values * scale_zero_bytes_per_value
-        g_idx_bytes += math.prod(log["g_idx_shape"]) * 4
 
     packed_without_g_idx = (
-        unquantized_dense_bytes + packed_weight_bytes + scale_zero_bytes
+        unquantized_dense_bytes
+        + packed_weight_bytes
+        + scale_zero_bytes
+        + centroid_bytes
     )
     packed_with_g_idx = packed_without_g_idx + g_idx_bytes
 
     total_values = unquantized_value_count + quantized_value_count
-    quantized_bytes_without_g_idx = packed_weight_bytes + scale_zero_bytes
+    quantized_bytes_without_g_idx = (
+        packed_weight_bytes + scale_zero_bytes + centroid_bytes
+    )
     quantized_bytes_with_g_idx = quantized_bytes_without_g_idx + g_idx_bytes
 
     return {
         "assumptions": {
             "scope": "state_dict tensors only; tokenizer/config files are excluded",
             "quantized_weight_bits": bits,
+            "quantization_format": quantization_format,
             "scale_zero_dtype": scale_zero_dtype,
             "g_idx_dtype": "int32",
             "unquantized_tensors": "stored densely at their current dtype",
-            "packed_weight_padding": "rounded up to whole bytes per tensor",
+            "packed_weight_padding": (
+                "S3D8 rows padded to multiple of 3 and columns to multiple of 16"
+                if quantization_format == "s3d8"
+                else "rounded up to whole bytes per tensor"
+            ),
         },
         "dense_state_dict_bytes": dense_state_dict_bytes,
         "estimated_packed_without_g_idx_bytes": packed_without_g_idx,
@@ -544,6 +593,7 @@ def estimate_packed_storage(
         "unquantized_dense_bytes": unquantized_dense_bytes,
         "packed_weight_bytes": packed_weight_bytes,
         "scale_zero_bytes": scale_zero_bytes,
+        "centroid_bytes": centroid_bytes,
         "g_idx_bytes": g_idx_bytes,
         "quantized_tensor_count": len(layer_logs) - len(unmatched_quantized_names),
         "unquantized_tensor_count": unquantized_tensor_count,
@@ -551,10 +601,74 @@ def estimate_packed_storage(
     }
 
 
+def _serializable_quantization_logs(
+    layer_logs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        {key: value for key, value in log.items() if not key.startswith("_")}
+        for log in layer_logs
+    ]
+
+
+def _resolve_module(root: torch.nn.Module, name: str) -> torch.nn.Module:
+    module = root
+    for part in name.split("."):
+        module = getattr(module, part)
+    return module
+
+
+def save_s3d8_quantized_checkpoint(
+    model: torch.nn.Module,
+    output_path: Path,
+    layer_logs: list[dict[str, Any]],
+    dtype: torch.dtype,
+    verbose: bool = True,
+) -> None:
+    fmt_spec: defaultdict[str, Q.TensorFormat] = defaultdict(lambda: Q.BFLOAT16)
+    target_logs = []
+    for log in layer_logs:
+        if log.get("quantization_format") != "s3d8":
+            continue
+        fmt = log.get("_fitted_format")
+        if fmt is None:
+            raise ValueError(f"Missing fitted S3D8 format for {log['full_name']}")
+        fmt_spec[f"{log['full_name']}.weight"] = fmt
+        target_logs.append(log)
+
+    if verbose:
+        print(f"Saving S3D8 quantized checkpoint to {output_path}", flush=True)
+    QT.convert(
+        model,
+        fmt_spec=fmt_spec,
+        scaling_mode="parameter",
+        clip_gradient=False,
+        error_weight=None,
+        activation_fmt=None,
+        mode="qat",
+        progress=verbose,
+    )
+    for log in target_logs:
+        weight_wrapper = _resolve_module(model, log["full_name"]).weight
+        if not isinstance(weight_wrapper, QT.Sign3D8Weight):
+            raise TypeError(
+                f"Expected {log['full_name']}.weight to be Sign3D8Weight, "
+                f"got {type(weight_wrapper)}"
+            )
+        scale = log["_scale"].to(
+            device=weight_wrapper.scale.device,
+            dtype=weight_wrapper.scale.dtype,
+        )
+        weight_wrapper.scale.data.copy_(scale)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    safetensors.torch.save_file(checkpoint_state(model, dtype), output_path)
+
+
 def quantize(
     model_name: str,
     output_dir: Path,
     bits: int,
+    quantization_format: str = "int",
     group_size: int = DEFAULT_GROUP_SIZE,
     batch_size: int = 1,
     calibration_samples: int = DEFAULT_CALIBRATION_SAMPLES,
@@ -577,7 +691,12 @@ def quantize(
     storage_scale_zero_dtype: str = DEFAULT_STORAGE_SCALE_ZERO_DTYPE,
     verbose: bool = True,
 ) -> dict[str, Any]:
-    if bits not in SUPPORTED_BITS:
+    if quantization_format not in SUPPORTED_FORMATS:
+        raise ValueError(
+            f"Unsupported format={quantization_format!r}, expected one of "
+            f"{SUPPORTED_FORMATS}"
+        )
+    if quantization_format == "int" and bits not in SUPPORTED_BITS:
         raise ValueError(f"Unsupported bits={bits}, expected one of {SUPPORTED_BITS}")
     if batch_size < 1:
         raise ValueError(f"batch_size must be >= 1, got {batch_size}")
@@ -634,6 +753,7 @@ def quantize(
     )
 
     config = GPTQConfig(
+        quantization_format=quantization_format,
         bits=bits,
         group_size=group_size,
         blocksize=blocksize,
@@ -750,11 +870,13 @@ def quantize(
     if hasattr(tokenizer, "save_pretrained"):
         tokenizer.save_pretrained(output_dir)
 
+    effective_weight_bits = bits if quantization_format == "int" else 8 / 3
     packed_storage = estimate_packed_storage(
         model,
         layer_logs=layer_logs,
-        bits=bits,
+        bits=effective_weight_bits,
         scale_zero_dtype=storage_scale_zero_dtype,
+        quantization_format=quantization_format,
     )
     if verbose:
         print(
@@ -762,11 +884,31 @@ def quantize(
             f"{packed_storage['estimated_packed_with_g_idx_bytes'] / 1024**3:.3f} GiB",
             flush=True,
         )
+    quantized_checkpoint_path = None
+    if quantization_format == "s3d8":
+        quantized_checkpoint_path = output_dir / S3D8_CHECKPOINT_FILENAME
+        save_s3d8_quantized_checkpoint(
+            model,
+            quantized_checkpoint_path,
+            layer_logs,
+            dtype=dtype,
+            verbose=verbose,
+        )
+
     metadata = {
         "model_name": model_name,
         "output_dir": str(output_dir),
-        "artifact_type": "dense_dequantized_local_gptq",
-        "bits": bits,
+        "artifact_type": (
+            "dense_dequantized_local_gptq_s3d8"
+            if quantization_format == "s3d8"
+            else "dense_dequantized_local_gptq"
+        ),
+        "format": quantization_format,
+        "bits": bits if quantization_format == "int" else None,
+        "effective_weight_bits": effective_weight_bits,
+        "quantized_checkpoint_path": (
+            str(quantized_checkpoint_path) if quantized_checkpoint_path else None
+        ),
         "group_size": group_size,
         "quantization_batch_size": batch_size,
         "calibration_max_tokens": calibration_max_tokens,
@@ -789,7 +931,7 @@ def quantize(
         "skipped_cross_attention_layers": skipped_cross_attention_layers,
         "target_module_groups": TARGET_MODULE_GROUPS,
         "n_quantized_modules": len(layer_logs),
-        "quantization_log": layer_logs,
+        "quantization_log": _serializable_quantization_logs(layer_logs),
         "estimated_packed_storage": packed_storage,
         "artifact_size_bytes": directory_size(output_dir),
     }
@@ -914,7 +1056,13 @@ def evaluate(
 
 
 def _add_gptq_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--bits", type=int, choices=SUPPORTED_BITS, required=True)
+    parser.add_argument(
+        "--format",
+        choices=SUPPORTED_FORMATS,
+        default="int",
+        help="Weight format used inside local GPTQ",
+    )
+    parser.add_argument("--bits", type=int, choices=SUPPORTED_BITS, default=4)
     parser.add_argument("--group-size", type=int, default=DEFAULT_GROUP_SIZE)
     parser.add_argument("--blocksize", type=int, default=128)
     parser.add_argument("--damp-percent", type=float, default=0.05)
@@ -1009,7 +1157,7 @@ def _add_evaluate_args(parser: argparse.ArgumentParser) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run local dense GPTQ INT4/INT3 C4 baselines"
+        description="Run local dense GPTQ INT4/INT3/S3D8 C4 baselines"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -1027,11 +1175,12 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     if args.command == "quantize":
-        output_dir = args.output_dir or default_output_dir(args.bits)
+        output_dir = args.output_dir or default_output_dir(args.bits, args.format)
         metadata = quantize(
             model_name=args.model_name,
             output_dir=output_dir,
             bits=args.bits,
+            quantization_format=args.format,
             group_size=args.group_size,
             batch_size=args.batch_size,
             calibration_samples=args.calibration_samples,
