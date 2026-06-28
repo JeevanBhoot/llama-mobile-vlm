@@ -40,11 +40,13 @@ def tokenise_calibration(
     max_tokens: int,
 ) -> list[dict[str, Any]]:
     return [
-        tokenizer(
-            text,
-            return_tensors="pt",
-            truncation=True,
-            max_length=max_tokens,
+        dict(
+            tokenizer(
+                text,
+                return_tensors="pt",
+                truncation=True,
+                max_length=max_tokens,
+            )
         )
         for text in texts
     ]
