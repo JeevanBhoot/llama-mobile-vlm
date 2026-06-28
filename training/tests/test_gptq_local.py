@@ -283,6 +283,28 @@ def test_quantize_writes_dense_artifact(monkeypatch, tmp_path) -> None:
     assert (tmp_path / local.METADATA_FILENAME).exists()
 
 
+def test_tokenise_calibration_returns_plain_dicts() -> None:
+    class DummyTokenizer:
+        def __call__(self, text, **kwargs):
+            assert text == "sample"
+            assert kwargs["return_tensors"] == "pt"
+            return common.transformers.BatchEncoding(
+                {
+                    "input_ids": torch.tensor([[1, 2, 3]]),
+                    "attention_mask": torch.tensor([[1, 1, 1]]),
+                }
+            )
+
+    result = common.tokenise_calibration(
+        ["sample"],
+        tokenizer=DummyTokenizer(),
+        max_tokens=16,
+    )
+
+    assert type(result[0]) is dict
+    torch.testing.assert_close(result[0]["input_ids"], torch.tensor([[1, 2, 3]]))
+
+
 def test_evaluate_writes_outputs(monkeypatch, tmp_path) -> None:
     fake_vqa = fake_vqa_module(
         evaluate=mock.Mock(return_value=[{"id": 1, "output": "yes", "accuracy": 1.0}])
