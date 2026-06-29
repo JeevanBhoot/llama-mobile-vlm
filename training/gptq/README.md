@@ -140,6 +140,11 @@ Evaluation writes:
 - `summary.json`
 - One JSONL file per task, for example `vqa.jsonl`
 
+Evaluation resumes from existing task JSONL files in `--output-dir`. If a task
+JSONL already contains records for the requested example ids, those examples are
+used for the summary and skipped during generation. If a task JSONL is partial,
+evaluation appends the missing records as they are generated.
+
 Evaluation defaults:
 
 - Tasks: `vqa chartqa docvqa ai2d`

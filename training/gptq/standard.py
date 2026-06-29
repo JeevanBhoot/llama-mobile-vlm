@@ -82,6 +82,88 @@ def write_jsonl(path: Path, records: Iterable[dict[str, Any]]) -> None:
             print(json.dumps(record), file=f)
 
 
+def load_jsonl(path: Path) -> list[dict[str, Any]]:
+    records = []
+    rewrite = False
+    with path.open() as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                rewrite = True
+                break
+    if rewrite:
+        write_jsonl(path, records)
+    return records
+
+
+def normalise_id(value: Any) -> str:
+    return str(value)
+
+
+def eval_id_column(data: datasets.Dataset) -> str:
+    for column_name in ("id", "question_id", "questionId"):
+        if column_name in data.column_names:
+            return column_name
+    raise ValueError(
+        "Could not find an evaluation id column. Expected one of "
+        "'id', 'question_id', or 'questionId'."
+    )
+
+
+def select_missing_eval_examples(
+    data: datasets.Dataset, records: list[dict[str, Any]]
+) -> datasets.Dataset:
+    seen_ids = {normalise_id(record["id"]) for record in records}
+    if not seen_ids:
+        return data
+
+    id_column = eval_id_column(data)
+    missing_indices = [
+        idx
+        for idx, id in enumerate(data[id_column])
+        if normalise_id(id) not in seen_ids
+    ]
+    return data.select(missing_indices)
+
+
+def task_records_for_data(
+    data: datasets.Dataset, records: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    records_by_id = {normalise_id(record["id"]): record for record in records}
+    id_column = eval_id_column(data)
+    out = []
+    missing_ids = []
+    for id in data[id_column]:
+        key = normalise_id(id)
+        if key in records_by_id:
+            out.append(records_by_id[key])
+        else:
+            missing_ids.append(id)
+
+    if missing_ids:
+        raise ValueError(
+            f"Missing {len(missing_ids)} cached evaluation records; "
+            f"first missing id: {missing_ids[0]!r}"
+        )
+    return out
+
+
+def append_eval_results(
+    path: Path,
+    results: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    written = []
+    with path.open("a") as f:
+        for record in results:
+            print(json.dumps(record), file=f, flush=True)
+            written.append(record)
+    return written
+
+
 def config_to_metadata(config: QuantizeConfig) -> dict[str, Any]:
     if hasattr(config, "to_dict"):
         return config.to_dict()
@@ -333,16 +415,13 @@ def evaluate(
     vqa_s3_local_path: Path | None = None,
     device: str | None = None,
 ) -> dict[str, Any]:
-    qmodel = GPTQModel.load(str(model_dir))
-    if device is not None:
-        qmodel.to(device)
-    model = qmodel.model
-    model.eval()
-    processor = transformers.AutoProcessor.from_pretrained(processor_name)
+    output_dir.mkdir(parents=True, exist_ok=True)
     artifact_size_bytes = directory_size(model_dir)
 
-    task_results = {}
+    task_states = []
+    needs_evaluation = False
     for task_name in tasks:
+        task_path = output_dir / f"{task_name}.jsonl"
         data = load_eval_data(
             task_name,
             n_examples=n_examples,
@@ -350,18 +429,42 @@ def evaluate(
             vqa_s3_path=vqa_s3_path,
             vqa_s3_local_path=vqa_s3_local_path,
         )
-        results = list(
-            vqa.evaluate(
-                model=model,
-                processor=processor,
-                task_name=task_name,
-                data=data,
-                batch_size=batch_size,
-                include_relaxed_metrics=include_relaxed_metrics,
-            )
+        existing_results = load_jsonl(task_path) if task_path.exists() else []
+        data_to_evaluate = select_missing_eval_examples(data, existing_results)
+        needs_evaluation = needs_evaluation or bool(len(data_to_evaluate))
+        task_states.append(
+            (task_name, task_path, data, existing_results, data_to_evaluate)
         )
-        task_results[task_name] = results
-        write_jsonl(output_dir / f"{task_name}.jsonl", results)
+
+    model = None
+    processor = None
+    if needs_evaluation:
+        qmodel = GPTQModel.load(str(model_dir))
+        if device is not None:
+            qmodel.to(device)
+        model = qmodel.model
+        model.eval()
+        processor = transformers.AutoProcessor.from_pretrained(processor_name)
+
+    task_results = {}
+    for task_name, task_path, data, existing_results, data_to_evaluate in task_states:
+        if len(data_to_evaluate):
+            assert model is not None
+            assert processor is not None
+            new_results = append_eval_results(
+                task_path,
+                vqa.evaluate(
+                    model=model,
+                    processor=processor,
+                    task_name=task_name,
+                    data=data_to_evaluate,
+                    batch_size=batch_size,
+                    include_relaxed_metrics=include_relaxed_metrics,
+                ),
+            )
+            existing_results.extend(new_results)
+
+        task_results[task_name] = task_records_for_data(data, existing_results)
 
     summary = summarise_results(
         task_results, include_relaxed_metrics=include_relaxed_metrics
