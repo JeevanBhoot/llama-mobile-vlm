@@ -414,6 +414,8 @@ def evaluate(
     vqa_s3_path: str | None = None,
     vqa_s3_local_path: Path | None = None,
     device: str | None = None,
+    backend: str = "auto",
+    dtype: str | None = None,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     artifact_size_bytes = directory_size(model_dir)
@@ -439,7 +441,10 @@ def evaluate(
     model = None
     processor = None
     if needs_evaluation:
-        qmodel = GPTQModel.load(str(model_dir))
+        load_kwargs: dict[str, Any] = {"backend": backend}
+        if dtype is not None:
+            load_kwargs["dtype"] = dtype
+        qmodel = GPTQModel.load(str(model_dir), **load_kwargs)
         if device is not None:
             qmodel.to(device)
         model = qmodel.model
@@ -481,6 +486,8 @@ def evaluate(
             "vqa_s3_local_path": str(vqa_s3_local_path)
             if vqa_s3_local_path
             else None,
+            "backend": backend,
+            "dtype": dtype,
             "artifact_size_bytes": artifact_size_bytes,
         }
     )
@@ -674,6 +681,16 @@ def _add_evaluate_args(parser: argparse.ArgumentParser) -> None:
         help="Device used for evaluation",
     )
     parser.add_argument(
+        "--backend",
+        default="auto",
+        help="GPTQModel backend used when loading the quantized artifact",
+    )
+    parser.add_argument(
+        "--dtype",
+        default=None,
+        help="dtype passed to GPTQModel.load during evaluation",
+    )
+    parser.add_argument(
         "--load-vqa-from-s3",
         action="store_true",
         help="Load VQAv2 from the legacy S3 cache instead of Hugging Face",
@@ -791,6 +808,8 @@ def main(argv: list[str] | None = None) -> None:
             vqa_s3_path=args.vqa_s3_path,
             vqa_s3_local_path=args.vqa_s3_local_path,
             device=args.device,
+            backend=args.backend,
+            dtype=args.dtype,
         )
     else:
         raise ValueError(f"Unsupported command {args.command!r}")
