@@ -399,7 +399,7 @@ class GPTQLinearQuantizer:
         self.H: Tensor | None = None
 
     def add_batch(self, inp: Tensor) -> None:
-        if len(inp.shape) == 3:
+        if len(inp.shape) > 2:
             inp = inp.reshape((-1, inp.shape[-1]))
         batch_size = inp.shape[0]
         inp = inp.t().to(self.device)
@@ -486,7 +486,7 @@ class GPTQLinearQuantizer:
         if self.config.quantization_format == "s3d8":
             quantizer.find_params(W)
 
-        losses = torch.zeros_like(W)
+        total_loss = torch.zeros((), dtype=W.dtype, device=W.device)
         Q = torch.zeros_like(W)
         Hinv, damp_percent = self._inverse_hessian(H)
 
@@ -497,7 +497,6 @@ class GPTQLinearQuantizer:
             W1 = W[:, i1:i2].clone()
             Q1 = torch.zeros_like(W1)
             Err1 = torch.zeros_like(W1)
-            Losses1 = torch.zeros_like(W1)
             Hinv1 = Hinv[i1:i2, i1:i2]
 
             for i in range(count):
@@ -528,17 +527,16 @@ class GPTQLinearQuantizer:
 
                 q = quantizer.quantize(w.unsqueeze(1)).flatten()
                 Q1[:, i] = q
-                Losses1[:, i] = (w - q) ** 2 / d**2
+                total_loss += torch.sum((w - q) ** 2 / d**2) / 2
 
                 err1 = (w - q) / d
                 W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
                 Err1[:, i] = err1
 
             Q[:, i1:i2] = Q1
-            losses[:, i1:i2] = Losses1 / 2
             W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
-        avg_loss = torch.sum(losses).item() / self.nsamples
+        avg_loss = total_loss.item() / self.nsamples
         if math.isnan(avg_loss):
             raise ValueError("Quantization failed due to NaN loss")
 

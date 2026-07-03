@@ -137,6 +137,11 @@ dequantized weights in a Hugging Face checkpoint. Use
 `estimated_packed_storage` in `metadata.json` for the estimated packed tensor
 storage.
 
+By default, local GPTQ keeps the original decoder-only C4 path:
+`--target-scope text-self` and `--calibration-source c4`. This quantizes
+language-model self-attention and MLP projections, while skipping
+cross-attention layers.
+
 INT4:
 
 ```sh
@@ -164,6 +169,24 @@ python -m gptq.local quantize \
 S3D8 mode uses S3D8 inside the GPTQ column update and also writes
 `gptq-s3d8.safetensors`, which can be passed to `squashedtensors.py
 --checkpoint`.
+
+Full multimodal prototype:
+
+```sh
+python -m gptq.local quantize \
+  --target-scope full-multimodal \
+  --calibration-source vqav2 \
+  --bits 4 \
+  --output-dir out/gptq/llama-3.2-vision-local-gptq-int4-vqav2-full
+```
+
+The full multimodal path quantizes vision encoder and global-encoder Linear
+layers, text self-attention layers, text cross-attention layers,
+`model.multi_modal_projector`, and `lm_head`. VQAv2 is the prototype
+calibration default for this path because it can be loaded from Hugging Face
+with `load_from_s3=False`; it overlaps the evaluation suite and should not be
+used for reportable results. Use `--calibration-source synthetic` with
+`--calibration-data-path` for the intended synthetic calibration data.
 
 Fractional-width INT codebook:
 
@@ -213,6 +236,8 @@ Local GPTQ uses the same calibration defaults as `gptq.standard`:
 - Calibration sort: `desc`
 - Calibration min token length: `10`
 - Calibration batch size: `1`
+- Target scope: `text-self`
+- Calibration source: `c4`
 
 Local GPTQ-specific defaults:
 

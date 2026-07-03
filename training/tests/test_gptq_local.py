@@ -13,6 +13,21 @@ import weight_formats.quantisation_training as QT
 
 
 def fake_vqa_module(evaluate=None):
+    class FakeVQA:
+        data = mock.Mock(return_value=["a"])
+
+        @classmethod
+        def prepare_batch(cls, batch, system_template):
+            return SimpleNamespace(
+                images=batch["image"],
+                prompts=[
+                    system_template.format(prompt=f"Question: {q}")
+                    for q in batch["question"]
+                ],
+                answers=batch.get("answers", []),
+                ids=batch.get("question_id", []),
+            )
+
     task = SimpleNamespace(
         METRICS=("accuracy",),
         RELAXED_METRICS=("accuracy_relaxed",),
@@ -20,6 +35,8 @@ def fake_vqa_module(evaluate=None):
     )
     fake_vqa = ModuleType("eval.vqa")
     fake_vqa.TASKS = {"vqa": task}
+    fake_vqa.VQA = FakeVQA
+    fake_vqa.LLAMA_PROMPT_TEMPLATES = {"instruct": "<s>{prompt}</s>"}
     fake_vqa.evaluate = evaluate or mock.Mock()
     return fake_vqa
 
@@ -137,6 +154,140 @@ class TinyMllama(torch.nn.Module):
                 continue
             hidden_states = layer(hidden_states)[0]
         return SimpleNamespace(logits=hidden_states)
+
+    def save_pretrained(self, output_dir, safe_serialization=True):
+        Path(output_dir, "model.safetensors").write_text("weights")
+
+
+class TinyIdentityPosition(torch.nn.Module):
+    def forward(self, hidden_state, aspect_ratio_ids):
+        return hidden_state
+
+
+class TinyVisionAttention(torch.nn.Module):
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        self.q_proj = torch.nn.Linear(hidden_size, hidden_size, bias=False)
+        self.k_proj = torch.nn.Linear(hidden_size, hidden_size, bias=False)
+        self.v_proj = torch.nn.Linear(hidden_size, hidden_size, bias=False)
+        self.o_proj = torch.nn.Linear(hidden_size, hidden_size, bias=False)
+
+    def forward(self, hidden_state, attention_mask=None):
+        hidden_state = (
+            self.q_proj(hidden_state)
+            + self.k_proj(hidden_state)
+            + self.v_proj(hidden_state)
+        )
+        return self.o_proj(hidden_state), None
+
+
+class TinyVisionMlp(torch.nn.Module):
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        self.fc1 = torch.nn.Linear(hidden_size, hidden_size * 2)
+        self.fc2 = torch.nn.Linear(hidden_size * 2, hidden_size)
+
+    def forward(self, hidden_state):
+        return self.fc2(torch.relu(self.fc1(hidden_state)))
+
+
+class TinyVisionLayer(torch.nn.Module):
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        self.self_attn = TinyVisionAttention(hidden_size)
+        self.mlp = TinyVisionMlp(hidden_size)
+
+    def forward(self, hidden_state, attention_mask=None):
+        hidden_state = hidden_state + self.self_attn(hidden_state, attention_mask)[0]
+        return hidden_state + self.mlp(hidden_state)
+
+
+class TinyVisionEncoder(torch.nn.Module):
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        self.layers = torch.nn.ModuleList([TinyVisionLayer(hidden_size)])
+
+
+class TinyVisionModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.patch_embedding = torch.nn.Conv2d(1, 4, kernel_size=1, bias=False)
+        self.pre_tile_positional_embedding = TinyIdentityPosition()
+        self.gated_positional_embedding = TinyIdentityPosition()
+        self.post_tile_positional_embedding = TinyIdentityPosition()
+        self.layernorm_pre = torch.nn.LayerNorm(4)
+        self.layernorm_post = torch.nn.LayerNorm(4)
+        self.transformer = TinyVisionEncoder(4)
+        self.global_transformer = TinyVisionEncoder(4)
+        self.intermediate_layers_indices = [0]
+        self.num_patches = 5
+
+    def apply_class_embedding(self, hidden_state):
+        batch, _, hidden = hidden_state.shape
+        cls = torch.zeros(batch, 1, hidden, device=hidden_state.device)
+        return torch.cat([cls, hidden_state], dim=1)
+
+
+class TinyCrossAttention(torch.nn.Module):
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        self.q_proj = torch.nn.Linear(hidden_size, hidden_size, bias=False)
+        self.k_proj = torch.nn.Linear(hidden_size, hidden_size, bias=False)
+        self.v_proj = torch.nn.Linear(hidden_size, hidden_size, bias=False)
+        self.o_proj = torch.nn.Linear(hidden_size, hidden_size, bias=False)
+
+    def forward(self, hidden_states, cross_attention_states=None, **kwargs):
+        key = self.k_proj(cross_attention_states).mean(dim=1, keepdim=True)
+        value = self.v_proj(cross_attention_states).mean(dim=1, keepdim=True)
+        hidden_states = self.q_proj(hidden_states) + key + value
+        return self.o_proj(hidden_states), None
+
+
+class TinyCrossAttentionDecoderLayer(torch.nn.Module):
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        self.called = False
+        self.cross_attn = TinyCrossAttention(hidden_size)
+        self.mlp = TinyMlp(hidden_size)
+
+    def forward(self, hidden_states, cross_attention_states=None, **kwargs):
+        self.called = True
+        hidden_states = hidden_states + self.cross_attn(
+            hidden_states,
+            cross_attention_states=cross_attention_states,
+        )[0]
+        return hidden_states + self.mlp(hidden_states)
+
+
+class TinyFullLanguageModel(TinyLanguageModel):
+    def __init__(self):
+        torch.nn.Module.__init__(self)
+        self.config = SimpleNamespace(use_cache=True)
+        self.embed_tokens = torch.nn.Embedding(32, 8)
+        self.rotary_emb = TinyRotaryEmbedding()
+        self.norm = torch.nn.LayerNorm(8)
+        self.cross_attention_layers = [1]
+        self.layers = torch.nn.ModuleList(
+            [
+                TinyDecoderLayer(8),
+                TinyCrossAttentionDecoderLayer(8),
+            ]
+        )
+
+
+class TinyFullMllamaModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.vision_model = TinyVisionModel()
+        self.multi_modal_projector = torch.nn.Linear(8, 8)
+        self.language_model = TinyFullLanguageModel()
+
+
+class TinyFullMllama(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.model = TinyFullMllamaModel()
+        self.lm_head = torch.nn.Linear(8, 32, bias=False)
 
     def save_pretrained(self, output_dir, safe_serialization=True):
         Path(output_dir, "model.safetensors").write_text("weights")
@@ -382,6 +533,165 @@ def test_tokenise_calibration_returns_plain_dicts() -> None:
 
     assert type(result[0]) is dict
     torch.testing.assert_close(result[0]["input_ids"], torch.tensor([[1, 2, 3]]))
+
+
+def test_vqav2_calibration_uses_processor_images_and_prompts(monkeypatch) -> None:
+    fake_vqa = fake_vqa_module()
+    fake_vqa.VQA.data = mock.Mock(
+        return_value=[
+            {
+                "question_id": 1,
+                "image": "image-a",
+                "question": "what is shown?",
+                "answers": [],
+            }
+        ]
+    )
+    monkeypatch.setattr(local, "vqa", fake_vqa)
+
+    class RecordingProcessor:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, images, prompts, **kwargs):
+            self.calls.append((images, prompts, kwargs))
+            return {
+                "input_ids": torch.tensor([[1, 2, 3]]),
+                "attention_mask": torch.ones(1, 3, dtype=torch.long),
+                "pixel_values": torch.randn(1, 1, 1, 1, 2, 2),
+                "aspect_ratio_ids": torch.ones(1, 1, dtype=torch.long),
+                "aspect_ratio_mask": torch.ones(1, 1, 1),
+                "cross_attention_mask": torch.ones(1, 3, 1, 1),
+            }
+
+    processor = RecordingProcessor()
+
+    batches = local.load_vqav2_calibration_batches(
+        processor,
+        n_samples=1,
+        batch_size=1,
+        split="validation",
+        max_tokens=16,
+        load_from_s3=False,
+    )
+
+    fake_vqa.VQA.data.assert_called_once_with(
+        split="validation",
+        limit=1,
+        load_from_s3=False,
+    )
+    images, prompts, kwargs = processor.calls[0]
+    assert images == [["image-a"]]
+    assert prompts == ["<s>Question: what is shown?</s>"]
+    assert kwargs["padding"] is True
+    assert kwargs["truncation"] is True
+    assert kwargs["max_length"] == 16
+    assert batches[0]["input_ids"].shape == (1, 3)
+
+
+def _tiny_multimodal_batch() -> dict[str, torch.Tensor]:
+    return {
+        "input_ids": torch.tensor([[1, 2, 3, 4]]),
+        "attention_mask": torch.ones(1, 4, dtype=torch.long),
+        "pixel_values": torch.randn(1, 1, 1, 1, 2, 2),
+        "aspect_ratio_ids": torch.ones(1, 1, dtype=torch.long),
+        "aspect_ratio_mask": torch.ones(1, 1, 1),
+        "cross_attention_mask": torch.ones(1, 4, 1, 1),
+    }
+
+
+def test_quantize_full_multimodal_targets_vision_cross_projector_and_lm_head(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    torch.manual_seed(625464)
+    model = TinyFullMllama()
+    monkeypatch.setattr(local, "load_model", lambda *_, **__: model)
+    monkeypatch.setattr(
+        local.transformers.AutoProcessor,
+        "from_pretrained",
+        mock.Mock(return_value=DummyProcessor()),
+    )
+    monkeypatch.setattr(
+        local,
+        "load_vqav2_calibration_batches",
+        mock.Mock(return_value=[_tiny_multimodal_batch()]),
+    )
+
+    metadata = local.quantize(
+        model_name="model",
+        output_dir=tmp_path,
+        bits=4,
+        target_scope="full-multimodal",
+        calibration_samples=1,
+        calibration_max_tokens=16,
+        device="cpu",
+        torch_dtype="float32",
+        verbose=False,
+    )
+
+    full_names = {log["full_name"] for log in metadata["quantization_log"]}
+    assert metadata["target_scope_option"] == "full-multimodal"
+    assert metadata["target_scope"] == "mllama_full_multimodal_heavy_linears"
+    assert metadata["calibration_source"] == "vqav2"
+    assert metadata["calibration"]["prototype_warning"] == local.VQAV2_PROTOTYPE_WARNING
+    assert metadata["skipped_cross_attention_layers"] == []
+    assert model.model.language_model.layers[1].called
+    assert "model.vision_model.transformer.layers.0.self_attn.q_proj" in full_names
+    assert "model.vision_model.global_transformer.layers.0.mlp.fc2" in full_names
+    assert "model.language_model.layers.1.cross_attn.k_proj" in full_names
+    assert "model.multi_modal_projector" in full_names
+    assert "lm_head" in full_names
+    assert metadata["estimated_packed_storage"]["unmatched_quantized_tensor_names"] == []
+
+
+def test_quantize_full_multimodal_s3d8_checkpoint_includes_full_targets(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    torch.manual_seed(625464)
+    model = TinyFullMllama()
+    monkeypatch.setattr(local, "load_model", lambda *_, **__: model)
+    monkeypatch.setattr(
+        local.transformers.AutoProcessor,
+        "from_pretrained",
+        mock.Mock(return_value=DummyProcessor()),
+    )
+    monkeypatch.setattr(
+        local,
+        "load_vqav2_calibration_batches",
+        mock.Mock(return_value=[_tiny_multimodal_batch()]),
+    )
+
+    metadata = local.quantize(
+        model_name="model",
+        output_dir=tmp_path,
+        bits=4,
+        quantization_format="s3d8",
+        target_scope="full-multimodal",
+        calibration_samples=1,
+        calibration_max_tokens=16,
+        device="cpu",
+        torch_dtype="float32",
+        verbose=False,
+    )
+
+    checkpoint_path = tmp_path / local.S3D8_CHECKPOINT_FILENAME
+    assert metadata["quantized_checkpoint_path"] == str(checkpoint_path)
+    assert checkpoint_path.exists()
+    state = safetensors.torch.load_file(checkpoint_path)
+    loaded = TinyFullMllama()
+    QT.load_convert(loaded, state)
+    assert isinstance(
+        loaded.model.vision_model.transformer.layers[0].self_attn.q_proj.weight,
+        QT.Sign3D8Weight,
+    )
+    assert isinstance(
+        loaded.model.language_model.layers[1].cross_attn.k_proj.weight,
+        QT.Sign3D8Weight,
+    )
+    assert isinstance(loaded.model.multi_modal_projector.weight, QT.Sign3D8Weight)
+    assert isinstance(loaded.lm_head.weight, QT.Sign3D8Weight)
 
 
 def test_quantize_s3d8_writes_dense_and_quantized_artifacts(
