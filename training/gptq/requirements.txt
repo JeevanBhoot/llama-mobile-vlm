@@ -4,5 +4,5 @@ logbar==0.4.3
 protobuf>=7.34.0
 threadpoolctl>=3.5.0
 tokenicer==0.0.13
-gptqmodel @ git+https://github.com/ModelCloud/GPTQModel.git@30c7f25e620a3d7c3fbeb39fba8733e551165e9e
+gptqmodel @ git+https://github.com/ModelCloud/GPTQModel.git@9128cc5ed9c5c2c570f22ab9eaffa6a3fba9f12e
 torchvision==0.27.1
