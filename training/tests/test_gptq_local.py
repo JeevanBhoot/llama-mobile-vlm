@@ -554,6 +554,14 @@ def test_evaluate_resume_uses_missing_dataset_ids(monkeypatch, tmp_path) -> None
     ]
 
 
+def test_select_remaining_eval_data_all_examples_completed() -> None:
+    data = common.datasets.Dataset.from_dict({"value": [1, 2]})
+
+    remaining = common.select_remaining_eval_data(data, completed_count=2)
+
+    assert len(remaining) == 0
+
+
 def test_evaluate_refuses_existing_output_without_resume_or_overwrite(
     monkeypatch, tmp_path
 ) -> None:

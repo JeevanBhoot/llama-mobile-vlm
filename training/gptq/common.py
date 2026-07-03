@@ -281,6 +281,10 @@ def select_remaining_eval_data(data: Any, completed_count: int) -> Any:
             f"Existing output has {completed_count} records, but the evaluation "
             f"dataset only has {len(data)} examples"
         )
+    if completed_count == len(data):
+        if hasattr(data, "select"):
+            return data.select([])
+        return data[completed_count:]
     if hasattr(data, "select"):
         return data.select(range(completed_count, len(data)))
     return data[completed_count:]
