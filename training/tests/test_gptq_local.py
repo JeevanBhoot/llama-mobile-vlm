@@ -413,6 +413,79 @@ def test_evaluate_resume_appends_missing_examples(monkeypatch, tmp_path) -> None
     ]
 
 
+def test_evaluate_resume_uses_missing_dataset_ids(monkeypatch, tmp_path) -> None:
+    fake_vqa = fake_vqa_module(
+        evaluate=mock.Mock(return_value=[{"id": 2, "output": "no", "accuracy": 0.0}])
+    )
+
+    class DatasetWithIds:
+        column_names = ["question_id", "question"]
+
+        def __init__(self, rows):
+            self.rows = rows
+
+        def __len__(self):
+            return len(self.rows)
+
+        def __getitem__(self, key):
+            if isinstance(key, str):
+                return [row[key] for row in self.rows]
+            return self.rows[key]
+
+        def select(self, indices):
+            return DatasetWithIds([self.rows[index] for index in indices])
+
+    data = DatasetWithIds(
+        [
+            {"question_id": 1, "question": "done"},
+            {"question_id": 2, "question": "remaining"},
+            {"question_id": 3, "question": "done"},
+        ]
+    )
+    fake_vqa.TASKS["vqa"].data.return_value = data
+    model = mock.Mock()
+    model.eval = mock.Mock()
+    monkeypatch.setattr(
+        local.transformers.MllamaForConditionalGeneration,
+        "from_pretrained",
+        mock.Mock(return_value=model),
+    )
+    monkeypatch.setattr(local.transformers.AutoProcessor, "from_pretrained", mock.Mock())
+    monkeypatch.setattr(local, "vqa", fake_vqa)
+    (tmp_path / "model.safetensors").write_text("weights")
+    output_dir = tmp_path / "eval"
+    output_dir.mkdir()
+    (output_dir / "vqa.jsonl").write_text(
+        "\n".join(
+            [
+                '{"id": 3, "output": "maybe", "accuracy": 1.0}',
+                '{"id": 1, "output": "yes", "accuracy": 1.0}',
+            ]
+        )
+        + "\n"
+    )
+
+    summary = local.evaluate(
+        model_dir=tmp_path,
+        output_dir=output_dir,
+        tasks=["vqa"],
+        n_examples=3,
+        device="cpu",
+        torch_dtype="float32",
+        resume=True,
+    )
+
+    evaluated_data = fake_vqa.evaluate.call_args.kwargs["data"]
+    assert evaluated_data["question_id"] == [2]
+    assert summary["tasks"]["vqa"]["n_examples"] == 3
+    assert summary["tasks"]["vqa"]["accuracy"] == pytest.approx(2 / 3)
+    assert (output_dir / "vqa.jsonl").read_text().splitlines() == [
+        '{"id": 3, "output": "maybe", "accuracy": 1.0}',
+        '{"id": 1, "output": "yes", "accuracy": 1.0}',
+        '{"id": 2, "output": "no", "accuracy": 0.0}',
+    ]
+
+
 def test_evaluate_refuses_existing_output_without_resume_or_overwrite(
     monkeypatch, tmp_path
 ) -> None:

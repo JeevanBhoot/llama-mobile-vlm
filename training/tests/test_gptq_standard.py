@@ -130,9 +130,16 @@ def test_evaluate_writes_outputs(monkeypatch, tmp_path) -> None:
         tasks=["vqa"],
         n_examples=1,
         device="cpu",
+        backend="gptq_torch",
+        dtype="bfloat16",
     )
 
     assert summary["tasks"]["vqa"]["accuracy"] == 1.0
+    gptq_model_cls.load.assert_called_once_with(
+        str(tmp_path),
+        backend="gptq_torch",
+        dtype="bfloat16",
+    )
     qmodel.to.assert_called_once_with("cpu")
     assert (tmp_path / "eval" / "summary.json").exists()
     assert (tmp_path / "eval" / "summary.partial.json").exists()

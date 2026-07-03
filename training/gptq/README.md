@@ -125,6 +125,7 @@ Useful options:
 - `--batch-size`: set evaluation batch size.
 - `--device`: set the evaluation device.
 - `--processor-name`: use a different processor path.
+- `--backend`, `--dtype`: control GPTQModel loading for evaluation.
 - `--resume`: append missing examples to existing JSONL output.
 - `--overwrite`: rerun tasks with existing JSONL output.
 - `--vqa-s3-path`, `--vqa-s3-local-path`: load VQAv2 from an explicit S3 dataset copy.
@@ -199,8 +200,9 @@ python -m gptq.local evaluate \
   --output-dir out/gptq/llama-3.2-vision-local-gptq-int4-c4/evaluation
 ```
 
-Local evaluation uses the same evaluation defaults, outputs,
-and useful options as `gptq.standard evaluate`.
+Local evaluation uses the same evaluation defaults, outputs, resume/overwrite
+behavior, and dataset options as `gptq.standard evaluate`. Use `--torch-dtype`
+to control the dense Hugging Face checkpoint load dtype.
 
 ## Tests
 

@@ -256,6 +256,23 @@ def prepare_jsonl_output(
     return [], "w"
 
 
+def normalise_eval_id(value: Any) -> str:
+    return str(value)
+
+
+def eval_id_column(data: Any) -> str | None:
+    column_names = getattr(data, "column_names", None)
+    if column_names is None:
+        return None
+    for column_name in ("id", "question_id", "questionId"):
+        if column_name in column_names:
+            return column_name
+    raise ValueError(
+        "Could not find an evaluation id column. Expected one of "
+        "'id', 'question_id', or 'questionId'."
+    )
+
+
 def select_remaining_eval_data(data: Any, completed_count: int) -> Any:
     if completed_count <= 0:
         return data
@@ -267,6 +284,52 @@ def select_remaining_eval_data(data: Any, completed_count: int) -> Any:
     if hasattr(data, "select"):
         return data.select(range(completed_count, len(data)))
     return data[completed_count:]
+
+
+def select_eval_data_to_run(
+    data: Any,
+    existing_records: list[dict[str, Any]],
+) -> Any:
+    if not existing_records:
+        return data
+
+    id_column = eval_id_column(data)
+    if id_column is None or any("id" not in record for record in existing_records):
+        return select_remaining_eval_data(data, len(existing_records))
+
+    seen_ids = {normalise_eval_id(record["id"]) for record in existing_records}
+    missing_indices = [
+        idx
+        for idx, id in enumerate(data[id_column])
+        if normalise_eval_id(id) not in seen_ids
+    ]
+    return data.select(missing_indices)
+
+
+def eval_records_for_data(
+    data: Any,
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    id_column = eval_id_column(data)
+    if id_column is None or any("id" not in record for record in records):
+        return records
+
+    records_by_id = {normalise_eval_id(record["id"]): record for record in records}
+    out = []
+    missing_ids = []
+    for id in data[id_column]:
+        key = normalise_eval_id(id)
+        if key in records_by_id:
+            out.append(records_by_id[key])
+        else:
+            missing_ids.append(id)
+
+    if missing_ids:
+        raise ValueError(
+            f"Missing {len(missing_ids)} cached evaluation records; "
+            f"first missing id: {missing_ids[0]!r}"
+        )
+    return out
 
 
 def directory_size(path: Path) -> int:

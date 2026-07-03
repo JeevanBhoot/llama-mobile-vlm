@@ -17,11 +17,12 @@ from gptq.common import (
     DEFAULT_EVAL_DEVICE,
     SUPPORTED_CALIBRATION_SORTS,
     directory_size,
+    eval_records_for_data,
     load_c4_calibration,
     load_eval_data,
     prepare_jsonl_output,
     resolve_eval_device,
-    select_remaining_eval_data,
+    select_eval_data_to_run,
     summarise_results,
     tokenise_calibration,
     write_json,
@@ -305,21 +306,21 @@ def evaluate(
             vqa_s3_path=vqa_s3_path,
             vqa_s3_local_path=vqa_s3_local_path,
         )
-        data = select_remaining_eval_data(data, len(existing_results))
+        data_to_evaluate = select_eval_data_to_run(data, existing_results)
         results = write_jsonl_stream(
             output_path,
             vqa.evaluate(
                 model=model,
                 processor=processor,
                 task_name=task_name,
-                data=data,
+                data=data_to_evaluate,
                 batch_size=batch_size,
                 include_relaxed_metrics=include_relaxed_metrics,
             ),
             existing_records=existing_results,
             mode=output_mode,
         )
-        task_results[task_name] = results
+        task_results[task_name] = eval_records_for_data(data, results)
         partial_summary = summarise_results(
             task_results,
             task_definitions=vqa.TASKS,
