@@ -1,5 +1,6 @@
 # Copyright (c) 2026 Graphcore Ltd. All rights reserved.
 
+import math
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -27,6 +28,15 @@ sys.modules["eval.vqa"] = fake_vqa_module()
 
 import gptq.common as common
 import gptq.local as local
+
+
+def test_default_output_dir_for_int_codebook_includes_sweep_params() -> None:
+    assert local.default_output_dir(
+        4,
+        "int-codebook",
+        codepoints=7,
+        group_size=128,
+    ) == Path("out/gptq/llama-3.2-vision-local-gptq-int-k7-g128-c4")
 
 
 class TinySelfAttention(torch.nn.Module):
@@ -280,6 +290,73 @@ def test_quantize_writes_dense_artifact(monkeypatch, tmp_path) -> None:
     assert storage["estimated_packed_with_g_idx_bytes"] >= storage[
         "estimated_packed_without_g_idx_bytes"
     ]
+    assert (tmp_path / "model.safetensors").exists()
+    assert (tmp_path / "processor_config.json").exists()
+    assert (tmp_path / local.METADATA_FILENAME).exists()
+
+
+def test_quantize_int_codebook_writes_scale_only_metadata(
+    monkeypatch, tmp_path
+) -> None:
+    torch.manual_seed(625464)
+    model = TinyMllama()
+    monkeypatch.setattr(local, "load_model", lambda *_, **__: model)
+    monkeypatch.setattr(
+        local.transformers.AutoProcessor,
+        "from_pretrained",
+        mock.Mock(return_value=DummyProcessor()),
+    )
+    monkeypatch.setattr(local, "load_c4_calibration", lambda **_: ["a", "b"])
+    monkeypatch.setattr(
+        local,
+        "tokenise_calibration",
+        lambda *_, **__: [
+            {"input_ids": torch.tensor([1, 2, 3, 4])},
+            {"input_ids": torch.tensor([4, 3, 2, 1])},
+        ],
+    )
+
+    metadata = local.quantize(
+        model_name="model",
+        output_dir=tmp_path,
+        bits=4,
+        quantization_format="int-codebook",
+        codepoints=6,
+        group_size=4,
+        batch_size=2,
+        calibration_samples=2,
+        calibration_data_min_length=0,
+        device="cpu",
+        torch_dtype="float32",
+        verbose=False,
+    )
+
+    assert metadata["artifact_type"] == "dense_dequantized_local_gptq_int_codebook"
+    assert metadata["format"] == "int-codebook"
+    assert metadata["bits"] is None
+    assert metadata["codepoints"] == 6
+    assert metadata["effective_weight_bits"] == pytest.approx(math.log2(6))
+    assert metadata["quantizer_mode"] == "scale_only_absmax_int_codebook"
+    assert metadata["scale_dtype"] == "bfloat16"
+    assert metadata["n_quantized_modules"] == 14
+
+    first_log = metadata["quantization_log"][0]
+    assert first_log["quantization_format"] == "int-codebook"
+    assert first_log["codepoints"] == 6
+    assert first_log["quantizer_mode"] == "scale_only_absmax_int_codebook"
+    assert "zero_shape" not in first_log
+    assert first_log["g_idx_shape"] == [8]
+
+    storage = metadata["estimated_packed_storage"]
+    assert storage["assumptions"]["quantized_weight_bits"] == pytest.approx(
+        math.log2(6)
+    )
+    expected_scale_values = sum(
+        math.prod(log["scale_shape"]) for log in metadata["quantization_log"]
+    )
+    assert storage["scale_zero_bytes"] == expected_scale_values * 2
+    assert storage["g_idx_bytes"] > 0
+    assert storage["centroid_bytes"] == 0
     assert (tmp_path / "model.safetensors").exists()
     assert (tmp_path / "processor_config.json").exists()
     assert (tmp_path / local.METADATA_FILENAME).exists()

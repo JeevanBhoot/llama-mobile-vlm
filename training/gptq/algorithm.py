@@ -17,8 +17,9 @@ from quant_formats import FMT_CHANNEL_S3D8
 
 @dataclass
 class GPTQConfig:
-    quantization_format: Literal["int", "s3d8"] = "int"
+    quantization_format: Literal["int", "int-codebook", "s3d8"] = "int"
     bits: int = 4
+    codepoints: int | None = None
     group_size: int = 128
     blocksize: int = 128
     damp_percent: float = 0.05
@@ -30,12 +31,26 @@ class GPTQConfig:
     mse: float = 0.0
 
     def __post_init__(self) -> None:
-        if self.quantization_format not in ("int", "s3d8"):
+        if self.quantization_format not in ("int", "int-codebook", "s3d8"):
             raise ValueError(
                 f"Unsupported GPTQ quantization format: {self.quantization_format}"
             )
         if self.quantization_format == "int" and self.bits not in (2, 3, 4, 8):
             raise ValueError(f"Unsupported GPTQ bit width: {self.bits}")
+        if self.quantization_format == "int-codebook":
+            if self.codepoints is None:
+                raise ValueError("int-codebook quantization requires codepoints")
+            if self.codepoints < 2:
+                raise ValueError("codepoints must be at least 2")
+            element_range = Q.IntFormat(
+                math.log2(self.codepoints),
+                mode="asymmetric",
+            ).range
+            if element_range[1] <= 0:
+                raise ValueError(
+                    "int-codebook absmax scaling requires at least one positive "
+                    f"codepoint, got codepoints={self.codepoints}"
+                )
         if self.group_size != -1 and self.group_size <= 0:
             raise ValueError("group_size must be -1 or a positive integer")
         if self.static_groups and self.group_size == -1:
@@ -162,6 +177,56 @@ class UniformAffineQuantizer:
                 best[improved] = err[improved]
                 scale[improved] = scale1[improved]
                 zero[improved] = zero1[improved]
+
+
+class AbsmaxCodebookIntQuantizer:
+    """Scale-only INT codebook quantizer for fractional effective widths."""
+
+    def __init__(
+        self,
+        codepoints: int,
+        scale_format: Q.TensorFormat = Q.BFLOAT16,
+    ):
+        if codepoints < 2:
+            raise ValueError("codepoints must be at least 2")
+        self.codepoints = codepoints
+        self.effective_bits = math.log2(codepoints)
+        self.element_format = Q.IntFormat(self.effective_bits, mode="asymmetric")
+        self.scale_format = scale_format
+        self.levels = torch.tensor(self.element_format.centroids)
+        _, max_level = self.element_format.range
+        self.scale_denominator = float(max_level)
+        if self.scale_denominator <= 0:
+            raise ValueError(
+                "int-codebook absmax scaling requires at least one positive "
+                f"codepoint, got range={self.element_format.range}"
+            )
+        self.scale = torch.empty(0)
+        self.zero = torch.empty(0)
+
+    def copy(self) -> "AbsmaxCodebookIntQuantizer":
+        quantizer = AbsmaxCodebookIntQuantizer(
+            codepoints=self.codepoints,
+            scale_format=self.scale_format,
+        )
+        quantizer.scale = self.scale.clone()
+        quantizer.zero = self.zero.clone()
+        return quantizer
+
+    def find_params(self, weight: Tensor) -> None:
+        x = weight.flatten(1)
+        absmax = x.abs().amax(1)
+        eps = torch.finfo(x.dtype).smallest_normal
+        scale = absmax.div(self.scale_denominator).clamp_min_(eps)
+        scale = self.scale_format.quantise(scale).to(device=x.device, dtype=x.dtype)
+
+        shape = [-1] + [1] * (len(weight.shape) - 1)
+        self.scale = scale.reshape(shape)
+        self.zero = torch.empty(0, device=x.device)
+
+    def quantize(self, x: Tensor) -> Tensor:
+        q = self.element_format.quantise(Q.safe_div(x, self.scale))
+        return (q * self.scale).to(dtype=x.dtype)
 
 
 def _fallback_s3d8_format() -> Q.LinearScalingFormat:
@@ -354,7 +419,7 @@ class GPTQLinearQuantizer:
         start = time.time()
         W = self.weight.clone()
         quantizer = self._new_quantizer()
-        if self.config.quantization_format == "int":
+        if self.config.quantization_format in ("int", "int-codebook"):
             quantizer.find_params(W)
 
         H = self.H
@@ -370,12 +435,16 @@ class GPTQLinearQuantizer:
         now_idx = 1
 
         groups = []
-        if self.config.quantization_format == "int" and self.config.static_groups:
+        if (
+            self.config.quantization_format in ("int", "int-codebook")
+            and self.config.static_groups
+        ):
             for i in range(0, self.columns, self.config.group_size):
                 group_quantizer = self._new_quantizer()
                 group_quantizer.find_params(W[:, i : i + self.config.group_size])
                 scale.append(group_quantizer.scale)
-                zero.append(group_quantizer.zero)
+                if group_quantizer.zero.numel():
+                    zero.append(group_quantizer.zero)
                 groups.append(group_quantizer)
 
         if self.config.desc_act:
@@ -436,7 +505,7 @@ class GPTQLinearQuantizer:
                 d = Hinv1[i, i]
 
                 if (
-                    self.config.quantization_format == "int"
+                    self.config.quantization_format in ("int", "int-codebook")
                     and self.config.group_size != -1
                 ):
                     if not self.config.static_groups:
@@ -447,7 +516,8 @@ class GPTQLinearQuantizer:
 
                         if ((i1 + i) // self.config.group_size) - now_idx == -1:
                             scale.append(quantizer.scale)
-                            zero.append(quantizer.zero)
+                            if quantizer.zero.numel():
+                                zero.append(quantizer.zero)
                             now_idx += 1
                     else:
                         idx = i1 + i
@@ -519,13 +589,29 @@ class GPTQLinearQuantizer:
             scale = [scale[i] for i in inv_global_group_perm] + scale[
                 reordered_group_count:
             ]
-            zero = [zero[i] for i in inv_global_group_perm] + zero[
-                reordered_group_count:
-            ]
+            if zero:
+                zero = [zero[i] for i in inv_global_group_perm] + zero[
+                    reordered_group_count:
+                ]
 
         if not scale:
             scale.append(quantizer.scale)
-            zero.append(quantizer.zero)
+            if quantizer.zero.numel():
+                zero.append(quantizer.zero)
+
+        if self.config.quantization_format == "int-codebook":
+            assert isinstance(quantizer, AbsmaxCodebookIntQuantizer)
+            return QuantizedLinear(
+                weight=Q.reshape_as(self.module.weight).type_as(self.module.weight),
+                scale=torch.cat(scale, dim=1),
+                zero=torch.empty(0, device=Q.device),
+                g_idx=g_idx_tensor,
+                duration=time.time() - start,
+                avg_loss=avg_loss,
+                damp_percent=damp_percent,
+                quantization_format="int-codebook",
+                effective_bits=quantizer.effective_bits,
+            )
 
         return QuantizedLinear(
             weight=Q.reshape_as(self.module.weight).type_as(self.module.weight),
@@ -537,9 +623,14 @@ class GPTQLinearQuantizer:
             damp_percent=damp_percent,
         )
 
-    def _new_quantizer(self) -> UniformAffineQuantizer | S3D8Quantizer:
+    def _new_quantizer(
+        self,
+    ) -> UniformAffineQuantizer | AbsmaxCodebookIntQuantizer | S3D8Quantizer:
         if self.config.quantization_format == "s3d8":
             return S3D8Quantizer()
+        if self.config.quantization_format == "int-codebook":
+            assert self.config.codepoints is not None
+            return AbsmaxCodebookIntQuantizer(codepoints=self.config.codepoints)
         return UniformAffineQuantizer(
             bits=self.config.bits,
             sym=self.config.sym,

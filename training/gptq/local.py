@@ -49,7 +49,7 @@ DEFAULT_GROUP_SIZE = 128
 DEFAULT_TORCH_DTYPE = "bfloat16"
 DEFAULT_TASKS = ("vqa", "chartqa", "docvqa", "ai2d")
 SUPPORTED_BITS = (3, 4)
-SUPPORTED_FORMATS = ("int", "s3d8")
+SUPPORTED_FORMATS = ("int", "int-codebook", "s3d8")
 METADATA_FILENAME = "metadata.json"
 DEFAULT_STORAGE_SCALE_ZERO_DTYPE = "bfloat16"
 S3D8_CHECKPOINT_FILENAME = "gptq-s3d8.safetensors"
@@ -90,9 +90,21 @@ class TextLayerStack:
     cross_attention_layers: frozenset[int]
 
 
-def default_output_dir(bits: int, quantization_format: str = "int") -> Path:
+def default_output_dir(
+    bits: int,
+    quantization_format: str = "int",
+    codepoints: int | None = None,
+    group_size: int = DEFAULT_GROUP_SIZE,
+) -> Path:
     if quantization_format == "s3d8":
         return Path("out/gptq/llama-3.2-vision-local-gptq-s3d8-c4")
+    if quantization_format == "int-codebook":
+        if codepoints is None:
+            raise ValueError("int-codebook output directories require codepoints")
+        return Path(
+            "out/gptq/"
+            f"llama-3.2-vision-local-gptq-int-k{codepoints}-g{group_size}-c4"
+        )
     return Path(f"out/gptq/llama-3.2-vision-local-gptq-int{bits}-c4")
 
 
@@ -364,6 +376,14 @@ def _quantize_subset(
                     "g_idx_shape": list(result.g_idx.shape),
                 }
             )
+        elif result.quantization_format == "int-codebook":
+            log.update(
+                {
+                    "codepoints": config.codepoints,
+                    "quantizer_mode": "scale_only_absmax_int_codebook",
+                    "g_idx_shape": list(result.g_idx.shape),
+                }
+            )
         elif result.quantization_format == "s3d8":
             log.update(
                 {
@@ -531,6 +551,10 @@ def estimate_packed_storage(
             packed_weight_bytes += (packed_rows // 3) * packed_cols
             centroid_bytes += math.prod(log["centroid_shape"])
             scale_zero_values = math.prod(log["scale_shape"])
+        elif quantization_format == "int-codebook":
+            packed_weight_bytes += math.ceil(n_values * bits / 8)
+            scale_zero_values = math.prod(log["scale_shape"])
+            g_idx_bytes += math.prod(log["g_idx_shape"]) * 4
         else:
             packed_weight_bytes += math.ceil(n_values * bits / 8)
             scale_zero_values = math.prod(log["scale_shape"]) + math.prod(
@@ -564,7 +588,11 @@ def estimate_packed_storage(
             "packed_weight_padding": (
                 "S3D8 rows padded to multiple of 3 and columns to multiple of 16"
                 if quantization_format == "s3d8"
-                else "rounded up to whole bytes per tensor"
+                else (
+                    "ideal fractional code packing rounded up to whole bytes per tensor"
+                    if quantization_format == "int-codebook"
+                    else "rounded up to whole bytes per tensor"
+                )
             ),
         },
         "dense_state_dict_bytes": dense_state_dict_bytes,
@@ -669,6 +697,7 @@ def quantize(
     output_dir: Path,
     bits: int,
     quantization_format: str = "int",
+    codepoints: int | None = None,
     group_size: int = DEFAULT_GROUP_SIZE,
     batch_size: int = 1,
     calibration_samples: int = DEFAULT_CALIBRATION_SAMPLES,
@@ -698,6 +727,22 @@ def quantize(
         )
     if quantization_format == "int" and bits not in SUPPORTED_BITS:
         raise ValueError(f"Unsupported bits={bits}, expected one of {SUPPORTED_BITS}")
+    if quantization_format == "int-codebook":
+        if codepoints is None:
+            raise ValueError("format='int-codebook' requires codepoints")
+        if codepoints < 2:
+            raise ValueError(f"codepoints must be >= 2, got {codepoints}")
+        element_range = Q.IntFormat(
+            math.log2(codepoints),
+            mode="asymmetric",
+        ).range
+        if element_range[1] <= 0:
+            raise ValueError(
+                "format='int-codebook' requires at least one positive codepoint "
+                f"for absmax scaling, got codepoints={codepoints}"
+            )
+    elif codepoints is not None:
+        raise ValueError("--codepoints is only supported with format='int-codebook'")
     if batch_size < 1:
         raise ValueError(f"batch_size must be >= 1, got {batch_size}")
     if calibration_sort not in SUPPORTED_CALIBRATION_SORTS:
@@ -755,6 +800,7 @@ def quantize(
     config = GPTQConfig(
         quantization_format=quantization_format,
         bits=bits,
+        codepoints=codepoints,
         group_size=group_size,
         blocksize=blocksize,
         damp_percent=damp_percent,
@@ -870,7 +916,13 @@ def quantize(
     if hasattr(tokenizer, "save_pretrained"):
         tokenizer.save_pretrained(output_dir)
 
-    effective_weight_bits = bits if quantization_format == "int" else 8 / 3
+    if quantization_format == "int":
+        effective_weight_bits = float(bits)
+    elif quantization_format == "int-codebook":
+        assert codepoints is not None
+        effective_weight_bits = math.log2(codepoints)
+    else:
+        effective_weight_bits = 8 / 3
     packed_storage = estimate_packed_storage(
         model,
         layer_logs=layer_logs,
@@ -898,14 +950,21 @@ def quantize(
     metadata = {
         "model_name": model_name,
         "output_dir": str(output_dir),
-        "artifact_type": (
-            "dense_dequantized_local_gptq_s3d8"
-            if quantization_format == "s3d8"
-            else "dense_dequantized_local_gptq"
-        ),
+        "artifact_type": {
+            "int": "dense_dequantized_local_gptq",
+            "int-codebook": "dense_dequantized_local_gptq_int_codebook",
+            "s3d8": "dense_dequantized_local_gptq_s3d8",
+        }[quantization_format],
         "format": quantization_format,
         "bits": bits if quantization_format == "int" else None,
+        "codepoints": codepoints if quantization_format == "int-codebook" else None,
         "effective_weight_bits": effective_weight_bits,
+        "quantizer_mode": (
+            "scale_only_absmax_int_codebook"
+            if quantization_format == "int-codebook"
+            else None
+        ),
+        "scale_dtype": storage_scale_zero_dtype,
         "quantized_checkpoint_path": (
             str(quantized_checkpoint_path) if quantized_checkpoint_path else None
         ),
@@ -1062,7 +1121,13 @@ def _add_gptq_args(parser: argparse.ArgumentParser) -> None:
         default="int",
         help="Weight format used inside local GPTQ",
     )
-    parser.add_argument("--bits", type=int, choices=SUPPORTED_BITS, default=4)
+    parser.add_argument("--bits", type=int, choices=SUPPORTED_BITS, default=None)
+    parser.add_argument(
+        "--codepoints",
+        type=int,
+        default=None,
+        help="Number of INT codepoints for --format int-codebook",
+    )
     parser.add_argument("--group-size", type=int, default=DEFAULT_GROUP_SIZE)
     parser.add_argument("--blocksize", type=int, default=128)
     parser.add_argument("--damp-percent", type=float, default=0.05)
@@ -1175,12 +1240,30 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     if args.command == "quantize":
-        output_dir = args.output_dir or default_output_dir(args.bits, args.format)
+        if args.format == "int-codebook":
+            if args.bits is not None:
+                parser.error("--bits cannot be used with --format int-codebook")
+            if args.codepoints is None:
+                parser.error("--codepoints is required with --format int-codebook")
+            bits = 4
+        else:
+            if args.codepoints is not None:
+                parser.error(
+                    "--codepoints can only be used with --format int-codebook"
+                )
+            bits = args.bits if args.bits is not None else 4
+        output_dir = args.output_dir or default_output_dir(
+            bits,
+            args.format,
+            codepoints=args.codepoints,
+            group_size=args.group_size,
+        )
         metadata = quantize(
             model_name=args.model_name,
             output_dir=output_dir,
-            bits=args.bits,
+            bits=bits,
             quantization_format=args.format,
+            codepoints=args.codepoints,
             group_size=args.group_size,
             batch_size=args.batch_size,
             calibration_samples=args.calibration_samples,

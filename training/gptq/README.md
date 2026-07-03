@@ -165,6 +165,38 @@ S3D8 mode uses S3D8 inside the GPTQ column update and also writes
 `gptq-s3d8.safetensors`, which can be passed to `squashedtensors.py
 --checkpoint`.
 
+Fractional-width INT codebook:
+
+```sh
+python -m gptq.local quantize \
+  --format int-codebook \
+  --codepoints 7 \
+  --group-size 128 \
+  --output-dir out/gptq/llama-3.2-vision-local-gptq-int-k7-g128-c4
+```
+
+`int-codebook` is local-only and uses scale-only absmax quantization with an
+arbitrary number of integer codepoints. Its effective weight width is
+`log2(codepoints)`, so `--codepoints 6` gives 2.585 bits and `--codepoints 7`
+gives 2.807 bits, bracketing S3D8's 2.667 bits. Even codepoint counts use an
+asymmetric integer grid that still includes zero, for example `K=6` uses
+`[-3, -2, -1, 0, 1, 2]`; `K=16` uses `[-8, ..., 7]` and the absmax scale
+denominator is `7`.
+
+Manual fractional INT sweep:
+
+```sh
+for k in 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+  for g in 32 64 128; do
+    python -m gptq.local quantize \
+      --format int-codebook \
+      --codepoints "$k" \
+      --group-size "$g" \
+      --output-dir "out/gptq/local-int-k${k}-g${g}"
+  done
+done
+```
+
 Quantize a different model:
 
 ```sh
@@ -184,7 +216,8 @@ Local GPTQ uses the same calibration defaults as `gptq.standard`:
 
 Local GPTQ-specific defaults:
 
-- Bits: `3` or `4`
+- Bits: `3` or `4` for affine INT; arbitrary valid `--codepoints` for local
+  `int-codebook` (`4` to `16` is the intended sweep range)
 - Group size: `128`
 - Block size: `128`
 - Activation order: disabled
