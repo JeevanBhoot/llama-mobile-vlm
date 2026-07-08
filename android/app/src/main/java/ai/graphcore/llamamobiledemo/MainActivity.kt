@@ -82,6 +82,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -197,6 +199,7 @@ fun MainScreen(
     prefillProgress: Double?,
     prefillTime: Double?,
     generationRate: Double?,
+    generating: Boolean,
     modifier: Modifier = Modifier,
     onModelSelected: (Model) -> Unit = {},
     onSelectImage: () -> Unit = {},
@@ -206,6 +209,7 @@ fun MainScreen(
     onDownloadModel: () -> Unit = {},
     onDeleteModel: () -> Unit = {},
     onShowAbout: () -> Unit = {},
+    onStopGeneration: () -> Unit = {},
     onSubmitPrompt: (String) -> Unit = {}
 ) {
     Surface(modifier = modifier, color = MaterialTheme.colorScheme.surface) {
@@ -223,8 +227,10 @@ fun MainScreen(
                 val focusManager = LocalFocusManager.current
                 val textStyle = MaterialTheme.typography.bodyLarge
                 val submitPrompt = {
-                    focusManager.clearFocus()
-                    onSubmitPrompt(prompt)
+                    if (ready && !generating) {
+                        focusManager.clearFocus()
+                        onSubmitPrompt(prompt)
+                    }
                 }
 
                 // ### Output
@@ -341,20 +347,38 @@ fun MainScreen(
                             .heightIn(max = 160.dp),
                     )
                     IconButton(
-                        onClick = { submitPrompt() },
-                        enabled = ready,
+                        onClick = {
+                            if (generating) {
+                                onStopGeneration()
+                            } else {
+                                submitPrompt()
+                            }
+                        },
+                        enabled = generating || ready,
                         modifier = Modifier
                             .padding(start = 8.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.Send,
-                            contentDescription = "Send",
-                            tint = if (ready) {
-                                MaterialTheme.colorScheme.onSurface
-                            } else {
-                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                            .semantics {
+                                contentDescription = if (generating) "Stop" else "Send"
                             }
-                        )
+                    ) {
+                        val tint = if (generating || ready) {
+                            MaterialTheme.colorScheme.onSurface
+                        } else {
+                            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                        }
+                        if (generating) {
+                            Box(
+                                modifier = Modifier
+                                    .size(14.dp)
+                                    .background(tint)
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Send,
+                                contentDescription = null,
+                                tint = tint
+                            )
+                        }
                     }
                 }
                 Spacer(Modifier.height(8.dp))
@@ -797,6 +821,7 @@ class MainActivity : ComponentActivity() {
         var cameraActive by mutableStateOf(false)
         var showAbout by mutableStateOf(false)
         var loadingModel by mutableStateOf<Model?>(null)
+        var generating by mutableStateOf(false)
 
         Worker.setListener { event ->
             when (event) {
@@ -810,6 +835,16 @@ class MainActivity : ComponentActivity() {
                     prefillProgress = null
                     prefillTime = null
                     generationRate = null
+                    generating = false
+                }
+
+                Worker.Event.GenerationStarted -> {
+                    generating = true
+                    outputIsError = false
+                }
+
+                Worker.Event.GenerationFinished -> {
+                    generating = false
                 }
 
                 is Worker.Event.Progress -> {
@@ -837,6 +872,7 @@ class MainActivity : ComponentActivity() {
                     prefillProgress = null
                     prefillTime = null
                     generationRate = null
+                    generating = false
                 }
             }
         }
@@ -937,6 +973,7 @@ class MainActivity : ComponentActivity() {
                         prefillProgress = prefillProgress,
                         prefillTime = prefillTime,
                         generationRate = generationRate,
+                        generating = generating,
                         modifier = Modifier.fillMaxSize(),
                         onModelSelected = { model: Model ->
                             cameraActive = false
@@ -992,6 +1029,9 @@ class MainActivity : ComponentActivity() {
                             cameraActive = false
                             showAbout = true
                         },
+                        onStopGeneration = {
+                            Worker.send(Worker.Command.Stop)
+                        },
                         onSubmitPrompt = { prompt ->
                             val image = selectedImage.takeIf { selectedModel.supportsImage }
                             Worker.send(
@@ -1026,6 +1066,7 @@ fun Preview() {
             prefillProgress = null,
             prefillTime = 0.5,
             generationRate = null,
+            generating = false,
             modifier = Modifier.fillMaxSize(),
         )
     }

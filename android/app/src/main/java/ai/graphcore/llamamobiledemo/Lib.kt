@@ -156,10 +156,13 @@ object Worker {
             val prompt: String,
             val image: Image? = null
         ) : Command
+        object Stop : Command
     }
 
     interface Event {
         data class Loaded(val model: Model) : Event
+        object GenerationStarted : Event
+        object GenerationFinished : Event
         data class Progress(val phase: ProgressPhase, val progress: Double?) : Event
         data class Response(
             val text: String,
@@ -176,8 +179,8 @@ object Worker {
 
     fun send(command: Command) {
         lock.withLock {
-            // Always preempt, but generate must not preempt Load
-            if (!(command is Command.Generate && nextCommand is Command.Load)) {
+            // Always preempt, but don't preempt a queued Load with a non-Load command.
+            if (!(command !is Command.Load && nextCommand is Command.Load)) {
                 nextCommand = command
                 hasCommand.signal()
             }
@@ -215,51 +218,62 @@ object Worker {
                 }
 
                 is Command.Generate -> {
-                    // Prefill
-                    val timer = TimeSource.Monotonic
-                    val tStart = timer.markNow()
-                    val parts = withProgress(ProgressPhase.Prefill) {
-                        generator.prefill(
-                            command.prompt,
-                            imageWidth = command.image?.width ?: 0,
-                            imageHeight = command.image?.height ?: 0,
-                            imageArgb = command.image?.argb,
-                            maxGeneratedTokens = Settings.maxGeneratedTokens,
-                            temperature = Settings.temperature,
-                            topK = Settings.topK,
-                            topP = Settings.topP
-                        )
-                    }
-                    var response = parts.last()
-                    val tPrefill = timer.markNow()
-                    val prefillTime = (tPrefill - tStart).toDouble(DurationUnit.SECONDS)
-                    onEvent(
-                        Event.Response(
-                            text = response,
-                            prompt = command.prompt,
-                            prefillTime = prefillTime,
-                            generationRate = null
-                        )
-                    )
+                    onEvent(Event.GenerationStarted)
+                    try {
+                        // Prefill
+                        val timer = TimeSource.Monotonic
+                        val tStart = timer.markNow()
+                        val parts = withProgress(ProgressPhase.Prefill) {
+                            generator.prefill(
+                                command.prompt,
+                                imageWidth = command.image?.width ?: 0,
+                                imageHeight = command.image?.height ?: 0,
+                                imageArgb = command.image?.argb,
+                                maxGeneratedTokens = Settings.maxGeneratedTokens,
+                                temperature = Settings.temperature,
+                                topK = Settings.topK,
+                                topP = Settings.topP
+                            )
+                        }
+                        if (nextCommand != null) return
 
-                    // Generation
-                    for (i in 1..Settings.maxGeneratedTokens) {
-                        if (nextCommand != null) return;  // Interrupt generation
-                        val token = generator.generate()
-                        if (token.isEmpty()) break
-                        response += token
-                        val tGenerate = timer.markNow()
-                        val generationRate =
-                            i / (tGenerate - tPrefill).toDouble(DurationUnit.SECONDS)
+                        var response = parts.last()
+                        val tPrefill = timer.markNow()
+                        val prefillTime = (tPrefill - tStart).toDouble(DurationUnit.SECONDS)
                         onEvent(
                             Event.Response(
                                 text = response,
                                 prompt = command.prompt,
                                 prefillTime = prefillTime,
-                                generationRate = generationRate
+                                generationRate = null
                             )
                         )
+
+                        // Generation
+                        for (i in 1..Settings.maxGeneratedTokens) {
+                            if (nextCommand != null) return  // Interrupt generation
+                            val token = generator.generate()
+                            if (token.isEmpty()) break
+                            response += token
+                            val tGenerate = timer.markNow()
+                            val generationRate =
+                                i / (tGenerate - tPrefill).toDouble(DurationUnit.SECONDS)
+                            onEvent(
+                                Event.Response(
+                                    text = response,
+                                    prompt = command.prompt,
+                                    prefillTime = prefillTime,
+                                    generationRate = generationRate
+                                )
+                            )
+                        }
+                    } finally {
+                        onEvent(Event.GenerationFinished)
                     }
+                }
+
+                Command.Stop -> {
+                    onEvent(Event.GenerationFinished)
                 }
             }
         } catch (error: Throwable) {
