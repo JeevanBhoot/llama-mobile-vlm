@@ -13,6 +13,7 @@ import android.graphics.ImageDecoder
 import android.net.Uri
 import android.os.Bundle
 import android.util.Size
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -822,6 +823,7 @@ class MainActivity : ComponentActivity() {
         var showAbout by mutableStateOf(false)
         var loadingModel by mutableStateOf<Model?>(null)
         var generating by mutableStateOf(false)
+        var shownImagePrefillWarning by mutableStateOf(false)
 
         Worker.setListener { event ->
             when (event) {
@@ -1034,6 +1036,14 @@ class MainActivity : ComponentActivity() {
                         },
                         onSubmitPrompt = { prompt ->
                             val image = selectedImage.takeIf { selectedModel.supportsImage }
+                            if (image != null && !shownImagePrefillWarning) {
+                                shownImagePrefillWarning = true
+                                Toast.makeText(
+                                    context,
+                                    "Image prefill is slow. Android will likely kill the app if you switch away.",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
                             Worker.send(
                                 Worker.Command.Generate(
                                     prompt = prompt,
