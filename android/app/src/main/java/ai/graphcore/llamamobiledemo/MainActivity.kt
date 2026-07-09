@@ -210,6 +210,7 @@ fun MainScreen(
     onTakePhoto: () -> Unit = {},
     onCaptureCameraImage: (Bitmap) -> Unit = {},
     onClearImage: () -> Unit = {},
+    onClearOutput: () -> Unit = {},
     onDownloadModel: () -> Unit = {},
     onDeleteModel: () -> Unit = {},
     onShowAbout: () -> Unit = {},
@@ -245,6 +246,16 @@ fun MainScreen(
                     enabled = ready,
                     minLines = 3,
                     label = { Text("Output") },
+                    trailingIcon = {
+                        if (output.isNotEmpty()) {
+                            IconButton(onClick = onClearOutput) {
+                                Icon(
+                                    imageVector = Icons.Filled.Clear,
+                                    contentDescription = "Clear output"
+                                )
+                            }
+                        }
+                    },
                     textStyle = when {
                         outputIsError -> textStyle.copy(color = MaterialTheme.colorScheme.error)
                         promptForOutput != prompt -> textStyle.copy(color = Color.Gray)
@@ -1120,6 +1131,13 @@ class MainActivity : ComponentActivity() {
                             selectedImage = null
                             cameraActive = false
                             clearImagePrefillState()
+                        },
+                        onClearOutput = {
+                            output = ""
+                            outputIsError = false
+                            promptForOutput = ""
+                            prefillTime = null
+                            generationRate = null
                         },
                         onDownloadModel = {
                             modelStore.startDownload(selectedModel)
