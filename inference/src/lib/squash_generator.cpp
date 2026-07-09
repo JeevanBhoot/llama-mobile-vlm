@@ -334,10 +334,30 @@ Generator::Options Generator::Options::greedy(uint maxGeneratedTokens) {
 
 Generator::Generator(Model& model) : model(model) {}
 
-std::vector<std::string> Generator::prefill(const std::string& prefix,
-                                            const std::optional<Image>& image,
-                                            const Options& options,
-                                            const ProgressCallback& progressCallback) {
+void Generator::prefillImage(const Image& image, const ProgressCallback& progressCallback) {
+    if (!model.visionModel) {
+        std::ostringstream err;
+        err << "Passed an image to " << model.source << ", which does not support vision input";
+        throw std::runtime_error(err.str());
+    }
+
+    auto progressSteps = model.visionModel->dLayers0;
+    progressSteps += model.visionModel->dLayers1;
+    progressSteps += uint(model.textModel.crossAttentionLayers.size());
+    ProgressTracker progress(progressSteps, progressCallback);
+
+    auto imageOut = forwardImage(*this, preprocess(*model.visionModel, image), progress);
+    crossAttentionCache = prepareCrossAttentionCache(model.textModel, imageOut, progress);
+}
+
+void Generator::clearImagePrefill() {
+    crossAttentionCache.reset();
+    crossAttentionStart = std::nullopt;
+}
+
+std::vector<std::string> Generator::prefillText(const std::string& prefix,
+                                                const Options& options,
+                                                const ProgressCallback& progressCallback) {
     // Set generation state
     this->options = options;
     if (options.seed.has_value()) {
@@ -347,33 +367,11 @@ std::vector<std::string> Generator::prefill(const std::string& prefix,
         this->rng.seed(d());
     }
 
-    // Handle image
-    if (image) {
-        if (!model.visionModel) {
-            std::ostringstream err;
-            err << "Passed an image to " << model.source << ", which does not support vision input";
-            throw std::runtime_error(err.str());
-        }
-    }
-
-    auto progressSteps = model.textModel.dLayers;
-    if (image) {
-        progressSteps += model.visionModel->dLayers0;
-        progressSteps += model.visionModel->dLayers1;
-        progressSteps += uint(model.textModel.crossAttentionLayers.size());
-    }
-    ProgressTracker progress(progressSteps, progressCallback);
-
-    // Handle image
-    if (image) {
-        auto imageOut = forwardImage(*this, preprocess(*model.visionModel, *image), progress);
-        crossAttentionCache = prepareCrossAttentionCache(model.textModel, imageOut, progress);
-    } else {
-        crossAttentionCache.reset();
-    }
+    auto hasImage = crossAttentionCache.has_value();
+    ProgressTracker progress(model.textModel.dLayers, progressCallback);
 
     // Handle text
-    auto tokens = buildPromptTokens(model.textModel, prefix, image.has_value());
+    auto tokens = buildPromptTokens(model.textModel, prefix, hasImage);
     if (model.textModel.imageID) {
         auto imageToken = std::find(tokens.begin(), tokens.end(), *model.textModel.imageID);
         crossAttentionStart =
@@ -396,6 +394,18 @@ std::vector<std::string> Generator::prefill(const std::string& prefix,
     std::transform(outputTokens.begin(), outputTokens.end(), std::back_inserter(stringTokens),
                    [&](uint t) { return model.textModel.tokenizer.decode({t}); });
     return stringTokens;
+}
+
+std::vector<std::string> Generator::prefill(const std::string& prefix,
+                                            const std::optional<Image>& image,
+                                            const Options& options,
+                                            const ProgressCallback& progressCallback) {
+    if (image) {
+        prefillImage(*image, progressCallback);
+    } else {
+        clearImagePrefill();
+    }
+    return prefillText(prefix, options, progressCallback);
 }
 
 std::string Generator::generate() {

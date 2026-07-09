@@ -98,12 +98,13 @@ import kotlinx.coroutines.delay
 private const val MAX_IMAGE_PREVIEW_SIZE = 560
 
 data class SelectedImage(
+    val id: Long,
     val image: Image,
     val preview: Bitmap,
     val label: String
 )
 
-fun selectedImageFromUri(context: Context, uri: Uri): SelectedImage {
+fun selectedImageFromUri(context: Context, uri: Uri, id: Long): SelectedImage {
     val source = ImageDecoder.createSource(context.contentResolver, uri)
     val bitmap = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
         decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE)
@@ -115,10 +116,10 @@ fun selectedImageFromUri(context: Context, uri: Uri): SelectedImage {
             decoder.setTargetSize(size.first, size.second)
         }
     }
-    return selectedImageFromBitmap(bitmap, uri.lastPathSegment ?: "Selected image")
+    return selectedImageFromBitmap(bitmap, uri.lastPathSegment ?: "Selected image", id)
 }
 
-fun selectedImageFromBitmap(bitmap: Bitmap, label: String): SelectedImage {
+fun selectedImageFromBitmap(bitmap: Bitmap, label: String, id: Long): SelectedImage {
     val scaledBitmap = resizeBitmapToFit(bitmap, MAX_IMAGE_PREVIEW_SIZE)
     val argbBitmap = compactArgb8888Bitmap(scaledBitmap)
     if (argbBitmap !== scaledBitmap) scaledBitmap.recycle()
@@ -132,6 +133,7 @@ fun selectedImageFromBitmap(bitmap: Bitmap, label: String): SelectedImage {
     argbBitmap.copyPixelsToBuffer(argb.asIntBuffer())
     argb.rewind()
     return SelectedImage(
+        id = id,
         image = Image(
             width = argbBitmap.width,
             height = argbBitmap.height,
@@ -197,6 +199,7 @@ fun MainScreen(
     outputIsError: Boolean,
     promptForOutput: String,
     loadingProgress: Double?,
+    imagePrefillProgress: Double?,
     prefillProgress: Double?,
     prefillTime: Double?,
     generationRate: Double?,
@@ -290,6 +293,11 @@ fun MainScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(if (visibleImage != null || visibleCameraActive) 240.dp else 120.dp)
+                )
+                ProgressBar(
+                    label = "Image prefill",
+                    progress = imagePrefillProgress,
+                    modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(Modifier.height(8.dp))
 
@@ -816,6 +824,7 @@ class MainActivity : ComponentActivity() {
         var outputIsError by mutableStateOf(false)
         var promptForOutput by mutableStateOf("")
         var loadingProgress by mutableStateOf<Double?>(null)
+        var imagePrefillProgress by mutableStateOf<Double?>(null)
         var prefillProgress by mutableStateOf<Double?>(null)
         var prefillTime by mutableStateOf<Double?>(null)
         var generationRate by mutableStateOf<Double?>(null)
@@ -824,6 +833,9 @@ class MainActivity : ComponentActivity() {
         var loadingModel by mutableStateOf<Model?>(null)
         var generating by mutableStateOf(false)
         var shownImagePrefillWarning by mutableStateOf(false)
+        var requestedImageId by mutableStateOf(0L)
+        var imagePrefillingId by mutableStateOf<Long?>(null)
+        var prefetchedImageId by mutableStateOf<Long?>(null)
 
         Worker.setListener { event ->
             when (event) {
@@ -834,10 +846,29 @@ class MainActivity : ComponentActivity() {
                     outputIsError = false
                     promptForOutput = ""
                     loadingProgress = null
+                    imagePrefillProgress = null
                     prefillProgress = null
                     prefillTime = null
                     generationRate = null
                     generating = false
+                    imagePrefillingId = null
+                    prefetchedImageId = null
+                }
+
+                is Worker.Event.ImagePrefillStarted -> {
+                    if (selectedImage?.id == event.imageId) {
+                        imagePrefillingId = event.imageId
+                        prefetchedImageId = null
+                        imagePrefillProgress = 0.0
+                    }
+                }
+
+                is Worker.Event.ImagePrefillFinished -> {
+                    if (selectedImage?.id == event.imageId) {
+                        imagePrefillingId = null
+                        prefetchedImageId = event.imageId
+                        imagePrefillProgress = null
+                    }
                 }
 
                 Worker.Event.GenerationStarted -> {
@@ -852,6 +883,11 @@ class MainActivity : ComponentActivity() {
                 is Worker.Event.Progress -> {
                     when (event.phase) {
                         ProgressPhase.Loading -> loadingProgress = event.progress
+                        ProgressPhase.ImagePrefill -> {
+                            if (selectedImage?.id == event.imageId) {
+                                imagePrefillProgress = event.progress
+                            }
+                        }
                         ProgressPhase.Prefill -> prefillProgress = event.progress
                     }
                 }
@@ -871,10 +907,13 @@ class MainActivity : ComponentActivity() {
                     outputIsError = true
                     promptForOutput = ""
                     loadingProgress = null
+                    imagePrefillProgress = null
                     prefillProgress = null
                     prefillTime = null
                     generationRate = null
                     generating = false
+                    imagePrefillingId = null
+                    prefetchedImageId = null
                 }
             }
         }
@@ -911,6 +950,37 @@ class MainActivity : ComponentActivity() {
                 Worker.send(Worker.Command.Load(model, modelStore.pathFor(model)))
             }
 
+            fun warnAboutImagePrefillOnce() {
+                if (selectedModel == Model.Dummy) return
+                if (!shownImagePrefillWarning) {
+                    shownImagePrefillWarning = true
+                    Toast.makeText(
+                        context,
+                        "Image prefill is slow. Android will likely kill the app if you switch away.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+
+            fun enqueueImagePrefill(image: SelectedImage) {
+                if (!selectedModel.supportsImage) return
+                if (loadedModel != selectedModel || loadingModel != null) return
+                if (imagePrefillingId == image.id || prefetchedImageId == image.id) return
+
+                warnAboutImagePrefillOnce()
+                imagePrefillingId = image.id
+                prefetchedImageId = null
+                imagePrefillProgress = 0.0
+                Worker.send(Worker.Command.PrefillImage(image.id, image.image))
+            }
+
+            fun clearImagePrefillState() {
+                imagePrefillingId = null
+                prefetchedImageId = null
+                imagePrefillProgress = null
+                Worker.send(Worker.Command.ClearImagePrefill)
+            }
+
             LaunchedEffect(modelStore) {
                 var previousStates = modelDownloadStates
                 while (true) {
@@ -930,11 +1000,29 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            LaunchedEffect(selectedImage?.id, selectedModel, loadedModel, loadingModel) {
+                val image = selectedImage
+                if (image != null && selectedModel.supportsImage) {
+                    enqueueImagePrefill(image)
+                } else {
+                    imagePrefillingId = null
+                    prefetchedImageId = null
+                    imagePrefillProgress = null
+                }
+            }
+
             fun loadSelectedImage(uri: Uri) {
+                val imageId = requestedImageId + 1
+                requestedImageId = imageId
                 thread {
-                    val image = selectedImageFromUri(context.applicationContext, uri)
+                    val image = selectedImageFromUri(context.applicationContext, uri, imageId)
                     runOnUiThread {
-                        selectedImage = image
+                        if (requestedImageId == imageId) {
+                            selectedImage = image
+                            imagePrefillingId = null
+                            prefetchedImageId = null
+                            imagePrefillProgress = null
+                        }
                     }
                 }
             }
@@ -950,6 +1038,9 @@ class MainActivity : ComponentActivity() {
                 ActivityResultContracts.RequestPermission()
             ) { granted ->
                 if (granted) {
+                    requestedImageId += 1
+                    selectedImage = null
+                    clearImagePrefillState()
                     cameraActive = true
                 }
             }
@@ -972,6 +1063,7 @@ class MainActivity : ComponentActivity() {
                         outputIsError = outputIsError,
                         promptForOutput = promptForOutput,
                         loadingProgress = loadingProgress,
+                        imagePrefillProgress = imagePrefillProgress,
                         prefillProgress = prefillProgress,
                         prefillTime = prefillTime,
                         generationRate = generationRate,
@@ -980,6 +1072,7 @@ class MainActivity : ComponentActivity() {
                         onModelSelected = { model: Model ->
                             cameraActive = false
                             selectedModel = model
+                            clearImagePrefillState()
                             val states = refreshDownloads()
                             val state = states[model] ?: ModelDownloadState.Missing
                             if (modelIsLoadable(model, state)) {
@@ -998,24 +1091,35 @@ class MainActivity : ComponentActivity() {
                                     Manifest.permission.CAMERA
                                 ) == PackageManager.PERMISSION_GRANTED
                             ) {
+                                requestedImageId += 1
                                 selectedImage = null
+                                clearImagePrefillState()
                                 cameraActive = true
                             } else {
                                 cameraPermission.launch(Manifest.permission.CAMERA)
                             }
                         },
                         onCaptureCameraImage = { bitmap ->
+                            val imageId = requestedImageId + 1
+                            requestedImageId = imageId
                             thread {
-                                val image = selectedImageFromBitmap(bitmap, "Camera image")
+                                val image = selectedImageFromBitmap(bitmap, "Camera image", imageId)
                                 runOnUiThread {
-                                    selectedImage = image
-                                    cameraActive = false
+                                    if (requestedImageId == imageId) {
+                                        selectedImage = image
+                                        imagePrefillingId = null
+                                        prefetchedImageId = null
+                                        imagePrefillProgress = null
+                                        cameraActive = false
+                                    }
                                 }
                             }
                         },
                         onClearImage = {
+                            requestedImageId += 1
                             selectedImage = null
                             cameraActive = false
+                            clearImagePrefillState()
                         },
                         onDownloadModel = {
                             modelStore.startDownload(selectedModel)
@@ -1025,6 +1129,7 @@ class MainActivity : ComponentActivity() {
                             modelStore.delete(selectedModel)
                             refreshDownloads()
                             selectedModel = Model.Dummy
+                            clearImagePrefillState()
                             loadModel(Model.Dummy)
                         },
                         onShowAbout = {
@@ -1036,17 +1141,13 @@ class MainActivity : ComponentActivity() {
                         },
                         onSubmitPrompt = { prompt ->
                             val image = selectedImage.takeIf { selectedModel.supportsImage }
-                            if (image != null && !shownImagePrefillWarning) {
-                                shownImagePrefillWarning = true
-                                Toast.makeText(
-                                    context,
-                                    "Image prefill is slow. Android will likely kill the app if you switch away.",
-                                    Toast.LENGTH_LONG
-                                ).show()
+                            if (image != null && prefetchedImageId != image.id) {
+                                warnAboutImagePrefillOnce()
                             }
                             Worker.send(
                                 Worker.Command.Generate(
                                     prompt = prompt,
+                                    imageId = image?.id,
                                     image = image?.image
                                 )
                             )
@@ -1073,6 +1174,7 @@ fun Preview() {
             outputIsError = false,
             promptForOutput = "",
             loadingProgress = null,
+            imagePrefillProgress = null,
             prefillProgress = null,
             prefillTime = 0.5,
             generationRate = null,

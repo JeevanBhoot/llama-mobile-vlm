@@ -5,6 +5,7 @@ package ai.graphcore.llamamobiledemo
 import android.os.Handler
 import android.os.Looper
 import java.nio.ByteBuffer
+import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.thread
@@ -51,6 +52,7 @@ object Settings {
 
 enum class ProgressPhase {
     Loading,
+    ImagePrefill,
     Prefill
 }
 
@@ -58,11 +60,14 @@ interface Generator {
     fun load(path: String)
     fun unload()
     fun progress(): Double?
-    fun prefill(
-        prefix: String,
+    fun prefillImage(
         imageWidth: Int,
         imageHeight: Int,
-        imageArgb: ByteBuffer?,
+        imageArgb: ByteBuffer
+    )
+    fun clearImagePrefill()
+    fun prefillText(
+        prefix: String,
         maxGeneratedTokens: Int,
         temperature: Double,
         topK: Int,
@@ -76,11 +81,14 @@ object Lib : Generator {
     external override fun load(path: String)
     external override fun unload()
     external override fun progress(): Double?
-    external override fun prefill(
-        prefix: String,
+    external override fun prefillImage(
         imageWidth: Int,
         imageHeight: Int,
-        imageArgb: ByteBuffer?,
+        imageArgb: ByteBuffer
+    )
+    external override fun clearImagePrefill()
+    external override fun prefillText(
+        prefix: String,
         maxGeneratedTokens: Int,
         temperature: Double,
         topK: Int,
@@ -97,6 +105,7 @@ object DummyGenerator : Generator {
     private var nextToken = 0
     @Volatile
     private var currentProgress: Double? = null
+    private var imageDescription: String? = null
     private val tokens = listOf(
         "Response: ", "I'm ", "a ", "dummy", "model", ", ",
         "I ", "have ", "no ", "wise ", "words", "."
@@ -105,14 +114,26 @@ object DummyGenerator : Generator {
     override fun load(path: String) {
         simulateProgress(5, 20)
     }
-    override fun unload() { }
+    override fun unload() {
+        imageDescription = null
+    }
     override fun progress(): Double? = currentProgress
 
-    override fun prefill(
-        prefix: String,
+    override fun prefillImage(
         imageWidth: Int,
         imageHeight: Int,
-        imageArgb: ByteBuffer?,
+        imageArgb: ByteBuffer
+    ) {
+        simulateProgress(5, 50)
+        imageDescription = "${imageWidth}x$imageHeight RGB"
+    }
+
+    override fun clearImagePrefill() {
+        imageDescription = null
+    }
+
+    override fun prefillText(
+        prefix: String,
         maxGeneratedTokens: Int,
         temperature: Double,
         topK: Int,
@@ -123,13 +144,7 @@ object DummyGenerator : Generator {
         }
         simulateProgress(5, 50)
         nextToken = 0
-        val hasImage = imageArgb != null && imageWidth > 0 && imageHeight > 0
-        val imageDescription = if (hasImage) {
-            "${imageWidth}x$imageHeight RGB"
-        } else {
-            "None"
-        }
-        return arrayOf(prefix, "Prompt: \"$prefix\"\nImage: $imageDescription\n")
+        return arrayOf(prefix, "Prompt: \"$prefix\"\nImage: ${imageDescription ?: "None"}\n")
     }
     override fun generate(): String {
         Thread.sleep(100)
@@ -150,20 +165,29 @@ object DummyGenerator : Generator {
 }
 
 object Worker {
-    interface Command {
+    sealed interface Command {
         data class Load(val model: Model, val path: String) : Command
+        data class PrefillImage(val imageId: Long, val image: Image) : Command
+        object ClearImagePrefill : Command
         data class Generate(
             val prompt: String,
+            val imageId: Long? = null,
             val image: Image? = null
         ) : Command
         object Stop : Command
     }
 
-    interface Event {
+    sealed interface Event {
         data class Loaded(val model: Model) : Event
+        data class ImagePrefillStarted(val imageId: Long) : Event
+        data class ImagePrefillFinished(val imageId: Long) : Event
         object GenerationStarted : Event
         object GenerationFinished : Event
-        data class Progress(val phase: ProgressPhase, val progress: Double?) : Event
+        data class Progress(
+            val phase: ProgressPhase,
+            val progress: Double?,
+            val imageId: Long?
+        ) : Event
         data class Response(
             val text: String,
             val prompt: String,
@@ -179,11 +203,37 @@ object Worker {
 
     fun send(command: Command) {
         lock.withLock {
-            // Always preempt, but don't preempt a queued Load with a non-Load command.
-            if (!(command !is Command.Load && nextCommand is Command.Load)) {
-                nextCommand = command
-                hasCommand.signal()
+            when (command) {
+                is Command.Load -> {
+                    commands.clear()
+                    commands.add(command)
+                }
+                Command.Stop -> {
+                    commands.removeIf { it !is Command.Load }
+                    commands.add(command)
+                }
+                is Command.PrefillImage -> {
+                    commands.removeIf {
+                        it is Command.PrefillImage ||
+                            it is Command.Generate ||
+                            it is Command.ClearImagePrefill
+                    }
+                    commands.add(command)
+                }
+                Command.ClearImagePrefill -> {
+                    commands.removeIf {
+                        it is Command.PrefillImage ||
+                            it is Command.Generate ||
+                            it is Command.ClearImagePrefill
+                    }
+                    commands.add(command)
+                }
+                is Command.Generate -> {
+                    commands.removeIf { it is Command.Generate || it is Command.Stop }
+                    commands.add(command)
+                }
             }
+            hasCommand.signal()
         }
     }
 
@@ -191,14 +241,96 @@ object Worker {
     private val hasCommand = lock.newCondition()
     private val mainLooper = Handler(Looper.getMainLooper())
     @Volatile
-    private var nextCommand: Command? = null
-    @Volatile
     private var commandListener: (Event) -> Unit = {}
+    private val commands = ArrayDeque<Command>()
     private var generator: Generator = DummyGenerator
+    private var cachedImageId: Long? = null
 
     private fun onEvent(event: Event) {
         mainLooper.post {
             commandListener(event)
+        }
+    }
+
+    private fun shouldInterruptGeneration(): Boolean {
+        return lock.withLock { commands.isNotEmpty() }
+    }
+
+    private fun prefillImage(imageId: Long, image: Image) {
+        onEvent(Event.ImagePrefillStarted(imageId))
+        cachedImageId = null
+        try {
+            withProgress(ProgressPhase.ImagePrefill, imageId) {
+                generator.prefillImage(
+                    imageWidth = image.width,
+                    imageHeight = image.height,
+                    imageArgb = image.argb
+                )
+            }
+            cachedImageId = imageId
+        } finally {
+            onEvent(Event.ImagePrefillFinished(imageId))
+        }
+    }
+
+    private fun generate(command: Command.Generate) {
+        try {
+            if (command.imageId != null && cachedImageId != command.imageId) {
+                val image = command.image
+                    ?: throw RuntimeException("Image prefill has not completed")
+                prefillImage(command.imageId, image)
+            }
+            if (command.imageId == null && cachedImageId != null) {
+                cachedImageId = null
+                generator.clearImagePrefill()
+            }
+            if (shouldInterruptGeneration()) return
+
+            onEvent(Event.GenerationStarted)
+            val timer = TimeSource.Monotonic
+            val tStart = timer.markNow()
+            val parts = withProgress(ProgressPhase.Prefill) {
+                generator.prefillText(
+                    command.prompt,
+                    maxGeneratedTokens = Settings.maxGeneratedTokens,
+                    temperature = Settings.temperature,
+                    topK = Settings.topK,
+                    topP = Settings.topP
+                )
+            }
+            if (shouldInterruptGeneration()) return
+
+            var response = parts.last()
+            val tPrefill = timer.markNow()
+            val prefillTime = (tPrefill - tStart).toDouble(DurationUnit.SECONDS)
+            onEvent(
+                Event.Response(
+                    text = response,
+                    prompt = command.prompt,
+                    prefillTime = prefillTime,
+                    generationRate = null
+                )
+            )
+
+            for (i in 1..Settings.maxGeneratedTokens) {
+                if (shouldInterruptGeneration()) return
+                val token = generator.generate()
+                if (token.isEmpty()) break
+                response += token
+                val tGenerate = timer.markNow()
+                val generationRate =
+                    i / (tGenerate - tPrefill).toDouble(DurationUnit.SECONDS)
+                onEvent(
+                    Event.Response(
+                        text = response,
+                        prompt = command.prompt,
+                        prefillTime = prefillTime,
+                        generationRate = generationRate
+                    )
+                )
+            }
+        } finally {
+            onEvent(Event.GenerationFinished)
         }
     }
 
@@ -211,70 +343,27 @@ object Worker {
                         generator.unload()
                         generator = nextGenerator
                     }
+                    cachedImageId = null
                     withProgress(ProgressPhase.Loading) {
                         generator.load(command.path)
                     }
                     onEvent(Event.Loaded(command.model))
                 }
 
+                is Command.PrefillImage -> {
+                    prefillImage(command.imageId, command.image)
+                }
+
+                Command.ClearImagePrefill -> {
+                    cachedImageId = null
+                    generator.clearImagePrefill()
+                }
+
                 is Command.Generate -> {
-                    onEvent(Event.GenerationStarted)
-                    try {
-                        // Prefill
-                        val timer = TimeSource.Monotonic
-                        val tStart = timer.markNow()
-                        val parts = withProgress(ProgressPhase.Prefill) {
-                            generator.prefill(
-                                command.prompt,
-                                imageWidth = command.image?.width ?: 0,
-                                imageHeight = command.image?.height ?: 0,
-                                imageArgb = command.image?.argb,
-                                maxGeneratedTokens = Settings.maxGeneratedTokens,
-                                temperature = Settings.temperature,
-                                topK = Settings.topK,
-                                topP = Settings.topP
-                            )
-                        }
-                        if (nextCommand != null) return
-
-                        var response = parts.last()
-                        val tPrefill = timer.markNow()
-                        val prefillTime = (tPrefill - tStart).toDouble(DurationUnit.SECONDS)
-                        onEvent(
-                            Event.Response(
-                                text = response,
-                                prompt = command.prompt,
-                                prefillTime = prefillTime,
-                                generationRate = null
-                            )
-                        )
-
-                        // Generation
-                        for (i in 1..Settings.maxGeneratedTokens) {
-                            if (nextCommand != null) return  // Interrupt generation
-                            val token = generator.generate()
-                            if (token.isEmpty()) break
-                            response += token
-                            val tGenerate = timer.markNow()
-                            val generationRate =
-                                i / (tGenerate - tPrefill).toDouble(DurationUnit.SECONDS)
-                            onEvent(
-                                Event.Response(
-                                    text = response,
-                                    prompt = command.prompt,
-                                    prefillTime = prefillTime,
-                                    generationRate = generationRate
-                                )
-                            )
-                        }
-                    } finally {
-                        onEvent(Event.GenerationFinished)
-                    }
+                    generate(command)
                 }
 
-                Command.Stop -> {
-                    onEvent(Event.GenerationFinished)
-                }
+                Command.Stop -> {}
             }
         } catch (error: Throwable) {
             if (command is Command.Load) {
@@ -289,7 +378,11 @@ object Worker {
         }
     }
 
-    private fun <T> withProgress(phase: ProgressPhase, block: () -> T): T {
+    private fun <T> withProgress(
+        phase: ProgressPhase,
+        imageId: Long? = null,
+        block: () -> T
+    ): T {
         val running = AtomicBoolean(true)
         val poller = thread {
             var lastProgress: Double? = null
@@ -297,7 +390,7 @@ object Worker {
                 val progress = generator.progress()
                 if (progress != null && progress != lastProgress) {
                     lastProgress = progress
-                    onEvent(Event.Progress(phase, progress))
+                    onEvent(Event.Progress(phase, progress, imageId))
                 }
                 Thread.sleep(100)
             }
@@ -307,7 +400,7 @@ object Worker {
         } finally {
             running.set(false)
             poller.join()
-            onEvent(Event.Progress(phase, null))
+            onEvent(Event.Progress(phase, null, imageId))
         }
     }
 
@@ -316,12 +409,10 @@ object Worker {
             while (true) {
                 // Wait for the next command
                 val command = lock.withLock {
-                    while (nextCommand == null) {
+                    while (commands.isEmpty()) {
                         hasCommand.await()
                     }
-                    val command = nextCommand!!
-                    nextCommand = null
-                    command
+                    commands.removeFirst()
                 }
                 // Don't do this while holding the lock!
                 handleCommand(command)

@@ -208,6 +208,11 @@ struct Generator {
     uint prevToken;
 
     explicit Generator(Model&);
+    void prefillImage(const Image& image, const ProgressCallback& progress = {});
+    void clearImagePrefill();
+    std::vector<std::string> prefillText(const std::string& prefix,
+                                         const Options& options,
+                                         const ProgressCallback& progress = {});
     std::vector<std::string> prefill(const std::string& prefix,
                                      const std::optional<Image>& image,
                                      const Options& options,

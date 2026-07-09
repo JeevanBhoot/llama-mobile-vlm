@@ -52,13 +52,10 @@ struct StringHolder {
     ~StringHolder() { env->ReleaseStringUTFChars(jdata, data); }
 };
 
-std::optional<squash::Image> imageFromDirectBuffer(JNIEnv* env,
-                                                   jint imageWidth,
-                                                   jint imageHeight,
-                                                   jobject imageData) {
-    if (imageData == nullptr) {
-        return std::nullopt;
-    }
+squash::Image imageFromDirectBuffer(JNIEnv* env,
+                                    jint imageWidth,
+                                    jint imageHeight,
+                                    jobject imageData) {
     if (imageWidth <= 0 || imageHeight <= 0) {
         throw std::runtime_error("Image width and height must be positive when image data is set");
     }
@@ -131,31 +128,57 @@ Java_ai_graphcore_llamamobiledemo_Lib_progress(JNIEnv* env, jobject /*this*/) {
     return env->NewObject(doubleClass, constructor, static_cast<jdouble>(*current));
 }
 
+extern "C" JNIEXPORT void JNICALL  //
+Java_ai_graphcore_llamamobiledemo_Lib_prefillImage(JNIEnv* env,
+                                                   jobject /*this*/,
+                                                   jint imageWidth,
+                                                   jint imageHeight,
+                                                   jobject _imageData) {
+    errorGuard<void>(env, [&] {
+        ProgressScope _progressScope;
+        if (!session) {
+            throw std::runtime_error("No model loaded");
+        }
+        if (_imageData == nullptr) {
+            throw std::runtime_error("Image data is required");
+        }
+        auto image = imageFromDirectBuffer(env, imageWidth, imageHeight, _imageData);
+        session->generator.prefillImage(image, [](double value) { progress.set(value); });
+    });
+}
+
+extern "C" JNIEXPORT void JNICALL  //
+Java_ai_graphcore_llamamobiledemo_Lib_clearImagePrefill(JNIEnv* env, jobject /*this*/) {
+    errorGuard<void>(env, [&] {
+        if (!session) {
+            throw std::runtime_error("No model loaded");
+        }
+        session->generator.clearImagePrefill();
+    });
+}
+
 extern "C" JNIEXPORT jobjectArray JNICALL  //
-Java_ai_graphcore_llamamobiledemo_Lib_prefill(JNIEnv* env,
-                                            jobject /*this*/,
-                                            jstring _prefix,
-                                            jint imageWidth,
-                                            jint imageHeight,
-                                            jobject _imageData,
-                                            jint maxGeneratedTokens,
-                                            jdouble temperature,
-                                            jint topK,
-                                            jdouble topP) {
+Java_ai_graphcore_llamamobiledemo_Lib_prefillText(JNIEnv* env,
+                                                jobject /*this*/,
+                                                jstring _prefix,
+                                                jint maxGeneratedTokens,
+                                                jdouble temperature,
+                                                jint topK,
+                                                jdouble topP) {
     return errorGuard<jobjectArray>(env, [&] {
         ProgressScope _progressScope;
         StringHolder prefix(env, _prefix);
         if (!session) {
             throw std::runtime_error("No model loaded");
         }
-        auto image = imageFromDirectBuffer(env, imageWidth, imageHeight, _imageData);
-        auto tokens = session->generator.prefill(prefix.data, std::move(image),
-                                                 {.maxGeneratedTokens = uint(maxGeneratedTokens),
-                                                  .seed = std::nullopt,
-                                                  .temperature = float(temperature),
-                                                  .topK = uint(topK),
-                                                  .topP = float(topP)},
-                                                 [](double value) { progress.set(value); });
+        auto tokens = session->generator.prefillText(prefix.data,
+                                                     {.maxGeneratedTokens =
+                                                          uint(maxGeneratedTokens),
+                                                      .seed = std::nullopt,
+                                                      .temperature = float(temperature),
+                                                      .topK = uint(topK),
+                                                      .topP = float(topP)},
+                                                     [](double value) { progress.set(value); });
         auto jarray =
             env->NewObjectArray(jsize(tokens.size()), env->FindClass("java/lang/String"), nullptr);
         for (auto i = 0u; i < tokens.size(); ++i) {
