@@ -4,9 +4,10 @@
 
 import argparse
 import dataclasses
+import itertools
 import math
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -56,6 +57,7 @@ SUPPORTED_CALIBRATION_SOURCES = ("c4", "vqav2", "synthetic", "eval-task")
 METADATA_FILENAME = "metadata.json"
 DEFAULT_STORAGE_SCALE_ZERO_DTYPE = "bfloat16"
 S3D8_CHECKPOINT_FILENAME = "gptq-s3d8.safetensors"
+VISION_ATTENTION_MASK_CACHE_SIZE = 8
 VQAV2_PROTOTYPE_WARNING = (
     "VQAv2 calibration overlaps an evaluation task and is intended only for "
     "full-multimodal GPTQ prototyping; use synthetic calibration for reportable "
@@ -74,6 +76,13 @@ TEXT_CROSS_TARGET_MODULE_GROUPS = (
     ("cross_attn.o_proj",),
     ("mlp.gate_proj", "mlp.up_proj"),
     ("mlp.down_proj",),
+)
+TEXT_SELF_IGNORED_KWARGS = frozenset(
+    {
+        "cross_attention_states",
+        "cross_attention_mask",
+        "full_text_row_masked_out_mask",
+    }
 )
 VISION_TARGET_MODULE_GROUPS = (
     ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"),
@@ -103,6 +112,19 @@ class LayerInputs:
         return len(self.args)
 
 
+def _iter_layer_inputs(
+    inputs: LayerInputs | Iterable[tuple[list[Any], dict[str, Any]]],
+) -> Iterable[tuple[list[Any], dict[str, Any]]]:
+    if isinstance(inputs, LayerInputs):
+        return zip(inputs.args, inputs.kwargs)
+    return iter(inputs)
+
+
+def _clear_layer_inputs(inputs: LayerInputs) -> None:
+    inputs.args.clear()
+    inputs.kwargs.clear()
+
+
 @dataclass(frozen=True)
 class TextLayerStack:
     prefix: str
@@ -128,8 +150,57 @@ class VisionBatchContext:
     num_padding_patches: int
     dim: int
     aspect_ratio_ids: torch.Tensor
-    attention_mask: torch.Tensor
-    source_batch: dict[str, Any]
+    attention_mask: "DeferredVisionAttentionMask"
+
+
+@dataclass
+class DeferredVisionAttentionMask:
+    """Compact inputs for an Mllama vision mask that is expensive to retain."""
+
+    aspect_ratio_mask: torch.Tensor
+    num_patches: int
+    target_length: int
+    dtype: torch.dtype
+
+    def to(self, device: torch.device | str) -> torch.Tensor:
+        resolved_device = torch.device(device)
+        if resolved_device.type == "cuda" and resolved_device.index is None:
+            resolved_device = torch.device("cuda", torch.cuda.current_device())
+        mask_values = tuple(
+            self.aspect_ratio_mask.detach().reshape(-1).to("cpu").tolist()
+        )
+        key = (
+            tuple(self.aspect_ratio_mask.shape),
+            mask_values,
+            self.num_patches,
+            self.target_length,
+            self.dtype,
+            resolved_device,
+        )
+        cached = _VISION_ATTENTION_MASK_CACHE.get(key)
+        if cached is not None:
+            _VISION_ATTENTION_MASK_CACHE.move_to_end(key)
+            return cached
+
+        attention_mask = _prepare_aspect_ratio_attention_mask(
+            aspect_ratio_mask=self.aspect_ratio_mask.to(resolved_device),
+            num_patches=self.num_patches,
+            target_length=self.target_length,
+            dtype=self.dtype,
+        )
+        _VISION_ATTENTION_MASK_CACHE[key] = attention_mask
+        while len(_VISION_ATTENTION_MASK_CACHE) > VISION_ATTENTION_MASK_CACHE_SIZE:
+            _VISION_ATTENTION_MASK_CACHE.popitem(last=False)
+        return attention_mask
+
+
+_VISION_ATTENTION_MASK_CACHE: OrderedDict[tuple[Any, ...], torch.Tensor] = (
+    OrderedDict()
+)
+
+
+def clear_vision_attention_mask_cache() -> None:
+    _VISION_ATTENTION_MASK_CACHE.clear()
 
 
 def default_output_dir(
@@ -137,17 +208,23 @@ def default_output_dir(
     quantization_format: str = "int",
     codepoints: int | None = None,
     group_size: int = DEFAULT_GROUP_SIZE,
+    target_scope: str = "text-self",
+    calibration_source: str | None = None,
 ) -> Path:
+    source = calibration_source or (
+        "vqav2" if target_scope == "full-multimodal" else "c4"
+    )
+    suffix = f"-{source}-full" if target_scope == "full-multimodal" else "-c4"
     if quantization_format == "s3d8":
-        return Path("out/gptq/llama-3.2-vision-local-gptq-s3d8-c4")
+        return Path(f"out/gptq/llama-3.2-vision-local-gptq-s3d8{suffix}")
     if quantization_format == "int-codebook":
         if codepoints is None:
             raise ValueError("int-codebook output directories require codepoints")
         return Path(
             "out/gptq/"
-            f"llama-3.2-vision-local-gptq-int-k{codepoints}-g{group_size}-c4"
+            f"llama-3.2-vision-local-gptq-int-k{codepoints}-g{group_size}{suffix}"
         )
-    return Path(f"out/gptq/llama-3.2-vision-local-gptq-int{bits}-c4")
+    return Path(f"out/gptq/llama-3.2-vision-local-gptq-int{bits}{suffix}")
 
 
 def format_duration(seconds: float) -> str:
@@ -161,6 +238,8 @@ def format_duration(seconds: float) -> str:
 
 
 def _move_to_device(x: Any, device: torch.device | str) -> Any:
+    if isinstance(x, DeferredVisionAttentionMask):
+        return x.to(device)
     if torch.is_tensor(x):
         return x.to(device)
     if isinstance(x, dict):
@@ -173,6 +252,13 @@ def _move_to_device(x: Any, device: torch.device | str) -> Any:
 
 
 def _detach_to_device(x: Any, device: torch.device | str) -> Any:
+    if isinstance(x, DeferredVisionAttentionMask):
+        return DeferredVisionAttentionMask(
+            aspect_ratio_mask=x.aspect_ratio_mask.detach().to(device),
+            num_patches=x.num_patches,
+            target_length=x.target_length,
+            dtype=x.dtype,
+        )
     if torch.is_tensor(x):
         return x.detach().to(device)
     if isinstance(x, dict):
@@ -373,11 +459,8 @@ def _dataset_batches(data: Any, batch_size: int) -> Iterable[dict[str, Any]]:
         yield from data_iter(batch_size)
         return
 
-    rows = list(data)
-    for start in range(0, len(rows), batch_size):
-        chunk = rows[start : start + batch_size]
-        if not chunk:
-            continue
+    rows = iter(data)
+    while chunk := list(itertools.islice(rows, batch_size)):
         if isinstance(chunk[0], dict):
             yield {key: [row[key] for row in chunk] for key in chunk[0]}
         else:
@@ -393,6 +476,19 @@ def _processor_batch_to_plain_dict(batch: Any) -> dict[str, Any]:
     if isinstance(data, dict):
         return dict(data)
     return dict(batch)
+
+
+def _count_calibration_examples(batches: Iterable[dict[str, Any]]) -> int:
+    total = 0
+    for batch in batches:
+        input_ids = batch.get("input_ids")
+        if torch.is_tensor(input_ids) and input_ids.ndim > 0:
+            total += int(input_ids.shape[0])
+        elif input_ids is not None:
+            total += len(input_ids)
+        else:
+            raise ValueError("Calibration batch is missing input_ids")
+    return total
 
 
 def load_vqav2_calibration_batches(
@@ -476,15 +572,9 @@ def load_synthetic_calibration_batches(
     from train_data import Dataset
 
     dataset = Dataset(paths, n_examples=[None] * len(paths))
-    datums = []
-    for datum in dataset.get_datums():
-        datums.append(datum)
-        if len(datums) >= n_samples:
-            break
-
     batches = []
-    for start in range(0, len(datums), batch_size):
-        batch = datums[start : start + batch_size]
+    datums = itertools.islice(dataset.get_datums(), n_samples)
+    while batch := list(itertools.islice(datums, batch_size)):
         encoded = processor(
             [[datum.image] for datum in batch],
             [datum.out.replace("<|begin_of_text|>", "") for datum in batch],
@@ -502,9 +592,14 @@ def _run_layer(
     args: list[Any],
     kwargs: dict[str, Any],
     device: str,
+    ignored_kwargs: frozenset[str] = frozenset(),
 ) -> Any:
     args = [_move_to_device(arg, device) for arg in args]
-    kwargs = {k: _move_to_device(v, device) for k, v in kwargs.items()}
+    kwargs = {
+        k: _move_to_device(v, device)
+        for k, v in kwargs.items()
+        if k not in ignored_kwargs
+    }
     return layer(*args, **kwargs)
 
 
@@ -572,6 +667,7 @@ def _quantize_subset(
     inputs: LayerInputs,
     config: GPTQConfig,
     device: str,
+    ignored_kwargs: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     quantizers = {
         name: GPTQLinearQuantizer(module=module, config=config)
@@ -588,15 +684,21 @@ def _quantize_subset(
     try:
         with torch.inference_mode():
             for args, kwargs in zip(inputs.args, inputs.kwargs):
-                _run_layer(layer, args, kwargs, device)
+                _run_layer(
+                    layer,
+                    args,
+                    kwargs,
+                    device,
+                    ignored_kwargs=ignored_kwargs,
+                )
     finally:
         for handle in handles:
             handle.remove()
 
     logs = []
     for name, module in subset.items():
-        result = quantizers[name].quantize()
-        module.weight.data = result.weight.to(module.weight.device).clone()
+        result = quantizers.pop(name).quantize()
+        module.weight.data.copy_(result.weight.to(module.weight.device))
         logs.append(_quantized_linear_log(name, module, result, config))
 
     return logs
@@ -651,7 +753,7 @@ def _quantized_linear_log(
 def quantize_standalone_linear(
     full_name: str,
     module: torch.nn.Linear,
-    inputs: LayerInputs,
+    inputs: LayerInputs | Iterable[tuple[list[Any], dict[str, Any]]],
     config: GPTQConfig,
     device: str,
     verbose: bool = True,
@@ -660,13 +762,11 @@ def quantize_standalone_linear(
         print(f"[{full_name}]: quantizing standalone Linear", flush=True)
     quantizer = GPTQLinearQuantizer(module=module, config=config)
     with torch.inference_mode():
-        for args, kwargs in zip(inputs.args, inputs.kwargs):
+        for args, _ in _iter_layer_inputs(inputs):
             args = [_move_to_device(arg, device) for arg in args]
-            kwargs = {k: _move_to_device(v, device) for k, v in kwargs.items()}
             quantizer.add_batch(args[0].data)
-            module(*args, **kwargs)
     result = quantizer.quantize()
-    module.weight.data = result.weight.to(module.weight.device).clone()
+    module.weight.data.copy_(result.weight.to(module.weight.device))
     log = _quantized_linear_log(full_name.rsplit(".", 1)[-1], module, result, config)
     log["full_name"] = full_name
     if verbose:
@@ -738,6 +838,7 @@ def quantize_layer_groups(
     module_groups: tuple[tuple[str, ...], ...],
     progress_name: str | None = None,
     verbose: bool = True,
+    ignored_kwargs: frozenset[str] = frozenset(),
 ) -> tuple[LayerInputs, list[dict[str, Any]]]:
     validate_module_groups(
         layer,
@@ -761,7 +862,14 @@ def quantize_layer_groups(
                     flush=True,
                 )
             group_start = time.perf_counter()
-            group_logs = _quantize_subset(layer, subset, inputs, config, device)
+            group_logs = _quantize_subset(
+                layer,
+                subset,
+                inputs,
+                config,
+                device,
+                ignored_kwargs=ignored_kwargs,
+            )
             if verbose and progress_name is not None:
                 for log in group_logs:
                     print(
@@ -782,7 +890,13 @@ def quantize_layer_groups(
     next_kwargs = []
     with torch.inference_mode():
         for args, kwargs in zip(inputs.args, inputs.kwargs):
-            output = _run_layer(layer, args, kwargs, device)
+            output = _run_layer(
+                layer,
+                args,
+                kwargs,
+                device,
+                ignored_kwargs=ignored_kwargs,
+            )
             if isinstance(output, (tuple, list)):
                 output = output[0]
             hidden_states = _detach_to_device(output, "cpu")
@@ -884,6 +998,7 @@ def collect_vision_transformer_inputs(
     device: str,
     calibration_gpu_cache: bool = False,
 ) -> tuple[LayerInputs, list[VisionBatchContext]]:
+    clear_vision_attention_mask_cache()
     storage_device = device if calibration_gpu_cache else "cpu"
     cached_args = []
     cached_kwargs = []
@@ -892,10 +1007,9 @@ def collect_vision_transformer_inputs(
     vision_model.eval()
     with torch.inference_mode():
         for batch in calibration_batches:
-            batch = _move_to_device(batch, device)
-            pixel_values = batch["pixel_values"]
-            aspect_ratio_ids = batch["aspect_ratio_ids"]
-            aspect_ratio_mask = batch["aspect_ratio_mask"]
+            pixel_values = _move_to_device(batch["pixel_values"], device)
+            aspect_ratio_ids = _move_to_device(batch["aspect_ratio_ids"], device)
+            aspect_ratio_mask = _move_to_device(batch["aspect_ratio_mask"], device)
             (
                 batch_size,
                 num_concurrent_media,
@@ -957,12 +1071,15 @@ def collect_vision_transformer_inputs(
                 mode="constant",
                 value=0,
             )
-            attention_mask = aspect_ratio_mask.reshape(
+            compact_attention_mask = aspect_ratio_mask.reshape(
                 batch_size * num_concurrent_media,
                 -1,
             )
-            attention_mask = _prepare_aspect_ratio_attention_mask(
-                aspect_ratio_mask=attention_mask,
+            attention_mask = DeferredVisionAttentionMask(
+                aspect_ratio_mask=_detach_to_device(
+                    compact_attention_mask,
+                    storage_device,
+                ),
                 num_patches=getattr(vision_model, "num_patches", num_patches),
                 target_length=hidden_state.shape[2],
                 dtype=_module_dtype(vision_model, hidden_state.dtype),
@@ -974,9 +1091,7 @@ def collect_vision_transformer_inputs(
             )
 
             cached_args.append([_detach_to_device(hidden_state, storage_device)])
-            cached_kwargs.append(
-                {"attention_mask": _detach_to_device(attention_mask, storage_device)}
-            )
+            cached_kwargs.append({"attention_mask": attention_mask})
             contexts.append(
                 VisionBatchContext(
                     batch_size=batch_size,
@@ -989,8 +1104,7 @@ def collect_vision_transformer_inputs(
                         aspect_ratio_ids,
                         storage_device,
                     ),
-                    attention_mask=_detach_to_device(attention_mask, storage_device),
-                    source_batch=_detach_to_device(batch, storage_device),
+                    attention_mask=attention_mask,
                 )
             )
     return LayerInputs(cached_args, cached_kwargs), contexts
@@ -1017,6 +1131,7 @@ def quantize_layer_sequence(
         )
         if verbose:
             print(f"{progress_name}: start", flush=True)
+        previous_inputs = inputs
         inputs, layer_logs = quantize_layer_groups(
             layer,
             inputs,
@@ -1026,6 +1141,8 @@ def quantize_layer_sequence(
             progress_name=progress_name,
             verbose=verbose,
         )
+        if layer_index == 0 or layer_index - 1 not in capture_after_layers:
+            _clear_layer_inputs(previous_inputs)
         for log in layer_logs:
             log["layer"] = layer_index
             log["full_name"] = f"{prefix}.{layer_index}.{log['module']}"
@@ -1145,9 +1262,51 @@ def build_projector_inputs(
     return LayerInputs(next_args, next_kwargs)
 
 
+def iter_projector_inputs(
+    global_outputs: LayerInputs,
+    local_captures: dict[int, LayerInputs],
+    contexts: list[VisionBatchContext],
+    intermediate_layers_indices: Iterable[int],
+    device: str,
+    consume: bool = False,
+) -> Iterable[tuple[list[Any], dict[str, Any]]]:
+    """Build one projector input at a time instead of retaining the full cache."""
+
+    intermediate_layers_indices = tuple(intermediate_layers_indices)
+    with torch.inference_mode():
+        for batch_index, context in enumerate(contexts):
+            hidden_state = _remove_vision_padding(
+                _move_to_device(global_outputs.args[batch_index][0], device),
+                context,
+            )
+            intermediate_states = [
+                _move_to_device(
+                    local_captures[layer_index].args[batch_index][0],
+                    device,
+                )
+                for layer_index in intermediate_layers_indices
+            ]
+            if intermediate_states:
+                intermediate_hidden_states = _remove_vision_padding(
+                    torch.stack(intermediate_states, dim=-1),
+                    context,
+                )
+                hidden_state = torch.cat(
+                    [hidden_state, intermediate_hidden_states],
+                    dim=-1,
+                )
+            yield [hidden_state], {}
+            if consume:
+                global_outputs.args[batch_index].clear()
+                global_outputs.kwargs[batch_index].clear()
+                for layer_index in intermediate_layers_indices:
+                    local_captures[layer_index].args[batch_index].clear()
+                    local_captures[layer_index].kwargs[batch_index].clear()
+
+
 def run_projector(
     projector: torch.nn.Linear,
-    projector_inputs: LayerInputs,
+    projector_inputs: LayerInputs | Iterable[tuple[list[Any], dict[str, Any]]],
     hidden_size: int,
     device: str,
     calibration_gpu_cache: bool = False,
@@ -1155,7 +1314,7 @@ def run_projector(
     storage_device = device if calibration_gpu_cache else "cpu"
     states = []
     with torch.inference_mode():
-        for args, kwargs in zip(projector_inputs.args, projector_inputs.kwargs):
+        for args, kwargs in _iter_layer_inputs(projector_inputs):
             args = [_move_to_device(arg, device) for arg in args]
             kwargs = {k: _move_to_device(v, device) for k, v in kwargs.items()}
             projected = projector(*args, **kwargs)
@@ -1182,7 +1341,6 @@ def collect_multimodal_text_first_layer_inputs(
     with torch.inference_mode():
         for batch, cross_states in zip(calibration_batches, cross_attention_states):
             batch = _move_to_device(batch, device)
-            cross_states = _move_to_device(cross_states, device)
             input_ids = batch["input_ids"]
             attention_mask = batch.get("attention_mask")
             position_ids = batch.get("position_ids")
@@ -1294,13 +1452,16 @@ def build_lm_head_inputs(
 def load_model(
     model_name_or_path: str, dtype: torch.dtype, device: str
 ) -> torch.nn.Module:
-    model = transformers.MllamaForConditionalGeneration.from_pretrained(
-        model_name_or_path,
-        torch_dtype=dtype,
-    )
+    kwargs: dict[str, Any] = {
+        "torch_dtype": dtype,
+        "low_cpu_mem_usage": True,
+    }
     if device != "cpu":
-        model.to(device)
-    return model
+        kwargs["device_map"] = {"": device}
+    return transformers.MllamaForConditionalGeneration.from_pretrained(
+        model_name_or_path,
+        **kwargs,
+    )
 
 
 def estimate_packed_storage(
@@ -1511,13 +1672,21 @@ def quantize_full_multimodal_scope(
     layer_logs: list[dict[str, Any]] = []
     vision_stack = mllama_vision_layers(model)
     if verbose:
-        print(f"Capturing vision inputs from {len(calibration_batches)} batches", flush=True)
+        print(
+            f"Capturing vision inputs from {len(calibration_batches)} batches",
+            flush=True,
+        )
     vision_inputs, vision_contexts = collect_vision_transformer_inputs(
         vision_stack,
         calibration_batches,
         device=device,
         calibration_gpu_cache=calibration_gpu_cache,
     )
+    # The remaining stages only need the encoded text fields. Keeping normalized
+    # pixels for every sample would otherwise add several GiB to every later peak.
+    for batch in calibration_batches:
+        for key in ("pixel_values", "aspect_ratio_ids", "aspect_ratio_mask"):
+            batch.pop(key, None)
 
     intermediate_layers = frozenset(
         getattr(vision_stack.vision_model, "intermediate_layers_indices", ())
@@ -1537,6 +1706,7 @@ def quantize_full_multimodal_scope(
         verbose=verbose,
         capture_after_layers=intermediate_layers,
     )
+    del vision_inputs
     missing_captures = intermediate_layers - frozenset(local_captures)
     if missing_captures:
         raise ValueError(
@@ -1552,6 +1722,7 @@ def quantize_full_multimodal_scope(
         device=device,
         calibration_gpu_cache=calibration_gpu_cache,
     )
+    del local_outputs
     if verbose:
         print(
             f"Quantizing {len(vision_stack.global_layers)} global vision layers",
@@ -1566,21 +1737,21 @@ def quantize_full_multimodal_scope(
         VISION_TARGET_MODULE_GROUPS,
         verbose=verbose,
     )
+    clear_vision_attention_mask_cache()
+    del global_inputs
     layer_logs.extend(global_logs)
 
     projector_prefix, projector = mllama_multimodal_projector(model)
-    projector_inputs = build_projector_inputs(
-        global_outputs,
-        local_captures,
-        vision_contexts,
-        getattr(vision_stack.vision_model, "intermediate_layers_indices", ()),
-        device=device,
-        calibration_gpu_cache=calibration_gpu_cache,
-    )
     projector_logs = quantize_standalone_linear(
         projector_prefix,
         projector,
-        projector_inputs,
+        iter_projector_inputs(
+            global_outputs,
+            local_captures,
+            vision_contexts,
+            getattr(vision_stack.vision_model, "intermediate_layers_indices", ()),
+            device=device,
+        ),
         config,
         device,
         verbose=verbose,
@@ -1588,11 +1759,19 @@ def quantize_full_multimodal_scope(
     layer_logs.extend(projector_logs)
     cross_attention_states = run_projector(
         projector,
-        projector_inputs,
+        iter_projector_inputs(
+            global_outputs,
+            local_captures,
+            vision_contexts,
+            getattr(vision_stack.vision_model, "intermediate_layers_indices", ()),
+            device=device,
+            consume=True,
+        ),
         hidden_size=projector.out_features,
         device=device,
         calibration_gpu_cache=calibration_gpu_cache,
     )
+    del global_outputs, local_captures, vision_contexts
 
     if verbose:
         print(
@@ -1608,6 +1787,7 @@ def quantize_full_multimodal_scope(
         device=device,
         calibration_gpu_cache=calibration_gpu_cache,
     )
+    del cross_attention_states
 
     total_layers = len(text_layer_stack.layers)
     if verbose:
@@ -1639,6 +1819,11 @@ def quantize_full_multimodal_scope(
             module_groups,
             progress_name=progress_name,
             verbose=verbose,
+            ignored_kwargs=(
+                TEXT_SELF_IGNORED_KWARGS
+                if layer_kind == "self_attention"
+                else frozenset()
+            ),
         )
         for log in logs:
             log["layer"] = layer_index
@@ -1748,6 +1933,14 @@ def quantize(
         raise ValueError("--codepoints is only supported with format='int-codebook'")
     if batch_size < 1:
         raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+    if calibration_samples < 1:
+        raise ValueError(
+            f"calibration_samples must be >= 1, got {calibration_samples}"
+        )
+    if calibration_max_tokens < 1:
+        raise ValueError(
+            f"calibration_max_tokens must be >= 1, got {calibration_max_tokens}"
+        )
     if calibration_sort not in SUPPORTED_CALIBRATION_SORTS:
         raise ValueError(
             f"Unsupported calibration_sort={calibration_sort!r}, expected one of "
@@ -1816,6 +2009,7 @@ def quantize(
                 f"samples={calibration_samples} split={calibration_split}",
                 flush=True,
             )
+            print(f"Warning: {VQAV2_PROTOTYPE_WARNING}", flush=True)
         calibration_batches = load_vqav2_calibration_batches(
             processor,
             n_samples=calibration_samples,
@@ -1824,7 +2018,9 @@ def quantize(
             max_tokens=calibration_max_tokens,
             load_from_s3=load_vqa_from_s3,
         )
-        calibration_prepared_examples = calibration_samples
+        calibration_prepared_examples = _count_calibration_examples(
+            calibration_batches
+        )
         calibration_metadata = {
             "dataset": "lmms-lab/VQAv2",
             "split": calibration_split,
@@ -1834,6 +2030,11 @@ def quantize(
             "prototype_warning": VQAV2_PROTOTYPE_WARNING,
         }
     elif resolved_calibration_source == "eval-task":
+        if calibration_task not in vqa.TASKS:
+            raise ValueError(
+                f"Unsupported calibration_task={calibration_task!r}, expected one of "
+                f"{tuple(vqa.TASKS)}"
+            )
         if verbose:
             print(
                 "Loading eval-task multimodal calibration "
@@ -1850,7 +2051,9 @@ def quantize(
             max_tokens=calibration_max_tokens,
             load_vqa_from_s3=load_vqa_from_s3,
         )
-        calibration_prepared_examples = calibration_samples
+        calibration_prepared_examples = _count_calibration_examples(
+            calibration_batches
+        )
         calibration_metadata = {
             "dataset": calibration_task,
             "split": calibration_split,
@@ -1872,7 +2075,9 @@ def quantize(
             batch_size=batch_size,
             max_tokens=calibration_max_tokens,
         )
-        calibration_prepared_examples = calibration_samples
+        calibration_prepared_examples = _count_calibration_examples(
+            calibration_batches
+        )
         calibration_metadata = {
             "dataset": "synthetic",
             "paths": [str(path) for path in calibration_data_paths],
@@ -1885,6 +2090,14 @@ def quantize(
         )
     if not calibration_batches:
         raise ValueError("No calibration batches were loaded")
+    if (
+        resolved_calibration_source != "c4"
+        and calibration_prepared_examples < calibration_samples
+    ):
+        raise ValueError(
+            "Calibration source returned fewer examples than requested: "
+            f"requested={calibration_samples}, loaded={calibration_prepared_examples}"
+        )
 
     config = GPTQConfig(
         quantization_format=quantization_format,
@@ -2010,7 +2223,7 @@ def quantize(
     if verbose:
         print(
             f"Quantized {len(layer_logs)} modules across "
-            f"{quantized_layer_count} non-cross-attention layers",
+            f"{quantized_layer_count} targeted layers/modules",
             flush=True,
         )
         print(f"Saving dense dequantized model to {output_dir}", flush=True)
@@ -2286,15 +2499,22 @@ def _add_quantize_args(parser: argparse.ArgumentParser) -> None:
         "--calibration-sort",
         choices=SUPPORTED_CALIBRATION_SORTS,
         default=DEFAULT_CALIBRATION_SORT,
-        help="Calibration sample ordering before batching",
+        help="C4 calibration sample ordering before batching",
     )
     parser.add_argument(
         "--calibration-data-min-length",
         type=int,
         default=DEFAULT_CALIBRATION_DATA_MIN_LENGTH,
-        help="Drop calibration samples shorter than this many tokens",
+        help="Drop C4 calibration samples shorter than this many tokens",
     )
-    parser.add_argument("--calibration-gpu-cache", action="store_true")
+    parser.add_argument(
+        "--calibration-gpu-cache",
+        action="store_true",
+        help=(
+            "Keep activation caches on the quantization GPU; leave disabled "
+            "for large runs"
+        ),
+    )
     parser.add_argument(
         "--calibration-split",
         default="validation",
@@ -2409,6 +2629,8 @@ def main(argv: list[str] | None = None) -> None:
             args.format,
             codepoints=args.codepoints,
             group_size=args.group_size,
+            target_scope=args.target_scope,
+            calibration_source=args.calibration_source,
         )
         metadata = quantize(
             model_name=args.model_name,

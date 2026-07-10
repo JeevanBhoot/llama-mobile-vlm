@@ -8,9 +8,9 @@ This directory contains post-training GPTQ baselines for
 | GPTQModel reference | `gptq.standard` | GPTQModel | GPTQModel checkpoint |
 | Local dense GPTQ | `gptq.local` | Local PyTorch GPTQ | Dense dequantized Hugging Face checkpoint |
 
-Both flows use C4 calibration and the `eval.vqa` benchmark harness. Mllama
-quantization covers language-model self-attention and MLP projections.
-Cross-attention decoder layers are skipped.
+Both flows support C4 text calibration and the `eval.vqa` benchmark harness.
+The local flow also supports multimodal calibration and full Mllama Linear
+coverage.
 
 For full CLI options:
 
@@ -170,7 +170,9 @@ S3D8 mode uses S3D8 inside the GPTQ column update and also writes
 `gptq-s3d8.safetensors`, which can be passed to `squashedtensors.py
 --checkpoint`.
 
-Full multimodal prototype:
+### Full Multimodal
+
+To quantize all layers, run:
 
 ```sh
 python -m gptq.local quantize \
@@ -182,11 +184,16 @@ python -m gptq.local quantize \
 
 The full multimodal path quantizes vision encoder and global-encoder Linear
 layers, text self-attention layers, text cross-attention layers,
-`model.multi_modal_projector`, and `lm_head`. VQAv2 is the prototype
-calibration default for this path because it can be loaded from Hugging Face
-with `load_from_s3=False`; it overlaps the evaluation suite and should not be
-used for reportable results. Use `--calibration-source synthetic` with
-`--calibration-data-path` for the intended synthetic calibration data.
+`model.multi_modal_projector`, and `lm_head`. 
+
+For large multimodal runs:
+
+- Keep the default `--batch-size 1`. Larger batches increase transient GPU
+  memory and image/text padding.
+- Keep `--calibration-gpu-cache` disabled when the calibration cache is larger
+  than available GPU memory.
+- `--calibration-max-tokens` controls text length. It does not reduce the fixed
+  per-image vision token count.
 
 Fractional-width INT codebook:
 

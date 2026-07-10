@@ -393,8 +393,7 @@ class GPTQLinearQuantizer:
         self.module = module
         self.config = config
         self.device = module.weight.device
-        self.weight = module.weight.detach().clone().float()
-        self.rows, self.columns = self.weight.shape
+        self.rows, self.columns = module.weight.shape
         self.nsamples = 0
         self.H: Tensor | None = None
 
@@ -417,7 +416,7 @@ class GPTQLinearQuantizer:
             raise ValueError("No calibration batches were added")
 
         start = time.time()
-        W = self.weight.clone()
+        W = self.module.weight.detach().clone().float()
         quantizer = self._new_quantizer()
         if self.config.quantization_format in ("int", "int-codebook"):
             quantizer.find_params(W)
@@ -487,7 +486,11 @@ class GPTQLinearQuantizer:
             quantizer.find_params(W)
 
         total_loss = torch.zeros((), dtype=W.dtype, device=W.device)
-        Q = torch.zeros_like(W)
+        Q = torch.empty(
+            W.shape,
+            dtype=self.module.weight.dtype,
+            device=W.device,
+        )
         Hinv, damp_percent = self._inverse_hessian(H)
 
         for i1 in range(0, self.columns, self.config.blocksize):
