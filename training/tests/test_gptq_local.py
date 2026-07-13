@@ -49,6 +49,12 @@ import gptq.common as common
 import gptq.local as local
 
 
+def test_local_cli_supports_ordinary_int2() -> None:
+    args = local.build_parser().parse_args(["quantize", "--bits", "2"])
+
+    assert args.bits == 2
+
+
 def test_default_output_dir_for_int_codebook_includes_sweep_params() -> None:
     assert local.default_output_dir(
         4,
@@ -56,6 +62,17 @@ def test_default_output_dir_for_int_codebook_includes_sweep_params() -> None:
         codepoints=7,
         group_size=128,
     ) == Path("out/gptq/llama-3.2-vision-local-gptq-int-k7-g128-c4")
+
+
+def test_default_output_dir_for_affine_codebook_is_distinct() -> None:
+    assert local.default_output_dir(
+        None,
+        "int-codebook-affine",
+        codepoints=6,
+        group_size=128,
+    ) == Path(
+        "out/gptq/llama-3.2-vision-local-gptq-int-affine-k6-g128-c4"
+    )
 
 
 def test_default_output_dir_identifies_full_multimodal_calibration() -> None:
@@ -521,6 +538,170 @@ def test_quantize_int_codebook_writes_scale_only_metadata(
     assert (tmp_path / "model.safetensors").exists()
     assert (tmp_path / "processor_config.json").exists()
     assert (tmp_path / local.METADATA_FILENAME).exists()
+
+
+def test_quantize_affine_codebook_writes_zero_and_dtype_metadata(
+    monkeypatch, tmp_path
+) -> None:
+    torch.manual_seed(625464)
+    model = TinyMllama()
+    monkeypatch.setattr(local, "load_model", lambda *_, **__: model)
+    monkeypatch.setattr(
+        local.transformers.AutoProcessor,
+        "from_pretrained",
+        mock.Mock(return_value=DummyProcessor()),
+    )
+    monkeypatch.setattr(local, "load_c4_calibration", lambda **_: ["a", "b"])
+    monkeypatch.setattr(
+        local,
+        "tokenise_calibration",
+        lambda *_, **__: [
+            {"input_ids": torch.tensor([1, 2, 3, 4])},
+            {"input_ids": torch.tensor([4, 3, 2, 1])},
+        ],
+    )
+
+    metadata = local.quantize(
+        model_name="model",
+        output_dir=tmp_path,
+        bits=None,
+        quantization_format="int-codebook-affine",
+        codepoints=6,
+        group_size=4,
+        batch_size=2,
+        calibration_samples=2,
+        calibration_data_min_length=0,
+        device="cpu",
+        torch_dtype="float32",
+        storage_scale_zero_dtype="float16",
+        verbose=False,
+    )
+
+    assert (
+        metadata["artifact_type"]
+        == "dense_dequantized_local_gptq_int_codebook_affine"
+    )
+    assert metadata["format"] == "int-codebook-affine"
+    assert metadata["bits"] is None
+    assert metadata["codepoints"] == 6
+    assert metadata["effective_weight_bits"] == pytest.approx(math.log2(6))
+    assert metadata["quantizer_mode"] == "uniform_affine_absmax_int_codebook"
+    assert metadata["scale_dtype"] == "float16"
+    assert metadata["gptq"]["bits"] is None
+    assert metadata["gptq"]["scale_zero_dtype"] == "float16"
+
+    first_log = metadata["quantization_log"][0]
+    assert first_log["quantization_format"] == "int-codebook-affine"
+    assert first_log["codepoints"] == 6
+    assert first_log["zero_shape"] == first_log["scale_shape"]
+    assert first_log["g_idx_shape"] == [8]
+
+    storage = metadata["estimated_packed_storage"]
+    assert storage["radix_chunk_bytes"] == 1
+    assert storage["radix_symbols_per_chunk"] == 3
+    assert storage["radix_bits_per_weight"] == pytest.approx(8 / 3)
+    expected_parameter_values = sum(
+        math.prod(log["scale_shape"]) + math.prod(log["zero_shape"])
+        for log in metadata["quantization_log"]
+    )
+    assert storage["scale_zero_bytes"] == expected_parameter_values * 2
+    assert storage["estimated_realizable_packed_with_g_idx_bytes"] >= storage[
+        "estimated_packed_with_g_idx_bytes"
+    ]
+
+
+def test_radix_packing_selects_three_k6_symbols_per_byte() -> None:
+    packing = local.radix_packing_parameters(6)
+
+    assert packing == {
+        "chunk_bytes": 1,
+        "symbols_per_chunk": 3,
+        "bits_per_weight": pytest.approx(8 / 3),
+    }
+
+
+def test_radix_storage_accounts_for_each_tensor_tail() -> None:
+    class TwoWeights(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.first = torch.nn.Linear(4, 1, bias=False)
+            self.second = torch.nn.Linear(4, 1, bias=False)
+
+    logs = [
+        {
+            "full_name": name,
+            "shape": [1, 4],
+            "scale_shape": [1, 1],
+            "zero_shape": [1, 1],
+            "g_idx_shape": [4],
+        }
+        for name in ("first", "second")
+    ]
+
+    storage = local.estimate_packed_storage(
+        TwoWeights(),
+        layer_logs=logs,
+        bits=math.log2(6),
+        scale_zero_dtype="bfloat16",
+        quantization_format="int-codebook-affine",
+        codepoints=6,
+    )
+
+    # Each four-symbol tensor needs two one-byte chunks; combining tensor tails
+    # would incorrectly report three bytes.
+    assert storage["radix_packed_weight_bytes"] == 4
+    assert storage["ideal_packed_weight_bytes"] == 4
+    assert storage["scale_zero_bytes"] == 8
+    assert storage["g_idx_bytes"] == 32
+    assert storage["full_model_effective_bits_with_g_idx"] == 44.0
+
+
+def test_affine_codebook_cli_validation_and_bits_none(monkeypatch) -> None:
+    with pytest.raises(SystemExit):
+        local.main(
+            [
+                "quantize",
+                "--format",
+                "int-codebook-affine",
+                "--codepoints",
+                "6",
+                "--bits",
+                "3",
+            ]
+        )
+    with pytest.raises(SystemExit):
+        local.main(["quantize", "--format", "int-codebook-affine"])
+
+    captured = {}
+
+    def fake_quantize(**kwargs):
+        captured.update(kwargs)
+        return {
+            "estimated_packed_storage": {
+                "estimated_realizable_packed_with_g_idx_bytes": 0,
+                "full_model_effective_bits_with_g_idx": 0.0,
+            },
+            "artifact_size_bytes": 0,
+        }
+
+    monkeypatch.setattr(local, "quantize", fake_quantize)
+    local.main(
+        [
+            "quantize",
+            "--format",
+            "int-codebook-affine",
+            "--codepoints",
+            "6",
+            "--quiet",
+        ]
+    )
+
+    assert captured["bits"] is None
+    assert captured["quantization_format"] == "int-codebook-affine"
+    assert captured["storage_scale_zero_dtype"] == "bfloat16"
+    assert captured["output_dir"] == Path(
+        "out/gptq/llama-3.2-vision-local-gptq-int-affine-k6-g128-c4"
+    )
 
 
 def test_tokenise_calibration_returns_plain_dicts() -> None:

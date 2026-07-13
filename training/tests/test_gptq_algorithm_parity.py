@@ -39,7 +39,7 @@ def test_uniform_affine_quantizer_matches_gptqmodel(sym) -> None:
     )
 
     expected = reference_quantizer(bits=4, sym=sym, x=x)
-    actual = UniformAffineQuantizer(bits=4, sym=sym)
+    actual = UniformAffineQuantizer(bits=4, sym=sym, scale_zero_dtype="float32")
     actual.find_params(x)
 
     torch.testing.assert_close(actual.scale, expected.scale)
@@ -99,6 +99,7 @@ def run_local_gptq(
             damp_percent=0.05,
             damp_auto_increment=0.01,
             blocksize=blocksize,
+            scale_zero_dtype="float32",
         ),
     )
     quantizer.add_batch(calibration)

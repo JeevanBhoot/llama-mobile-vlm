@@ -200,7 +200,48 @@ For large multimodal runs:
 - `--calibration-max-tokens` controls text length. It does not reduce the fixed
   per-image vision token count.
 
-Fractional-width INT codebook:
+### Fractional-width affine INT
+
+Use `int-codebook-affine` for fractional-width INT experiments:
+
+```sh
+python -m gptq.local quantize \
+  --format int-codebook-affine \
+  --codepoints 7 \
+  --group-size 128 \
+  --output-dir out/gptq/llama-3.2-vision-local-gptq-int-affine-k7-g128-c4
+```
+
+The affine codebook uses unsigned indices from `0` through `K - 1`. Symmetric
+quantization uses `scale = 2 * absmax / (K - 1)` and zero point `floor(K / 2)`.
+Asymmetric quantization derives the scale and zero point from each row's minimum
+and maximum. Under the same GPTQ settings and scale dtype, `K=4`, `K=8`, and
+`K=16` reproduce ordinary INT2, INT3, and INT4. The intended fractional sweep
+is `K=4..16`.
+
+Run that sweep with:
+
+```sh
+for k in 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+  for g in 32 64 128; do
+    python -m gptq.local quantize \
+      --format int-codebook-affine \
+      --codepoints "$k" \
+      --group-size "$g" \
+      --output-dir "out/gptq/local-int-affine-k${k}-g${g}"
+  done
+done
+```
+
+The effective information rate is `log2(K)`. Metadata also reports a realizable
+byte-aligned radix packing selected from one- through eight-byte chunks. For
+example, `K=6` packs three indices per byte, or `8/3` realizable weight bits.
+The full-model estimate includes each tensor's final partial chunk, scales, zero
+points, group indices, and tensors that remain unquantized.
+
+### Legacy safe-absmax INT codebook
+
+Use `int-codebook` to reproduce the legacy scale-only safe-absmax quantizer:
 
 ```sh
 python -m gptq.local quantize \
@@ -210,27 +251,10 @@ python -m gptq.local quantize \
   --output-dir out/gptq/llama-3.2-vision-local-gptq-int-k7-g128-c4
 ```
 
-`int-codebook` is local-only and uses scale-only absmax quantization with an
-arbitrary number of integer codepoints. Its effective weight width is
-`log2(codepoints)`, so `--codepoints 6` gives 2.585 bits and `--codepoints 7`
-gives 2.807 bits, bracketing S3D8's 2.667 bits. Even codepoint counts use an
-asymmetric integer grid that still includes zero, for example `K=6` uses
-`[-3, -2, -1, 0, 1, 2]`; `K=16` uses `[-8, ..., 7]` and the absmax scale
-denominator is `7`.
-
-Manual fractional INT sweep:
-
-```sh
-for k in 4 5 6 7 8 9 10 11 12 13 14 15 16; do
-  for g in 32 64 128; do
-    python -m gptq.local quantize \
-      --format int-codebook \
-      --codepoints "$k" \
-      --group-size "$g" \
-      --output-dir "out/gptq/local-int-k${k}-g${g}"
-  done
-done
-```
+This format keeps its asymmetric signed centroids and positive-endpoint absmax
+denominator. For example, `K=6` uses `[-3, -2, -1, 0, 1, 2]`; `K=16` uses
+`[-8, ..., 7]` with scale denominator `7`. Even K therefore leaves part of the
+negative endpoint range unused for symmetric rows.
 
 Quantize a different model:
 
@@ -253,8 +277,8 @@ Local GPTQ uses the same calibration defaults as `gptq.standard`:
 
 Local GPTQ-specific defaults:
 
-- Bits: `3` or `4` for affine INT; arbitrary valid `--codepoints` for local
-  `int-codebook` (`4` to `16` is the intended sweep range)
+- Bits: `2`, `3`, or `4` for ordinary affine INT; arbitrary `K >= 2` for
+  either codebook format (`4` to `16` is the intended affine-K sweep)
 - Group size: `128`
 - Block size: `128`
 - Activation order: disabled
@@ -264,7 +288,9 @@ Local GPTQ-specific defaults:
 - Damp percent: `0.05`
 - Damp auto increment: `0.01`
 - Torch dtype: `bfloat16`
-- Packed scale/zero storage estimate dtype: `bfloat16`
+- Quantizer scale/zero dtype: `bfloat16`; select `float16` or `float32` with
+  `--storage-scale-zero-dtype`. This dtype also controls parameter storage
+  estimates.
 
 After quantization, inspect the packed storage estimate:
 
@@ -301,8 +327,9 @@ pytest \
 
 ## Notes
 
-INT3/INT4 local GPTQ checkpoints are accuracy-only dense PTQ baselines. S3D8
-local GPTQ also writes a quantisation checkpoint for the existing S3D8
+INT2/INT3/INT4 and codebook local GPTQ checkpoints are accuracy-only dense PTQ
+baselines. Local S3D8 GPTQ also writes a quantisation checkpoint for the existing
+S3D8
 `squashedtensors.py` deployment path.
 
 Compare quality with `summary.json`. Compare storage with the GPTQModel

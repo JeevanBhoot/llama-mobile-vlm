@@ -17,8 +17,10 @@ from quant_formats import FMT_CHANNEL_S3D8
 
 @dataclass
 class GPTQConfig:
-    quantization_format: Literal["int", "int-codebook", "s3d8"] = "int"
-    bits: int = 4
+    quantization_format: Literal[
+        "int", "int-codebook", "int-codebook-affine", "s3d8"
+    ] = "int"
+    bits: int | None = 4
     codepoints: int | None = None
     group_size: int = 128
     blocksize: int = 128
@@ -29,28 +31,41 @@ class GPTQConfig:
     static_groups: bool = False
     sym: bool = True
     mse: float = 0.0
+    scale_zero_dtype: Literal["bfloat16", "float16", "float32"] = "bfloat16"
 
     def __post_init__(self) -> None:
-        if self.quantization_format not in ("int", "int-codebook", "s3d8"):
+        if self.quantization_format not in (
+            "int",
+            "int-codebook",
+            "int-codebook-affine",
+            "s3d8",
+        ):
             raise ValueError(
                 f"Unsupported GPTQ quantization format: {self.quantization_format}"
             )
         if self.quantization_format == "int" and self.bits not in (2, 3, 4, 8):
             raise ValueError(f"Unsupported GPTQ bit width: {self.bits}")
-        if self.quantization_format == "int-codebook":
+        if self.quantization_format in ("int-codebook", "int-codebook-affine"):
             if self.codepoints is None:
-                raise ValueError("int-codebook quantization requires codepoints")
+                raise ValueError(
+                    f"{self.quantization_format} quantization requires codepoints"
+                )
             if self.codepoints < 2:
                 raise ValueError("codepoints must be at least 2")
-            element_range = Q.IntFormat(
-                math.log2(self.codepoints),
-                mode="asymmetric",
-            ).range
-            if element_range[1] <= 0:
-                raise ValueError(
-                    "int-codebook absmax scaling requires at least one positive "
-                    f"codepoint, got codepoints={self.codepoints}"
-                )
+            if self.quantization_format == "int-codebook":
+                element_range = Q.IntFormat(
+                    math.log2(self.codepoints),
+                    mode="asymmetric",
+                ).range
+                if element_range[1] <= 0:
+                    raise ValueError(
+                        "int-codebook absmax scaling requires at least one positive "
+                        f"codepoint, got codepoints={self.codepoints}"
+                    )
+        if self.scale_zero_dtype not in ("bfloat16", "float16", "float32"):
+            raise ValueError(
+                f"Unsupported scale/zero dtype: {self.scale_zero_dtype}"
+            )
         if self.group_size != -1 and self.group_size <= 0:
             raise ValueError("group_size must be -1 or a positive integer")
         if self.static_groups and self.group_size == -1:
@@ -89,18 +104,23 @@ class UniformAffineQuantizer:
 
     def __init__(
         self,
-        bits: int,
+        bits: int | float,
         sym: bool,
         mse: float = 0.0,
         grid: int = 100,
         maxshrink: float = 0.8,
+        scale_zero_dtype: str = "bfloat16",
+        codepoints: int | None = None,
     ):
         self.bits = bits
         self.sym = sym
         self.mse = mse
         self.grid = grid
         self.maxshrink = maxshrink
-        self.maxq = torch.tensor(2**bits - 1)
+        self.scale_zero_dtype = scale_zero_dtype
+        self.codepoints = codepoints or 2**bits
+        self.maxq = torch.tensor(self.codepoints - 1)
+        self.symmetric_zero = self.codepoints // 2
         self.scale = torch.empty(0)
         self.zero = torch.empty(0)
 
@@ -111,6 +131,8 @@ class UniformAffineQuantizer:
             mse=self.mse,
             grid=self.grid,
             maxshrink=self.maxshrink,
+            scale_zero_dtype=self.scale_zero_dtype,
+            codepoints=self.codepoints,
         )
         quantizer.scale = self.scale.clone()
         quantizer.zero = self.zero.clone()
@@ -138,12 +160,20 @@ class UniformAffineQuantizer:
 
         self.scale = (xmax - xmin) / self.maxq
         if self.sym:
-            self.zero = torch.full_like(self.scale, (self.maxq + 1) / 2)
+            self.zero = torch.full_like(self.scale, self.symmetric_zero)
         else:
             self.zero = torch.round(-xmin / self.scale)
 
         if self.mse > 0.0:
             self._shrink_to_mse(x, xmin, xmax)
+
+        parameter_dtype = {
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+            "float32": torch.float32,
+        }[self.scale_zero_dtype]
+        self.scale = self.scale.to(parameter_dtype).to(dtype=x.dtype)
+        self.zero = self.zero.to(parameter_dtype).to(dtype=x.dtype)
 
         shape = [-1] + [1] * (len(weight.shape) - 1)
         self.scale = self.scale.reshape(shape)
@@ -177,6 +207,46 @@ class UniformAffineQuantizer:
                 best[improved] = err[improved]
                 scale[improved] = scale1[improved]
                 zero[improved] = zero1[improved]
+
+
+class AffineCodebookIntQuantizer(UniformAffineQuantizer):
+    """Uniform affine INT quantizer with an arbitrary number of codepoints."""
+
+    def __init__(
+        self,
+        codepoints: int,
+        sym: bool,
+        mse: float = 0.0,
+        grid: int = 100,
+        maxshrink: float = 0.8,
+        scale_zero_dtype: str = "bfloat16",
+    ):
+        if codepoints < 2:
+            raise ValueError("codepoints must be at least 2")
+        self.effective_bits = math.log2(codepoints)
+        super().__init__(
+            bits=self.effective_bits,
+            sym=sym,
+            mse=mse,
+            grid=grid,
+            maxshrink=maxshrink,
+            scale_zero_dtype=scale_zero_dtype,
+            codepoints=codepoints,
+        )
+
+    def copy(self) -> "AffineCodebookIntQuantizer":
+        quantizer = AffineCodebookIntQuantizer(
+            codepoints=self.codepoints,
+            sym=self.sym,
+            mse=self.mse,
+            grid=self.grid,
+            maxshrink=self.maxshrink,
+            scale_zero_dtype=self.scale_zero_dtype,
+        )
+        quantizer.scale = self.scale.clone()
+        quantizer.zero = self.zero.clone()
+        quantizer.maxq = self.maxq.clone()
+        return quantizer
 
 
 class AbsmaxCodebookIntQuantizer:
@@ -418,7 +488,11 @@ class GPTQLinearQuantizer:
         start = time.time()
         W = self.module.weight.detach().clone().float()
         quantizer = self._new_quantizer()
-        if self.config.quantization_format in ("int", "int-codebook"):
+        if self.config.quantization_format in (
+            "int",
+            "int-codebook",
+            "int-codebook-affine",
+        ):
             quantizer.find_params(W)
 
         H = self.H
@@ -435,7 +509,8 @@ class GPTQLinearQuantizer:
 
         groups = []
         if (
-            self.config.quantization_format in ("int", "int-codebook")
+            self.config.quantization_format
+            in ("int", "int-codebook", "int-codebook-affine")
             and self.config.static_groups
         ):
             for i in range(0, self.columns, self.config.group_size):
@@ -507,7 +582,8 @@ class GPTQLinearQuantizer:
                 d = Hinv1[i, i]
 
                 if (
-                    self.config.quantization_format in ("int", "int-codebook")
+                    self.config.quantization_format
+                    in ("int", "int-codebook", "int-codebook-affine")
                     and self.config.group_size != -1
                 ):
                     if not self.config.static_groups:
@@ -614,6 +690,20 @@ class GPTQLinearQuantizer:
                 effective_bits=quantizer.effective_bits,
             )
 
+        if self.config.quantization_format == "int-codebook-affine":
+            assert isinstance(quantizer, AffineCodebookIntQuantizer)
+            return QuantizedLinear(
+                weight=Q.reshape_as(self.module.weight).type_as(self.module.weight),
+                scale=torch.cat(scale, dim=1),
+                zero=torch.cat(zero, dim=1),
+                g_idx=g_idx_tensor,
+                duration=time.time() - start,
+                avg_loss=avg_loss,
+                damp_percent=damp_percent,
+                quantization_format="int-codebook-affine",
+                effective_bits=quantizer.effective_bits,
+            )
+
         return QuantizedLinear(
             weight=Q.reshape_as(self.module.weight).type_as(self.module.weight),
             scale=torch.cat(scale, dim=1),
@@ -626,16 +716,44 @@ class GPTQLinearQuantizer:
 
     def _new_quantizer(
         self,
-    ) -> UniformAffineQuantizer | AbsmaxCodebookIntQuantizer | S3D8Quantizer:
+    ) -> (
+        UniformAffineQuantizer
+        | AbsmaxCodebookIntQuantizer
+        | AffineCodebookIntQuantizer
+        | S3D8Quantizer
+    ):
         if self.config.quantization_format == "s3d8":
             return S3D8Quantizer()
         if self.config.quantization_format == "int-codebook":
             assert self.config.codepoints is not None
-            return AbsmaxCodebookIntQuantizer(codepoints=self.config.codepoints)
+            scale_format = (
+                Q.BFLOAT16
+                if self.config.scale_zero_dtype == "bfloat16"
+                else Q.TorchFormat(
+                    {
+                        "float16": torch.float16,
+                        "float32": torch.float32,
+                    }[self.config.scale_zero_dtype]
+                )
+            )
+            return AbsmaxCodebookIntQuantizer(
+                codepoints=self.config.codepoints,
+                scale_format=scale_format,
+            )
+        if self.config.quantization_format == "int-codebook-affine":
+            assert self.config.codepoints is not None
+            return AffineCodebookIntQuantizer(
+                codepoints=self.config.codepoints,
+                sym=self.config.sym,
+                mse=self.config.mse,
+                scale_zero_dtype=self.config.scale_zero_dtype,
+            )
+        assert self.config.bits is not None
         return UniformAffineQuantizer(
             bits=self.config.bits,
             sym=self.config.sym,
             mse=self.config.mse,
+            scale_zero_dtype=self.config.scale_zero_dtype,
         )
 
     def _inverse_hessian(self, H: Tensor) -> tuple[Tensor, float]:

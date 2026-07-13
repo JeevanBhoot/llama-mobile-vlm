@@ -56,8 +56,8 @@ DEFAULT_C4_SPLIT = "train"
 DEFAULT_GROUP_SIZE = 128
 DEFAULT_TORCH_DTYPE = "bfloat16"
 DEFAULT_TASKS = ("vqa", "chartqa", "docvqa", "ai2d")
-SUPPORTED_BITS = (3, 4)
-SUPPORTED_FORMATS = ("int", "int-codebook", "s3d8")
+SUPPORTED_BITS = (2, 3, 4)
+SUPPORTED_FORMATS = ("int", "int-codebook", "int-codebook-affine", "s3d8")
 SUPPORTED_TARGET_SCOPES = ("text-self", "full-multimodal")
 SUPPORTED_CALIBRATION_SOURCES = ("c4", "vqav2", "synthetic", "eval-task")
 METADATA_FILENAME = "metadata.json"
@@ -212,7 +212,7 @@ def clear_vision_attention_mask_cache() -> None:
 
 
 def default_output_dir(
-    bits: int,
+    bits: int | None,
     quantization_format: str = "int",
     codepoints: int | None = None,
     group_size: int = DEFAULT_GROUP_SIZE,
@@ -225,12 +225,16 @@ def default_output_dir(
     suffix = f"-{source}-full" if target_scope == "full-multimodal" else "-c4"
     if quantization_format == "s3d8":
         return Path(f"out/gptq/llama-3.2-vision-local-gptq-s3d8{suffix}")
-    if quantization_format == "int-codebook":
+    if quantization_format in ("int-codebook", "int-codebook-affine"):
         if codepoints is None:
-            raise ValueError("int-codebook output directories require codepoints")
+            raise ValueError(
+                f"{quantization_format} output directories require codepoints"
+            )
+        mode = "int-affine" if quantization_format == "int-codebook-affine" else "int"
         return Path(
             "out/gptq/"
-            f"llama-3.2-vision-local-gptq-int-k{codepoints}-g{group_size}{suffix}"
+            f"llama-3.2-vision-local-gptq-{mode}-k{codepoints}"
+            f"-g{group_size}{suffix}"
         )
     return Path(f"out/gptq/llama-3.2-vision-local-gptq-int{bits}{suffix}")
 
@@ -980,14 +984,22 @@ def _quantized_linear_log(
         "quantization_format": result.quantization_format,
         "effective_bits": result.effective_bits or config.bits,
         "scale_shape": list(result.scale.shape),
+        "scale_zero_dtype": config.scale_zero_dtype,
     }
-    if result.quantization_format == "int":
+    if result.quantization_format in ("int", "int-codebook-affine"):
         log.update(
             {
                 "zero_shape": list(result.zero.shape),
                 "g_idx_shape": list(result.g_idx.shape),
             }
         )
+        if result.quantization_format == "int-codebook-affine":
+            log.update(
+                {
+                    "codepoints": config.codepoints,
+                    "quantizer_mode": "uniform_affine_absmax_int_codebook",
+                }
+            )
     elif result.quantization_format == "int-codebook":
         log.update(
             {
@@ -1742,24 +1754,76 @@ def load_model(
     )
 
 
+def radix_packing_parameters(codepoints: int) -> dict[str, float | int]:
+    """Return the best byte-aligned radix packing for one codebook index."""
+    if codepoints < 2:
+        raise ValueError("codepoints must be at least 2")
+
+    best_chunk_bytes = 0
+    best_symbols = 0
+    for chunk_bytes in range(1, 9):
+        limit = 1 << (8 * chunk_bytes)
+        symbols = 0
+        power = 1
+        while power <= limit // codepoints:
+            power *= codepoints
+            symbols += 1
+        if symbols == 0:
+            continue
+        if (
+            best_symbols == 0
+            or chunk_bytes * best_symbols < best_chunk_bytes * symbols
+            or (
+                chunk_bytes * best_symbols == best_chunk_bytes * symbols
+                and chunk_bytes < best_chunk_bytes
+            )
+        ):
+            best_chunk_bytes = chunk_bytes
+            best_symbols = symbols
+
+    if best_symbols == 0:
+        raise ValueError(
+            f"codepoints={codepoints} cannot be represented in an eight-byte chunk"
+        )
+    return {
+        "chunk_bytes": best_chunk_bytes,
+        "symbols_per_chunk": best_symbols,
+        "bits_per_weight": 8 * best_chunk_bytes / best_symbols,
+    }
+
+
 def estimate_packed_storage(
     model: torch.nn.Module,
     layer_logs: list[dict[str, Any]],
     bits: float,
     scale_zero_dtype: str,
     quantization_format: str = "int",
+    codepoints: int | None = None,
 ) -> dict[str, Any]:
     if scale_zero_dtype not in DTYPE_STORAGE_BYTES:
         raise ValueError(
             f"Unsupported storage scale/zero dtype {scale_zero_dtype!r}; "
             f"expected one of {tuple(DTYPE_STORAGE_BYTES)}"
         )
+    codebook_format = quantization_format in (
+        "int-codebook",
+        "int-codebook-affine",
+    )
+    if codebook_format and codepoints is None:
+        inferred_codepoints = round(2**bits)
+        if not math.isclose(math.log2(inferred_codepoints), bits):
+            raise ValueError(
+                f"Cannot infer codepoints from effective bits={bits}"
+            )
+        codepoints = inferred_codepoints
+    radix = (
+        radix_packing_parameters(codepoints)
+        if codepoints is not None and codebook_format
+        else None
+    )
 
     scale_zero_bytes_per_value = DTYPE_STORAGE_BYTES[scale_zero_dtype]
-    logs_by_weight_name = {
-        f"{log['full_name']}.weight": log
-        for log in layer_logs
-    }
+    logs_by_weight_name = {f"{log['full_name']}.weight": log for log in layer_logs}
     unmatched_quantized_names = set(logs_by_weight_name)
 
     dense_state_dict_bytes = 0
@@ -1768,7 +1832,8 @@ def estimate_packed_storage(
     unquantized_value_count = 0
     quantized_dense_bytes = 0
     quantized_value_count = 0
-    packed_weight_bytes = 0
+    ideal_packed_weight_bytes = 0
+    realizable_packed_weight_bytes = 0
     scale_zero_bytes = 0
     centroid_bytes = 0
     g_idx_bytes = 0
@@ -1794,39 +1859,64 @@ def estimate_packed_storage(
             rows, cols = log["shape"]
             packed_rows = rows + (-rows % 3)
             packed_cols = cols + (-cols % 16)
-            packed_weight_bytes += (packed_rows // 3) * packed_cols
+            tensor_packed_bytes = (packed_rows // 3) * packed_cols
+            ideal_packed_weight_bytes += tensor_packed_bytes
+            realizable_packed_weight_bytes += tensor_packed_bytes
             centroid_bytes += math.prod(log["centroid_shape"])
             scale_zero_values = math.prod(log["scale_shape"])
-        elif quantization_format == "int-codebook":
-            packed_weight_bytes += math.ceil(n_values * bits / 8)
+        elif codebook_format:
+            ideal_packed_weight_bytes += math.ceil(n_values * bits / 8)
+            assert radix is not None
+            realizable_packed_weight_bytes += (
+                math.ceil(n_values / int(radix["symbols_per_chunk"]))
+                * int(radix["chunk_bytes"])
+            )
             scale_zero_values = math.prod(log["scale_shape"])
+            if quantization_format == "int-codebook-affine":
+                scale_zero_values += math.prod(log["zero_shape"])
             g_idx_bytes += math.prod(log["g_idx_shape"]) * 4
         else:
-            packed_weight_bytes += math.ceil(n_values * bits / 8)
+            tensor_packed_bytes = math.ceil(n_values * bits / 8)
+            ideal_packed_weight_bytes += tensor_packed_bytes
+            realizable_packed_weight_bytes += tensor_packed_bytes
             scale_zero_values = math.prod(log["scale_shape"]) + math.prod(
                 log["zero_shape"]
             )
             g_idx_bytes += math.prod(log["g_idx_shape"]) * 4
         scale_zero_bytes += scale_zero_values * scale_zero_bytes_per_value
 
-    packed_without_g_idx = (
+    ideal_without_g_idx = (
         unquantized_dense_bytes
-        + packed_weight_bytes
+        + ideal_packed_weight_bytes
         + scale_zero_bytes
         + centroid_bytes
     )
-    packed_with_g_idx = packed_without_g_idx + g_idx_bytes
+    ideal_with_g_idx = ideal_without_g_idx + g_idx_bytes
+    realizable_without_g_idx = (
+        unquantized_dense_bytes
+        + realizable_packed_weight_bytes
+        + scale_zero_bytes
+        + centroid_bytes
+    )
+    realizable_with_g_idx = realizable_without_g_idx + g_idx_bytes
 
     total_values = unquantized_value_count + quantized_value_count
-    quantized_bytes_without_g_idx = (
-        packed_weight_bytes + scale_zero_bytes + centroid_bytes
+    ideal_quantized_without_g_idx = (
+        ideal_packed_weight_bytes + scale_zero_bytes + centroid_bytes
     )
-    quantized_bytes_with_g_idx = quantized_bytes_without_g_idx + g_idx_bytes
+    ideal_quantized_with_g_idx = ideal_quantized_without_g_idx + g_idx_bytes
+    realizable_quantized_without_g_idx = (
+        realizable_packed_weight_bytes + scale_zero_bytes + centroid_bytes
+    )
+    realizable_quantized_with_g_idx = (
+        realizable_quantized_without_g_idx + g_idx_bytes
+    )
 
-    return {
+    result = {
         "assumptions": {
             "scope": "state_dict tensors only; tokenizer/config files are excluded",
             "quantized_weight_bits": bits,
+            "quantized_weight_bits_kind": "ideal_information_rate",
             "quantization_format": quantization_format,
             "scale_zero_dtype": scale_zero_dtype,
             "g_idx_dtype": "int32",
@@ -1835,28 +1925,52 @@ def estimate_packed_storage(
                 "S3D8 rows padded to multiple of 3 and columns to multiple of 16"
                 if quantization_format == "s3d8"
                 else (
-                    "ideal fractional code packing rounded up to whole bytes per tensor"
-                    if quantization_format == "int-codebook"
+                    "ideal information rate rounded up to whole bytes per tensor; "
+                    "see radix_packing for realizable byte-aligned storage"
+                    if codebook_format
                     else "rounded up to whole bytes per tensor"
                 )
             ),
         },
         "dense_state_dict_bytes": dense_state_dict_bytes,
-        "estimated_packed_without_g_idx_bytes": packed_without_g_idx,
-        "estimated_packed_with_g_idx_bytes": packed_with_g_idx,
+        # Compatibility fields retain the ideal information-rate estimate.
+        "estimated_packed_without_g_idx_bytes": ideal_without_g_idx,
+        "estimated_packed_with_g_idx_bytes": ideal_with_g_idx,
         "overall_bits_per_value_without_g_idx": (
-            packed_without_g_idx * 8 / total_values if total_values else 0.0
+            ideal_without_g_idx * 8 / total_values if total_values else 0.0
         ),
         "overall_bits_per_value_with_g_idx": (
-            packed_with_g_idx * 8 / total_values if total_values else 0.0
+            ideal_with_g_idx * 8 / total_values if total_values else 0.0
         ),
         "quantized_effective_bits_per_value_without_g_idx": (
-            quantized_bytes_without_g_idx * 8 / quantized_value_count
+            ideal_quantized_without_g_idx * 8 / quantized_value_count
             if quantized_value_count
             else 0.0
         ),
         "quantized_effective_bits_per_value_with_g_idx": (
-            quantized_bytes_with_g_idx * 8 / quantized_value_count
+            ideal_quantized_with_g_idx * 8 / quantized_value_count
+            if quantized_value_count
+            else 0.0
+        ),
+        "ideal_packed_weight_bytes": ideal_packed_weight_bytes,
+        "estimated_ideal_packed_without_g_idx_bytes": ideal_without_g_idx,
+        "estimated_ideal_packed_with_g_idx_bytes": ideal_with_g_idx,
+        "realizable_packed_weight_bytes": realizable_packed_weight_bytes,
+        "estimated_realizable_packed_without_g_idx_bytes": realizable_without_g_idx,
+        "estimated_realizable_packed_with_g_idx_bytes": realizable_with_g_idx,
+        "full_model_effective_bits_without_g_idx": (
+            realizable_without_g_idx * 8 / total_values if total_values else 0.0
+        ),
+        "full_model_effective_bits_with_g_idx": (
+            realizable_with_g_idx * 8 / total_values if total_values else 0.0
+        ),
+        "realizable_quantized_effective_bits_per_value_without_g_idx": (
+            realizable_quantized_without_g_idx * 8 / quantized_value_count
+            if quantized_value_count
+            else 0.0
+        ),
+        "realizable_quantized_effective_bits_per_value_with_g_idx": (
+            realizable_quantized_with_g_idx * 8 / quantized_value_count
             if quantized_value_count
             else 0.0
         ),
@@ -1865,7 +1979,7 @@ def estimate_packed_storage(
         "unquantized_values": unquantized_value_count,
         "quantized_dense_bytes": quantized_dense_bytes,
         "unquantized_dense_bytes": unquantized_dense_bytes,
-        "packed_weight_bytes": packed_weight_bytes,
+        "packed_weight_bytes": ideal_packed_weight_bytes,
         "scale_zero_bytes": scale_zero_bytes,
         "centroid_bytes": centroid_bytes,
         "g_idx_bytes": g_idx_bytes,
@@ -1873,6 +1987,18 @@ def estimate_packed_storage(
         "unquantized_tensor_count": unquantized_tensor_count,
         "unmatched_quantized_tensor_names": sorted(unmatched_quantized_names),
     }
+    if radix is not None:
+        result["radix_packing"] = {
+            **radix,
+            "packed_bytes": realizable_packed_weight_bytes,
+        }
+        result["radix_chunk_bytes"] = radix["chunk_bytes"]
+        result["radix_symbols_per_chunk"] = radix["symbols_per_chunk"]
+        result["radix_bits_per_weight"] = radix["bits_per_weight"]
+        result["radix_packed_weight_bytes"] = realizable_packed_weight_bytes
+    else:
+        result["radix_packing"] = None
+    return result
 
 
 def _serializable_quantization_logs(
@@ -2147,7 +2273,7 @@ def quantize_full_multimodal_scope(
 def quantize(
     model_name: str,
     output_dir: Path,
-    bits: int,
+    bits: int | None,
     quantization_format: str = "int",
     target_scope: str = "text-self",
     calibration_source: str | None = None,
@@ -2214,22 +2340,25 @@ def quantize(
         )
     if quantization_format == "int" and bits not in SUPPORTED_BITS:
         raise ValueError(f"Unsupported bits={bits}, expected one of {SUPPORTED_BITS}")
-    if quantization_format == "int-codebook":
+    if quantization_format in ("int-codebook", "int-codebook-affine"):
         if codepoints is None:
-            raise ValueError("format='int-codebook' requires codepoints")
+            raise ValueError(f"format={quantization_format!r} requires codepoints")
         if codepoints < 2:
             raise ValueError(f"codepoints must be >= 2, got {codepoints}")
-        element_range = Q.IntFormat(
-            math.log2(codepoints),
-            mode="asymmetric",
-        ).range
-        if element_range[1] <= 0:
-            raise ValueError(
-                "format='int-codebook' requires at least one positive codepoint "
-                f"for absmax scaling, got codepoints={codepoints}"
-            )
+        if quantization_format == "int-codebook":
+            element_range = Q.IntFormat(
+                math.log2(codepoints),
+                mode="asymmetric",
+            ).range
+            if element_range[1] <= 0:
+                raise ValueError(
+                    "format='int-codebook' requires at least one positive codepoint "
+                    f"for absmax scaling, got codepoints={codepoints}"
+                )
     elif codepoints is not None:
-        raise ValueError("--codepoints is only supported with format='int-codebook'")
+        raise ValueError(
+            "--codepoints is only supported with a codebook quantization format"
+        )
     if batch_size < 1:
         raise ValueError(f"batch_size must be >= 1, got {batch_size}")
     if calibration_samples < 1:
@@ -2432,7 +2561,7 @@ def quantize(
 
     config = GPTQConfig(
         quantization_format=quantization_format,
-        bits=bits,
+        bits=bits if quantization_format == "int" else None,
         codepoints=codepoints,
         group_size=group_size,
         blocksize=blocksize,
@@ -2443,6 +2572,7 @@ def quantize(
         static_groups=static_groups,
         sym=sym,
         mse=mse,
+        scale_zero_dtype=storage_scale_zero_dtype,
     )
 
     text_layer_stack = mllama_text_layers(model)
@@ -2566,7 +2696,7 @@ def quantize(
 
     if quantization_format == "int":
         effective_weight_bits = float(bits)
-    elif quantization_format == "int-codebook":
+    elif quantization_format in ("int-codebook", "int-codebook-affine"):
         assert codepoints is not None
         effective_weight_bits = math.log2(codepoints)
     else:
@@ -2577,11 +2707,15 @@ def quantize(
         bits=effective_weight_bits,
         scale_zero_dtype=storage_scale_zero_dtype,
         quantization_format=quantization_format,
+        codepoints=codepoints,
     )
     if verbose:
+        realizable_gib = (
+            packed_storage["estimated_realizable_packed_with_g_idx_bytes"]
+            / 1024**3
+        )
         print(
-            "Estimated packed storage: "
-            f"{packed_storage['estimated_packed_with_g_idx_bytes'] / 1024**3:.3f} GiB",
+            f"Estimated realizable packed storage: {realizable_gib:.3f} GiB",
             flush=True,
         )
     quantized_checkpoint_path = None
@@ -2601,18 +2735,25 @@ def quantize(
         "artifact_type": {
             "int": "dense_dequantized_local_gptq",
             "int-codebook": "dense_dequantized_local_gptq_int_codebook",
+            "int-codebook-affine": (
+                "dense_dequantized_local_gptq_int_codebook_affine"
+            ),
             "s3d8": "dense_dequantized_local_gptq_s3d8",
         }[quantization_format],
         "format": quantization_format,
         "bits": bits if quantization_format == "int" else None,
-        "codepoints": codepoints if quantization_format == "int-codebook" else None,
-        "effective_weight_bits": effective_weight_bits,
-        "quantizer_mode": (
-            "scale_only_absmax_int_codebook"
-            if quantization_format == "int-codebook"
+        "codepoints": (
+            codepoints
+            if quantization_format in ("int-codebook", "int-codebook-affine")
             else None
         ),
+        "effective_weight_bits": effective_weight_bits,
+        "quantizer_mode": {
+            "int-codebook": "scale_only_absmax_int_codebook",
+            "int-codebook-affine": "uniform_affine_absmax_int_codebook",
+        }.get(quantization_format),
         "scale_dtype": storage_scale_zero_dtype,
+        "scale_zero_dtype": storage_scale_zero_dtype,
         "quantized_checkpoint_path": (
             str(quantized_checkpoint_path) if quantized_checkpoint_path else None
         ),
@@ -2783,7 +2924,7 @@ def _add_gptq_args(parser: argparse.ArgumentParser) -> None:
         "--codepoints",
         type=int,
         default=None,
-        help="Number of INT codepoints for --format int-codebook",
+        help="Number of INT codepoints for either codebook format",
     )
     parser.add_argument("--group-size", type=int, default=DEFAULT_GROUP_SIZE)
     parser.add_argument("--blocksize", type=int, default=128)
@@ -2894,7 +3035,7 @@ def _add_quantize_args(parser: argparse.ArgumentParser) -> None:
         "--storage-scale-zero-dtype",
         choices=tuple(DTYPE_STORAGE_BYTES),
         default=DEFAULT_STORAGE_SCALE_ZERO_DTYPE,
-        help="Assumed dtype for packed GPTQ scale/zero storage estimates",
+        help="Dtype used to round GPTQ scales/zeros and estimate their storage",
     )
     parser.add_argument("--quiet", action="store_true")
 
@@ -2939,7 +3080,7 @@ def _add_evaluate_args(parser: argparse.ArgumentParser) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run local dense GPTQ INT4/INT3/S3D8 C4 baselines"
+        description="Run local dense GPTQ INT/codebook/S3D8 baselines"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -2957,16 +3098,16 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     if args.command == "quantize":
-        if args.format == "int-codebook":
+        if args.format in ("int-codebook", "int-codebook-affine"):
             if args.bits is not None:
-                parser.error("--bits cannot be used with --format int-codebook")
+                parser.error(f"--bits cannot be used with --format {args.format}")
             if args.codepoints is None:
-                parser.error("--codepoints is required with --format int-codebook")
-            bits = 4
+                parser.error(f"--codepoints is required with --format {args.format}")
+            bits = None
         else:
             if args.codepoints is not None:
                 parser.error(
-                    "--codepoints can only be used with --format int-codebook"
+                    "--codepoints can only be used with a codebook format"
                 )
             bits = args.bits if args.bits is not None else 4
         output_dir = args.output_dir or default_output_dir(
@@ -3016,8 +3157,9 @@ def main(argv: list[str] | None = None) -> None:
         gib = 1024**3
         print(
             "Estimated packed tensor storage: "
-            f"{storage['estimated_packed_with_g_idx_bytes'] / gib:.3f} GiB, "
-            f"{storage['overall_bits_per_value_with_g_idx']:.3f} bits/value overall"
+            f"{storage['estimated_realizable_packed_with_g_idx_bytes'] / gib:.3f} GiB, "
+            f"{storage['full_model_effective_bits_with_g_idx']:.3f} "
+            "bits/value overall"
         )
         print(
             "Dense local artifact size: "
