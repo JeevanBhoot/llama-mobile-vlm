@@ -1710,6 +1710,23 @@ def build_lm_head_inputs(
     return LayerInputs(next_args, next_kwargs)
 
 
+def offload_completed_modules_for_lm_head(
+    vision_stack: VisionLayerStack,
+    text_layer_stack: TextLayerStack,
+    projector: torch.nn.Linear,
+    lm_head: torch.nn.Linear,
+    device: str,
+) -> None:
+    """Free GPU memory from modules that are no longer used before lm_head GPTQ."""
+
+    text_layer_stack.language_model.to("cpu")
+    vision_stack.vision_model.to("cpu")
+    projector.to("cpu")
+    lm_head.to(device)
+    if str(device).startswith("cuda"):
+        torch.cuda.empty_cache()
+
+
 def load_model(
     model_name_or_path: str, dtype: torch.dtype, device: str
 ) -> torch.nn.Module:
@@ -2100,6 +2117,20 @@ def quantize_full_multimodal_scope(
         device=device,
         calibration_gpu_cache=calibration_gpu_cache,
     )
+    del text_inputs
+    if config.quantization_format == "s3d8" and str(device).startswith("cuda"):
+        if verbose:
+            print(
+                "[lm_head]: offloading completed model body to CPU for S3D8 fitting",
+                flush=True,
+            )
+        offload_completed_modules_for_lm_head(
+            vision_stack,
+            text_layer_stack,
+            projector,
+            lm_head,
+            device,
+        )
     layer_logs.extend(
         quantize_standalone_linear(
             lm_head_prefix,

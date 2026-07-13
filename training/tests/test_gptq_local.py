@@ -890,6 +890,39 @@ def test_quantize_full_multimodal_targets_vision_cross_projector_and_lm_head(
     assert metadata["estimated_packed_storage"]["unmatched_quantized_tensor_names"] == []
 
 
+def test_s3d8_lm_head_offload_moves_only_completed_modules(monkeypatch) -> None:
+    model = TinyFullMllama()
+    vision_stack = local.mllama_vision_layers(model)
+    text_stack = local.mllama_text_layers(model)
+    projector = model.model.multi_modal_projector
+    lm_head = model.lm_head
+
+    language_to = mock.Mock(return_value=text_stack.language_model)
+    vision_to = mock.Mock(return_value=vision_stack.vision_model)
+    projector_to = mock.Mock(return_value=projector)
+    lm_head_to = mock.Mock(return_value=lm_head)
+    monkeypatch.setattr(text_stack.language_model, "to", language_to)
+    monkeypatch.setattr(vision_stack.vision_model, "to", vision_to)
+    monkeypatch.setattr(projector, "to", projector_to)
+    monkeypatch.setattr(lm_head, "to", lm_head_to)
+    empty_cache = mock.Mock()
+    monkeypatch.setattr(local.torch.cuda, "empty_cache", empty_cache)
+
+    local.offload_completed_modules_for_lm_head(
+        vision_stack,
+        text_stack,
+        projector,
+        lm_head,
+        "cuda:0",
+    )
+
+    language_to.assert_called_once_with("cpu")
+    vision_to.assert_called_once_with("cpu")
+    projector_to.assert_called_once_with("cpu")
+    lm_head_to.assert_called_once_with("cuda:0")
+    empty_cache.assert_called_once_with()
+
+
 def test_quantize_full_multimodal_s3d8_checkpoint_includes_full_targets(
     monkeypatch,
     tmp_path,
