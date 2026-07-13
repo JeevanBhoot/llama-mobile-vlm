@@ -184,7 +184,12 @@ python -m gptq.local quantize \
 
 The full multimodal path quantizes vision encoder and global-encoder Linear
 layers, text self-attention layers, text cross-attention layers,
-`model.multi_modal_projector`, and `lm_head`. 
+`model.multi_modal_projector`, and `lm_head`.
+
+VQAv2 calibration defaults to the `train` split from
+`Multimodal-Fatima/VQAv2_sample_train`. 
+VQAv2 evaluation continues to use the `validation` split from `lmms-lab/VQAv2`.
+To use the `validation` split for calibration, pass `--calibration-split validation`.
 
 For large multimodal runs:
 
