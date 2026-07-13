@@ -1,5 +1,6 @@
 # Copyright (c) 2026 Graphcore Ltd. All rights reserved.
 
+import json
 import math
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ import weight_formats.quantisation_training as QT
 
 def fake_vqa_module(evaluate=None):
     class FakeVQA:
+        QUESTION_TEMPLATE = "Question: {question}"
         data = mock.Mock(return_value=["a"])
 
         @classmethod
@@ -54,6 +56,14 @@ def test_default_output_dir_for_int_codebook_includes_sweep_params() -> None:
         codepoints=7,
         group_size=128,
     ) == Path("out/gptq/llama-3.2-vision-local-gptq-int-k7-g128-c4")
+
+
+def test_default_output_dir_identifies_full_multimodal_calibration() -> None:
+    assert local.default_output_dir(
+        4,
+        target_scope="full-multimodal",
+        calibration_source="synthetic",
+    ) == Path("out/gptq/llama-3.2-vision-local-gptq-int4-synthetic-full")
 
 
 class TinySelfAttention(torch.nn.Module):
@@ -589,6 +599,163 @@ def test_vqav2_calibration_uses_processor_images_and_prompts(monkeypatch) -> Non
     assert batches[0]["input_ids"].shape == (1, 3)
 
 
+def test_vqav2_train_calibration_uses_small_train_dataset(monkeypatch) -> None:
+    data = local.datasets.Dataset.from_dict(
+        {
+            "question_id": [1, 2],
+            "image": ["image-a", "image-b"],
+            "question": ["question-a", "question-b"],
+            "answers": [["a"], ["b"]],
+        }
+    )
+    load_dataset = mock.Mock(return_value=data)
+    monkeypatch.setattr(local.datasets, "load_dataset", load_dataset)
+
+    class RecordingProcessor:
+        def __init__(self):
+            self.prompts = []
+
+        def __call__(self, images, prompts, **kwargs):
+            self.prompts.extend(prompts)
+            return {"input_ids": torch.ones(len(prompts), 2, dtype=torch.long)}
+
+    processor = RecordingProcessor()
+    batches = local.load_vqav2_calibration_batches(
+        processor,
+        n_samples=2,
+        batch_size=1,
+        split="train",
+        max_tokens=16,
+        load_from_s3=False,
+    )
+
+    load_dataset.assert_called_once_with(
+        local.VQAV2_TRAIN_CALIBRATION_DATASET,
+        split="train",
+    )
+    assert len(batches) == 2
+    assert all("Question: question-" in prompt for prompt in processor.prompts)
+
+
+def test_public_synthetic_s3_path_resolves_data_root() -> None:
+    path = (
+        "s3://graphcore-research-public/2026-llama-mobile/data/generation/"
+        "llama-3.2-11b-vision-instruct/imagenet-train/new-prompts-1280k/"
+    )
+
+    assert local._parse_public_synthetic_s3_path(path) == (
+        "graphcore-research-public",
+        "2026-llama-mobile/data",
+        "generation/llama-3.2-11b-vision-instruct/imagenet-train/"
+        "new-prompts-1280k",
+    )
+
+
+def test_public_synthetic_s3_path_rejects_raw_dataset() -> None:
+    with pytest.raises(ValueError, match="generated rollout"):
+        local._parse_public_synthetic_s3_path(
+            "s3://bucket/project/data/datasets/imagenet-train/"
+        )
+
+
+def test_stage_public_synthetic_data_downloads_rollout_and_images(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import train_data
+    import utility
+
+    monkeypatch.setattr(utility, "LOCAL_DATA_PATH", str(tmp_path))
+    monkeypatch.setattr(
+        train_data,
+        "load_config",
+        lambda _: SimpleNamespace(dataset_name="imagenet", split="train"),
+    )
+    downloads = []
+
+    def record_download(bucket, prefix, destination, **kwargs):
+        downloads.append((bucket, prefix, destination, kwargs))
+        if prefix.endswith("datasets/imagenet-train") and not (
+            destination / "state.json"
+        ).exists():
+            destination.mkdir(parents=True, exist_ok=True)
+            (destination / "state.json").write_text(
+                json.dumps(
+                    {
+                        "_data_files": [
+                            {"filename": f"data-{index:05d}-of-00010.arrow"}
+                            for index in range(10)
+                        ]
+                    }
+                )
+            )
+
+    monkeypatch.setattr(
+        local,
+        "_download_public_s3_prefix",
+        record_download,
+    )
+
+    relative = local._stage_public_synthetic_data(
+        "s3://public/project/data/generation/model/imagenet-train/run"
+    )
+
+    assert relative == "generation/model/imagenet-train/run"
+    assert [download[1] for download in downloads] == [
+        "project/data/generation/model/imagenet-train/run",
+        "project/data/datasets/imagenet-train",
+        "project/data/datasets/imagenet-train",
+    ]
+    manifest = json.loads(
+        (tmp_path / relative / local.PUBLIC_SYNTHETIC_MANIFEST).read_text()
+    )
+    assert manifest["image_shards"] == 8
+    assert len(manifest["image_files"]) == 8
+
+
+def test_load_public_synthetic_calibration_uses_staged_subset(tmp_path) -> None:
+    image_path = tmp_path / "images"
+    local.datasets.Dataset.from_dict(
+        {"index": [10, 20], "image": ["image-10", "image-20"]}
+    ).save_to_disk(image_path)
+    image_files = [str(path) for path in image_path.glob("*.arrow")]
+
+    rollout_path = tmp_path / "rollout"
+    (rollout_path / "out").mkdir(parents=True)
+    (rollout_path / local.PUBLIC_SYNTHETIC_MANIFEST).write_text(
+        json.dumps({"image_files": image_files})
+    )
+    (rollout_path / "out" / "out.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps([10, "<|begin_of_text|>output-10"]),
+                json.dumps([20, "<|begin_of_text|>output-20"]),
+            ]
+        )
+        + "\n"
+    )
+
+    class RecordingProcessor:
+        def __init__(self):
+            self.texts = []
+
+        def __call__(self, images, texts, **kwargs):
+            self.texts.extend(texts)
+            return {"input_ids": torch.ones(len(texts), 2, dtype=torch.long)}
+
+    processor = RecordingProcessor()
+    batches = local._load_public_synthetic_calibration_batches(
+        processor,
+        local_paths=[rollout_path],
+        n_samples=2,
+        batch_size=1,
+        max_tokens=16,
+    )
+
+    assert len(batches) == 2
+    assert set(processor.texts) == {"output-10", "output-20"}
+
+
 def _tiny_multimodal_batch() -> dict[str, torch.Tensor]:
     return {
         "input_ids": torch.tensor([[1, 2, 3, 4]]),
@@ -598,6 +765,79 @@ def _tiny_multimodal_batch() -> dict[str, torch.Tensor]:
         "aspect_ratio_mask": torch.ones(1, 1, 1),
         "cross_attention_mask": torch.ones(1, 4, 1, 1),
     }
+
+
+def test_deferred_vision_mask_is_exact_and_reuses_bounded_cache() -> None:
+    local.clear_vision_attention_mask_cache()
+    aspect_ratio_mask = torch.tensor([[1, 0]])
+    deferred = local.DeferredVisionAttentionMask(
+        aspect_ratio_mask=aspect_ratio_mask,
+        num_patches=3,
+        target_length=4,
+        dtype=torch.float32,
+    )
+
+    expected = local._prepare_aspect_ratio_attention_mask(
+        aspect_ratio_mask,
+        num_patches=3,
+        target_length=4,
+        dtype=torch.float32,
+    )
+    first = deferred.to("cpu")
+    second = deferred.to("cpu")
+
+    torch.testing.assert_close(first, expected)
+    assert first.data_ptr() == second.data_ptr()
+    assert len(local._VISION_ATTENTION_MASK_CACHE) == 1
+
+
+def test_projector_input_stream_matches_materialized_and_can_release_sources() -> None:
+    context = local.VisionBatchContext(
+        batch_size=1,
+        num_concurrent_media=1,
+        num_tiles=1,
+        num_patches=2,
+        num_padding_patches=0,
+        dim=2,
+        aspect_ratio_ids=torch.ones(1, 1, dtype=torch.long),
+        attention_mask=local.DeferredVisionAttentionMask(
+            aspect_ratio_mask=torch.ones(1, 1),
+            num_patches=2,
+            target_length=2,
+            dtype=torch.float32,
+        ),
+    )
+    global_outputs = local.LayerInputs(
+        args=[[torch.tensor([[[1.0, 2.0], [3.0, 4.0]]])]],
+        kwargs=[{}],
+    )
+    local_capture = local.LayerInputs(
+        args=[[torch.tensor([[[5.0, 6.0], [7.0, 8.0]]])]],
+        kwargs=[{}],
+    )
+    captures = {0: local_capture}
+    materialized = local.build_projector_inputs(
+        global_outputs,
+        captures,
+        [context],
+        [0],
+        device="cpu",
+    )
+
+    streamed = list(
+        local.iter_projector_inputs(
+            global_outputs,
+            captures,
+            [context],
+            [0],
+            device="cpu",
+            consume=True,
+        )
+    )
+
+    torch.testing.assert_close(streamed[0][0][0], materialized.args[0][0])
+    assert global_outputs.args[0] == []
+    assert local_capture.args[0] == []
 
 
 def test_quantize_full_multimodal_targets_vision_cross_projector_and_lm_head(
@@ -634,7 +874,12 @@ def test_quantize_full_multimodal_targets_vision_cross_projector_and_lm_head(
     assert metadata["target_scope_option"] == "full-multimodal"
     assert metadata["target_scope"] == "mllama_full_multimodal_heavy_linears"
     assert metadata["calibration_source"] == "vqav2"
-    assert metadata["calibration"]["prototype_warning"] == local.VQAV2_PROTOTYPE_WARNING
+    assert metadata["calibration"]["split"] == "train"
+    assert (
+        metadata["calibration"]["dataset"]
+        == local.VQAV2_TRAIN_CALIBRATION_DATASET
+    )
+    assert "prototype_warning" not in metadata["calibration"]
     assert metadata["skipped_cross_attention_layers"] == []
     assert model.model.language_model.layers[1].called
     assert "model.vision_model.transformer.layers.0.self_attn.q_proj" in full_names
