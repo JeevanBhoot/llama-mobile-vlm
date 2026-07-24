@@ -352,6 +352,70 @@ REGISTER_BENCHMARK(_dot_inst_throughput)(const benchmarking::Report& report) {
     }
 }
 
+REGISTER_BENCHMARK(_tbl_inst_throughput)(const benchmarking::Report& report) {
+    auto outerReps = 20u;
+    auto innerReps = 1u << 22;
+    auto lookupsPerLoop = 16u * 16u;  // #instructions * 16 byte lookups per TBL.
+
+    auto maxThreads = std::thread::hardware_concurrency();
+    std::vector<uint> nthreadsRange;
+    for (auto t = 1u; t < maxThreads; t *= 4u) {
+        nthreadsRange.push_back(t);
+    }
+    nthreadsRange.push_back(maxThreads);
+
+    for (auto threads : nthreadsRange) {
+        benchmarking::Benchmark benchmark;
+        for (auto rep = 0u; rep < outerReps; ++rep) {
+            auto timer = benchmark.record();
+#pragma omp parallel for num_threads(threads) schedule(static)
+            for (auto i = 0u; i < threads; ++i) {
+                for (auto j = 0u; j < innerReps; ++j) {
+                    asm volatile(
+                        "tbl v0.16b, {v16.16b, v17.16b, v18.16b, v19.16b}, v20.16b\n"
+                        "tbl v1.16b, {v16.16b, v17.16b, v18.16b, v19.16b}, v21.16b\n"
+                        "tbl v2.16b, {v16.16b, v17.16b, v18.16b, v19.16b}, v22.16b\n"
+                        "tbl v3.16b, {v16.16b, v17.16b, v18.16b, v19.16b}, v23.16b\n"
+                        //
+                        "tbl v4.16b, {v16.16b, v17.16b, v18.16b, v19.16b}, v20.16b\n"
+                        "tbl v5.16b, {v16.16b, v17.16b, v18.16b, v19.16b}, v21.16b\n"
+                        "tbl v6.16b, {v16.16b, v17.16b, v18.16b, v19.16b}, v22.16b\n"
+                        "tbl v7.16b, {v16.16b, v17.16b, v18.16b, v19.16b}, v23.16b\n"
+                        //
+                        "tbl v8.16b, {v16.16b, v17.16b, v18.16b, v19.16b}, v20.16b\n"
+                        "tbl v9.16b, {v16.16b, v17.16b, v18.16b, v19.16b}, v21.16b\n"
+                        "tbl v10.16b, {v16.16b, v17.16b, v18.16b, v19.16b}, v22.16b\n"
+                        "tbl v11.16b, {v16.16b, v17.16b, v18.16b, v19.16b}, v23.16b\n"
+                        //
+                        "tbl v12.16b, {v16.16b, v17.16b, v18.16b, v19.16b}, v20.16b\n"
+                        "tbl v13.16b, {v16.16b, v17.16b, v18.16b, v19.16b}, v21.16b\n"
+                        "tbl v14.16b, {v16.16b, v17.16b, v18.16b, v19.16b}, v22.16b\n"
+                        "tbl v15.16b, {v16.16b, v17.16b, v18.16b, v19.16b}, v23.16b\n"
+                        :
+                        :
+                        : "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9",
+                          "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17",
+                          "v18", "v19", "v20", "v21", "v22", "v23");
+                }
+            }
+        }
+
+        auto result = benchmark.result();
+        auto lookups = threads * innerReps * static_cast<ulong>(lookupsPerLoop);
+        report({
+            {"instruction", "tbl_4reg"},
+            {"threads", threads},
+            {"inner_reps", innerReps},
+            {"time_ms", 1e3 * result.mean},
+            {"lookup_count", lookups},
+            {"glookup_s", static_cast<double>(lookups) / 1e9 / result.mean},
+            {"time", benchmark.times},
+        });
+        std::cerr << report << "tbl_4reg  " << static_cast<double>(lookups) / 1e9 / result
+                  << " Glookup/s, with " << threads << " threads\n";
+    }
+}
+
 #endif  // __ARM_NEON
 
 }  // namespace
