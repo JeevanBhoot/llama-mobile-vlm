@@ -177,7 +177,7 @@ def get_vocab_dict(
     if tokenizer.chat_template is None:
         raise ValueError("Tokenizer has no chat_template")
 
-    # Persist-to-file & load to get acccess to the tokenizer internals
+    # Persist-to-file & load to get access to the tokenizer internals
     with tempfile.TemporaryDirectory() as tmp:
         tokenizer.backend_tokenizer.save(tmp + "/tokenizer.json")
         with open(tmp + "/tokenizer.json") as f:
