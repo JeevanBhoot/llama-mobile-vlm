@@ -54,7 +54,7 @@ def test_evaluate() -> None:
         out="<|begin_of_text|><|image|><|begin_of_text|>Question:Answer",
     )
 
-    # Hacky
+    # Construct a minimal Dataset instance without loading files
     ds = train_data.Dataset.__new__(train_data.Dataset)
     ds.data = [example]
     config = train_data.GenerationConfig.default()

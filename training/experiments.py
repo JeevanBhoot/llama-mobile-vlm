@@ -70,7 +70,6 @@ def run_experiment(xp: Experiment) -> Results:
     processor = transformers.AutoProcessor.from_pretrained(xp.model)
 
     # Quantise the model
-    # TODO: Allow variable quantisation
     QT.convert(
         model,
         fmt_spec=xp.quantisation,

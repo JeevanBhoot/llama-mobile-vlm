@@ -25,7 +25,6 @@ Evaluate Visual question-answering tasks
 - AI2D
     - https://prior.allenai.org/projects/diagram-understanding
     - Baseline accuracy: 63.5% (test, 1k sample), Meta: 91.1% (test)
-        - TODO: Improve baseline accuracy
     - NOTE: Meta's proposed prompt is incomplete (missing MC options)
 
 Prompt formatting inherited from:
@@ -221,7 +220,7 @@ class VQA(Task):
 
         ds = ds.select_columns(cols)
 
-        # NOTE: Images re-appear in consequtive questions, best to shuffle
+        # NOTE: Images reappear in consecutive questions, so shuffling is recommended
         if shuffle_seed is not None:
             ds = ds.shuffle(shuffle_seed)
 
@@ -296,7 +295,7 @@ class ChartQA(Task):
         # Add an ID column
         ds = ds.add_column("id", column=range(len(ds)))
 
-        # NOTE: Images re-appear consequtive questions, best to shuffle
+        # NOTE: Images reappear in consecutive questions, so shuffling is recommended
         if shuffle_seed is not None:
             ds = ds.shuffle(shuffle_seed)
 
@@ -435,7 +434,6 @@ class DocVQA(Task):
     @classmethod
     def _preprocess(cls, text: str) -> str:
         # Minimal preprocessing (case-insensitive per instructions)
-        # TODO: eot token processing should probably be outside
         return text.lower().strip().replace("<|eot_id|>", "")
 
     @classmethod

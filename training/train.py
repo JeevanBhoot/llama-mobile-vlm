@@ -365,7 +365,6 @@ def _tokenise_and_add_mask(
     imgs = [[x.image] for x in batch]
     prompts_tok = processor(imgs, [x.prompt for x in batch])["input_ids"]
 
-    # TODO: Save outputs without <bot> tokens
     inp = processor(
         imgs,
         [x.out.replace("<|begin_of_text|>", "") for x in batch],
@@ -600,7 +599,7 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
             if settings.quantisation is not None:
                 student = _quantise(student, settings.quantisation)
                 if settings.wandb and rank == 0:
-                    # TODO: This is incorrect for compressed formats
+                    # This estimate may be inaccurate for compressed formats
                     n_bits = QT.count_bits(
                         student,
                         compute_dtype=getattr(torch, settings.execution.compute_dtype),
