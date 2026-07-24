@@ -791,6 +791,7 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
                 run.summary["error_type"] = error_type
                 run.summary["error_message"] = error_message
                 run.summary["traceback"] = tb
+        raise
     finally:
         if settings.wandb and rank == 0:
             run.summary["total_time"] = total_t
@@ -812,3 +813,4 @@ def run_experiment(settings: Settings) -> None:
     except Exception as e:
         print(e, file=sys.stderr, flush=True)
         traceback.print_exc()
+        raise
