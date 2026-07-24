@@ -9,6 +9,18 @@ datasets, checkpoints, and cluster infrastructure.
 
 For runnable public artifacts, see the [parent README](../README.md).
 
+## Structure
+
+- `train.py` — quantization-aware training and checkpoint generation.
+- `train_data.py` and `prompt_sampling.py` — dataset preparation, prompt
+  generation, and sampling configuration.
+- `direct_cast.py` — directly quantizes Hugging Face Llama weights.
+- `compress_s3d8_checkpoint.py` — packs trained S3D8 checkpoints for inference.
+- `squashedtensors.py` — reads and writes the project's `.sqt` model format.
+- `eval/` — VQA metrics and reference-output comparisons.
+- `vqa_interactive.py` — notebook-oriented utilities for inspecting model output.
+- `utility.py` — shared S3, distributed-training, model, and batching utilities.
+
 ---
 
 ## Developer guide
