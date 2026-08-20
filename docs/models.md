@@ -8,6 +8,9 @@ s3://graphcore-research-public/2026-llama-mobile/models/20260611/
 
 They are `.sqt` files using the format documented in [`file_format.md`](file_format.md). The files contain model weights, quantized weight metadata, tokenizer data, chat-template metadata, and model configuration in a single file.
 
+See the project [model card](MODEL_CARD.md) for intended use, limitations,
+licensing, and release checksums.
+
 ## Models
 
 | File | Size | Source model | Weights | Intended use |
@@ -27,6 +30,9 @@ mkdir -p models/
 aws s3 sync --no-sign-request \
   s3://graphcore-research-public/2026-llama-mobile/models/20260611/ \
   models/
+
+cd models
+sha256sum --check SHA256SUMS
 ```
 
 Or download individual files:
@@ -110,10 +116,28 @@ The original training checkpoint stores QAT master weights and centroids:
 s3://graphcore-research-public/2026-llama-mobile/hf_models/vision-11B-s3d8-training.safetensors
 ```
 
+An earlier compatibility checkpoint contains the S3D8 weights rounded back to
+BF16 for loading by standard Transformers model classes:
+
+```text
+s3://graphcore-research-public/2026-llama-mobile/hf_models/vision-11B-s3d8-as-bf16.safetensors
+```
+
 **Conversion commands:**
 
 To convert the training checkpoint into the compressed demo checkpoint:
 
 ```sh
 python training/compress_s3d8_checkpoint.py vision-11B-s3d8-training.safetensors vision-11B-s3d8-packed.safetensors
+```
+
+The `hf_models/` prefix also contains `LICENSE`, `NOTICE`, `MODEL_CARD.md`, and
+`SHA256SUMS`. Download and verify a checkpoint with:
+
+```sh
+for name in LICENSE NOTICE MODEL_CARD.md SHA256SUMS vision-11B-s3d8-packed.safetensors; do
+  aws s3 cp --no-sign-request \
+    s3://graphcore-research-public/2026-llama-mobile/hf_models/${name} .
+done
+sha256sum --check --ignore-missing SHA256SUMS
 ```

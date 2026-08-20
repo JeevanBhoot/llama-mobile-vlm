@@ -27,8 +27,9 @@ For a standalone Python demo of the QAT vision model using Transformers, see [`d
 
 ```sh
 pip install torch transformers accelerate safetensors pillow requests
-wget https://graphcore-research-public.s3.eu-west-1.amazonaws.com/2026-llama-mobile/hf_models/vision-11B-s3d8-packed.safetensors
-echo "What is this an image of?" | python demo.py --checkpoint vision-11B-s3d8-packed.safetensors --int8-activations --image https://picsum.photos/id/36/4179/2790
+mkdir -p models/hf
+wget -P models/hf https://graphcore-research-public.s3.eu-west-1.amazonaws.com/2026-llama-mobile/hf_models/vision-11B-s3d8-packed.safetensors
+echo "What is this an image of?" | python demo.py --checkpoint models/hf/vision-11B-s3d8-packed.safetensors --int8-activations --image https://picsum.photos/id/36/4179/2790
 ```
 
 To run the original bfloat16 baseline model, omit `--checkpoint` and `--int8-activations`. Run without `echo ... |` to enter an interactive prompt. Note that the demo is not optimised for performance.
@@ -76,7 +77,9 @@ Run a model-shaped benchmark:
 
 _Note that the inference library is optimised for Arm server and mobile CPUs - while it may run on x86, performance will be poor._
 
-See [`inference/README.md`](inference/README.md) for more commands and [`docs/models.md`](docs/models.md) for model provenance and download details.
+See [`inference/README.md`](inference/README.md) for more commands,
+[`docs/MODEL_CARD.md`](docs/MODEL_CARD.md) for the model card, and
+[`docs/models.md`](docs/models.md) for detailed conversion and download notes.
 
 
 ## Android App
@@ -91,4 +94,12 @@ The code in [`training/`](training) documents the quantization-aware training, e
 
 ## License
 
-Copyright (c) 2026 Graphcore Ltd. Licensed under the MIT License.
+Copyright (c) 2026 Graphcore Ltd.
+
+Built with Llama. Llama-Mobile is not affiliated with, sponsored by, or
+endorsed by Meta.
+
+The source code is licensed under the [MIT License](LICENSE). The derivative
+model weights are licensed under the [Llama 3.2 Community License](LICENSE_LLAMA_3.2)
+and include Meta's required [attribution notice](NOTICE). Use of Llama 3.2 is
+also subject to Meta's [Acceptable Use Policy](https://www.llama.com/llama3_2/use-policy).
