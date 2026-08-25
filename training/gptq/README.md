@@ -190,7 +190,6 @@ The local defaults are:
 - GPTQ block size: `128`
 - Activation order: disabled
 - Act-group-aware ordering: enabled
-- Static groups: disabled
 - Symmetric quantization: enabled
 - MSE shrink search: disabled
 - Damp percent: `0.05`

@@ -28,7 +28,6 @@ class GPTQConfig:
     damp_auto_increment: float = 0.01
     desc_act: bool = False
     act_group_aware: bool = True
-    static_groups: bool = False
     sym: bool = True
     mse: float = 0.0
     scale_zero_dtype: Literal["bfloat16", "float16", "float32"] = "bfloat16"
@@ -68,8 +67,6 @@ class GPTQConfig:
             )
         if self.group_size != -1 and self.group_size <= 0:
             raise ValueError("group_size must be -1 or a positive integer")
-        if self.static_groups and self.group_size == -1:
-            raise ValueError("static_groups requires a positive group_size")
         if self.act_group_aware and self.group_size == -1:
             raise ValueError("act_group_aware requires a positive group_size")
         if self.act_group_aware and self.desc_act:
@@ -507,20 +504,6 @@ class GPTQLinearQuantizer:
         zero = []
         now_idx = 1
 
-        groups = []
-        if (
-            self.config.quantization_format
-            in ("int", "int-codebook", "int-codebook-affine")
-            and self.config.static_groups
-        ):
-            for i in range(0, self.columns, self.config.group_size):
-                group_quantizer = self._new_quantizer()
-                group_quantizer.find_params(W[:, i : i + self.config.group_size])
-                scale.append(group_quantizer.scale)
-                if group_quantizer.zero.numel():
-                    zero.append(group_quantizer.zero)
-                groups.append(group_quantizer)
-
         if self.config.desc_act:
             perm = torch.argsort(torch.diag(H), descending=True)
             W = W[:, perm]
@@ -586,23 +569,16 @@ class GPTQLinearQuantizer:
                     in ("int", "int-codebook", "int-codebook-affine")
                     and self.config.group_size != -1
                 ):
-                    if not self.config.static_groups:
-                        if (i1 + i) % self.config.group_size == 0:
-                            quantizer.find_params(
-                                W[:, i1 + i : i1 + i + self.config.group_size]
-                            )
+                    if (i1 + i) % self.config.group_size == 0:
+                        quantizer.find_params(
+                            W[:, i1 + i : i1 + i + self.config.group_size]
+                        )
 
-                        if ((i1 + i) // self.config.group_size) - now_idx == -1:
-                            scale.append(quantizer.scale)
-                            if quantizer.zero.numel():
-                                zero.append(quantizer.zero)
-                            now_idx += 1
-                    else:
-                        idx = i1 + i
-                        if self.config.desc_act:
-                            assert perm is not None
-                            idx = int(perm[idx])
-                        quantizer = groups[idx // self.config.group_size]
+                    if ((i1 + i) // self.config.group_size) - now_idx == -1:
+                        scale.append(quantizer.scale)
+                        if quantizer.zero.numel():
+                            zero.append(quantizer.zero)
+                        now_idx += 1
 
                 q = quantizer.quantize(w.unsqueeze(1)).flatten()
                 Q1[:, i] = q
@@ -646,11 +622,7 @@ class GPTQLinearQuantizer:
             if self.config.group_size != -1
             else self.columns
         )
-        if self.config.static_groups and self.config.desc_act:
-            assert perm is not None
-            g_idx = [int(perm[i]) // group_size for i in range(self.columns)]
-        else:
-            g_idx = [i // group_size for i in range(self.columns)]
+        g_idx = [i // group_size for i in range(self.columns)]
         g_idx_tensor = torch.tensor(g_idx, dtype=torch.int32, device=Q.device)
 
         if self.config.desc_act:

@@ -2296,7 +2296,6 @@ def quantize(
     torch_dtype: str = DEFAULT_TORCH_DTYPE,
     desc_act: bool = False,
     act_group_aware: bool = True,
-    static_groups: bool = False,
     sym: bool = True,
     damp_percent: float = 0.05,
     damp_auto_increment: float = 0.01,
@@ -2569,7 +2568,6 @@ def quantize(
         damp_auto_increment=damp_auto_increment,
         desc_act=desc_act,
         act_group_aware=act_group_aware,
-        static_groups=static_groups,
         sym=sym,
         mse=mse,
         scale_zero_dtype=storage_scale_zero_dtype,
@@ -2936,7 +2934,6 @@ def _add_gptq_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--act-group-aware", action=argparse.BooleanOptionalAction, default=True
     )
-    parser.add_argument("--static-groups", action="store_true")
     parser.add_argument("--sym", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--mse", type=float, default=0.0)
 
@@ -3144,7 +3141,6 @@ def main(argv: list[str] | None = None) -> None:
             torch_dtype=args.torch_dtype,
             desc_act=args.desc_act,
             act_group_aware=args.act_group_aware,
-            static_groups=args.static_groups,
             sym=args.sym,
             damp_percent=args.damp_percent,
             damp_auto_increment=args.damp_auto_increment,
