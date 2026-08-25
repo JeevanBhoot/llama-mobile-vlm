@@ -183,15 +183,14 @@ def test_affine_codebook_gptq_matches_power_of_two_int(
 
 
 @pytest.mark.parametrize(
-    "desc_act,act_group_aware,static_groups,group_size",
+    "desc_act,act_group_aware,group_size",
     [
-        (False, False, False, -1),
-        (True, False, False, 4),
-        (False, False, True, 4),
+        (False, False, -1),
+        (True, False, 4),
     ],
 )
 def test_affine_codebook_gptq_anchor_parity_across_group_modes(
-    desc_act, act_group_aware, static_groups, group_size
+    desc_act, act_group_aware, group_size
 ) -> None:
     torch.manual_seed(625464)
     linear = torch.nn.Linear(8, 5, bias=False)
@@ -201,7 +200,6 @@ def test_affine_codebook_gptq_anchor_parity_across_group_modes(
         blocksize=4,
         desc_act=desc_act,
         act_group_aware=act_group_aware,
-        static_groups=static_groups,
         sym=False,
         mse=2.0,
         scale_zero_dtype="bfloat16",

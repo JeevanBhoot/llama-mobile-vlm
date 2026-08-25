@@ -62,7 +62,6 @@ def run_reference_gptq(
         desc_act=desc_act,
         act_group_aware=act_group_aware,
         sym=True,
-        static_groups=False,
         damp_percent=0.05,
         damp_auto_increment=0.01,
     )
@@ -95,7 +94,6 @@ def run_local_gptq(
             desc_act=desc_act,
             act_group_aware=act_group_aware,
             sym=True,
-            static_groups=False,
             damp_percent=0.05,
             damp_auto_increment=0.01,
             blocksize=blocksize,

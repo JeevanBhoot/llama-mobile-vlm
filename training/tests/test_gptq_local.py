@@ -540,7 +540,7 @@ def test_quantize_int_codebook_writes_scale_only_metadata(
     assert (tmp_path / local.METADATA_FILENAME).exists()
 
 
-def test_quantize_affine_codebook_writes_zero_and_dtype_metadata(
+def test_quantize_affine_codebook_omits_implicit_zero_from_storage(
     monkeypatch, tmp_path
 ) -> None:
     torch.manual_seed(625464)
@@ -588,6 +588,7 @@ def test_quantize_affine_codebook_writes_zero_and_dtype_metadata(
     assert metadata["quantizer_mode"] == "uniform_affine_absmax_int_codebook"
     assert metadata["scale_dtype"] == "float16"
     assert metadata["gptq"]["bits"] is None
+    assert metadata["gptq"]["sym"] is True
     assert metadata["gptq"]["scale_zero_dtype"] == "float16"
 
     first_log = metadata["quantization_log"][0]
@@ -600,11 +601,14 @@ def test_quantize_affine_codebook_writes_zero_and_dtype_metadata(
     assert storage["radix_chunk_bytes"] == 1
     assert storage["radix_symbols_per_chunk"] == 3
     assert storage["radix_bits_per_weight"] == pytest.approx(8 / 3)
-    expected_parameter_values = sum(
-        math.prod(log["scale_shape"]) + math.prod(log["zero_shape"])
-        for log in metadata["quantization_log"]
+    expected_scale_values = sum(
+        math.prod(log["scale_shape"]) for log in metadata["quantization_log"]
     )
-    assert storage["scale_zero_bytes"] == expected_parameter_values * 2
+    assert storage["scale_zero_bytes"] == expected_scale_values * 2
+    assert (
+        storage["assumptions"]["zero_point_storage"]
+        == "implicit floor(K / 2); no independent storage"
+    )
     assert storage["estimated_realizable_packed_with_g_idx_bytes"] >= storage[
         "estimated_packed_with_g_idx_bytes"
     ]
@@ -645,6 +649,7 @@ def test_radix_storage_accounts_for_each_tensor_tail() -> None:
         scale_zero_dtype="bfloat16",
         quantization_format="int-codebook-affine",
         codepoints=6,
+        sym=False,
     )
 
     # Each four-symbol tensor needs two one-byte chunks; combining tensor tails
