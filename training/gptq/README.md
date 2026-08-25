@@ -81,8 +81,8 @@ estimated packed storage.
 
 | Format | Arguments | Quantization parameters |
 | --- | --- | --- |
-| Ordinary affine INT | `--format int --bits {2,3,4}` | Scale and zero point |
-| Affine codebook INT | `--format int-codebook-affine --codepoints K` | Scale and zero point |
+| Ordinary affine INT | `--format int --bits {2,3,4}` | Scale; asymmetric runs also store a zero point |
+| Affine codebook INT | `--format int-codebook-affine --codepoints K` | Scale; asymmetric runs also store a zero point |
 | Signed-centroid codebook INT | `--format int-codebook --codepoints K` | Scale |
 | S3D8 | `--format s3d8` | Per-row scale and fitted centroids |
 
@@ -100,6 +100,9 @@ The two codebook modes work as follows:
 
 Use `--codepoints` for either codebook mode; do not combine it with `--bits`.
 The intended affine-codebook sweep is `K=4..16`.
+Packed-storage estimates treat the symmetric zero point as implicit because it
+is determined by `K`. Runs using `--no-sym` include one stored zero point per
+group.
 
 ### Quantize text layers
 
@@ -195,11 +198,11 @@ The local defaults are:
 - Damp percent: `0.05`
 - Damp auto increment: `0.01`
 - Model dtype: `bfloat16`
-- Scale and zero-point dtype: `bfloat16`
+- Scale and computed zero-point dtype: `bfloat16`
 
 Set `--storage-scale-zero-dtype` to `bfloat16`, `float16`, or `float32`. This
-dtype is applied to scales and zero points before GPTQ quantization and is also
-used for their storage estimate.
+dtype is applied to scales and computed zero points before GPTQ quantization.
+Storage estimates use it for scales and, with `--no-sym`, stored zero points.
 
 ## Inspect outputs and storage
 
@@ -219,8 +222,9 @@ jq .estimated_packed_storage \
 For codebook formats, `effective_weight_bits` is the ideal information rate
 `log2(K)`. The storage metadata also reports a realizable byte-aligned radix
 packing. For example, `K=6` packs three indices per byte and reports `8/3`
-realizable weight bits. Full-model estimates include scales, zero points where
-used, group indices, per-tensor tail chunks, and unquantized tensors.
+realizable weight bits. Full-model estimates include scales, stored zero points
+for asymmetric affine formats, group indices, per-tensor tail chunks, and
+unquantized tensors.
 
 The saved local Hugging Face checkpoint contains dense dequantized weights. Use
 `estimated_packed_storage` to compare quantization formats independently of the

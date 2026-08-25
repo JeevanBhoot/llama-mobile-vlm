@@ -1799,6 +1799,7 @@ def estimate_packed_storage(
     scale_zero_dtype: str,
     quantization_format: str = "int",
     codepoints: int | None = None,
+    sym: bool = True,
 ) -> dict[str, Any]:
     if scale_zero_dtype not in DTYPE_STORAGE_BYTES:
         raise ValueError(
@@ -1809,6 +1810,8 @@ def estimate_packed_storage(
         "int-codebook",
         "int-codebook-affine",
     )
+    affine_format = quantization_format in ("int", "int-codebook-affine")
+    store_zero_points = affine_format and not sym
     if codebook_format and codepoints is None:
         inferred_codepoints = round(2**bits)
         if not math.isclose(math.log2(inferred_codepoints), bits):
@@ -1872,16 +1875,16 @@ def estimate_packed_storage(
                 * int(radix["chunk_bytes"])
             )
             scale_zero_values = math.prod(log["scale_shape"])
-            if quantization_format == "int-codebook-affine":
+            if store_zero_points:
                 scale_zero_values += math.prod(log["zero_shape"])
             g_idx_bytes += math.prod(log["g_idx_shape"]) * 4
         else:
             tensor_packed_bytes = math.ceil(n_values * bits / 8)
             ideal_packed_weight_bytes += tensor_packed_bytes
             realizable_packed_weight_bytes += tensor_packed_bytes
-            scale_zero_values = math.prod(log["scale_shape"]) + math.prod(
-                log["zero_shape"]
-            )
+            scale_zero_values = math.prod(log["scale_shape"])
+            if store_zero_points:
+                scale_zero_values += math.prod(log["zero_shape"])
             g_idx_bytes += math.prod(log["g_idx_shape"]) * 4
         scale_zero_bytes += scale_zero_values * scale_zero_bytes_per_value
 
@@ -1919,6 +1922,15 @@ def estimate_packed_storage(
             "quantized_weight_bits_kind": "ideal_information_rate",
             "quantization_format": quantization_format,
             "scale_zero_dtype": scale_zero_dtype,
+            "zero_point_storage": (
+                "stored per group at scale_zero_dtype"
+                if store_zero_points
+                else (
+                    "implicit floor(K / 2); no independent storage"
+                    if affine_format
+                    else "not used"
+                )
+            ),
             "g_idx_dtype": "int32",
             "unquantized_tensors": "stored densely at their current dtype",
             "packed_weight_padding": (
@@ -2706,6 +2718,7 @@ def quantize(
         scale_zero_dtype=storage_scale_zero_dtype,
         quantization_format=quantization_format,
         codepoints=codepoints,
+        sym=sym,
     )
     if verbose:
         realizable_gib = (
