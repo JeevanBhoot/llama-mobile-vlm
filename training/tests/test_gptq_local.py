@@ -2,684 +2,82 @@
 
 import json
 import math
+import runpy
 import sys
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from unittest import mock
 
+import datasets
 import pytest
 import safetensors.torch
 import torch
 import weight_formats.quantisation_training as QT
+from transformers import (
+    MllamaConfig,
+    MllamaForConditionalGeneration,
+    MllamaTextConfig,
+    MllamaVisionConfig,
+)
 
-
-def fake_vqa_module(evaluate=None):
-    class FakeVQA:
-        QUESTION_TEMPLATE = "Question: {question}"
-        data = mock.Mock(return_value=["a"])
-
-        @classmethod
-        def prepare_batch(cls, batch, system_template):
-            return SimpleNamespace(
-                images=batch["image"],
-                prompts=[
-                    system_template.format(prompt=f"Question: {q}")
-                    for q in batch["question"]
-                ],
-                answers=batch.get("answers", []),
-                ids=batch.get("question_id", []),
-            )
-
-    task = SimpleNamespace(
-        METRICS=("accuracy",),
-        RELAXED_METRICS=("accuracy_relaxed",),
-        data=mock.Mock(return_value=["a"]),
-    )
-    fake_vqa = ModuleType("eval.vqa")
-    fake_vqa.TASKS = {"vqa": task}
-    fake_vqa.VQA = FakeVQA
-    fake_vqa.LLAMA_PROMPT_TEMPLATES = {"instruct": "<s>{prompt}</s>"}
-    fake_vqa.evaluate = evaluate or mock.Mock()
-    return fake_vqa
-
-
-sys.modules["eval.vqa"] = fake_vqa_module()
-
-import gptq.common as common
 import gptq.local as local
 
 
-def test_local_cli_supports_ordinary_int2() -> None:
-    args = local.build_parser().parse_args(["quantize", "--bits", "2"])
-
-    assert args.bits == 2
-
-
-def test_default_output_dir_for_int_codebook_includes_sweep_params() -> None:
-    assert local.default_output_dir(
-        4,
-        "int-codebook",
-        codepoints=7,
-        group_size=128,
-    ) == Path("out/gptq/llama-3.2-vision-local-gptq-int-k7-g128-c4")
-
-
-def test_default_output_dir_for_affine_codebook_is_distinct() -> None:
-    assert local.default_output_dir(
-        None,
-        "int-codebook-affine",
-        codepoints=6,
-        group_size=128,
-    ) == Path(
-        "out/gptq/llama-3.2-vision-local-gptq-int-affine-k6-g128-c4"
+def tiny_mllama() -> MllamaForConditionalGeneration:
+    vision = MllamaVisionConfig(
+        hidden_size=8,
+        num_hidden_layers=1,
+        num_global_layers=1,
+        attention_heads=2,
+        num_channels=1,
+        intermediate_size=16,
+        vision_output_dim=16,
+        image_size=2,
+        patch_size=1,
+        max_num_tiles=1,
+        supported_aspect_ratios=[[1, 1]],
+        intermediate_layers_indices=[0],
     )
-
-
-def test_default_output_dir_identifies_full_multimodal_calibration() -> None:
-    assert local.default_output_dir(
-        4,
-        target_scope="full-multimodal",
-        calibration_source="synthetic",
-    ) == Path("out/gptq/llama-3.2-vision-local-gptq-int4-synthetic-full")
-
-
-class TinySelfAttention(torch.nn.Module):
-    def __init__(self, hidden_size: int):
-        super().__init__()
-        self.k_proj = torch.nn.Linear(hidden_size, hidden_size, bias=False)
-        self.v_proj = torch.nn.Linear(hidden_size, hidden_size, bias=False)
-        self.q_proj = torch.nn.Linear(hidden_size, hidden_size, bias=False)
-        self.o_proj = torch.nn.Linear(hidden_size, hidden_size, bias=False)
-
-    def forward(self, x):
-        x = self.k_proj(x) + self.v_proj(x) + self.q_proj(x)
-        return self.o_proj(x)
-
-
-class TinyMlp(torch.nn.Module):
-    def __init__(self, hidden_size: int):
-        super().__init__()
-        self.up_proj = torch.nn.Linear(hidden_size, hidden_size, bias=False)
-        self.gate_proj = torch.nn.Linear(hidden_size, hidden_size, bias=False)
-        self.down_proj = torch.nn.Linear(hidden_size, hidden_size, bias=False)
-
-    def forward(self, x):
-        return self.down_proj(self.up_proj(x) + self.gate_proj(x))
-
-
-class TinyDecoderLayer(torch.nn.Module):
-    def __init__(self, hidden_size: int):
-        super().__init__()
-        self.self_attn = TinySelfAttention(hidden_size)
-        self.mlp = TinyMlp(hidden_size)
-
-    def forward(self, hidden_states, **kwargs):
-        return (hidden_states + self.self_attn(hidden_states) + self.mlp(hidden_states),)
-
-
-class TinyRotaryEmbedding(torch.nn.Module):
-    def forward(self, hidden_states, position_ids):
-        return (
-            torch.zeros_like(hidden_states),
-            torch.ones_like(hidden_states),
-        )
-
-
-class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.called = False
-        self.cross_attn = torch.nn.Linear(8, 8, bias=False)
-
-    def forward(self, hidden_states, **kwargs):
-        self.called = True
-        raise ValueError("cross attention should be skipped for text-only calibration")
-
-
-class TinyLanguageModel(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.config = SimpleNamespace(use_cache=True)
-        self.embed_tokens = torch.nn.Embedding(32, 8)
-        self.rotary_emb = TinyRotaryEmbedding()
-        self.cross_attention_layers = [1]
-        self.cross_layer = MllamaCrossAttentionDecoderLayer()
-        self.layers = torch.nn.ModuleList(
-            [
-                TinyDecoderLayer(8),
-                self.cross_layer,
-                TinyDecoderLayer(8),
-            ]
-        )
-
-
-class TinyMllamaModel(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.language_model = TinyLanguageModel()
-
-
-class TinyMllama(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.config = SimpleNamespace(use_cache=True)
-        self.model = TinyMllamaModel()
-        self.layers = self.model.language_model.layers
-        self.forward_called = False
-
-    def forward(self, input_ids, **kwargs):
-        self.forward_called = True
-        hidden_states = self.model.language_model.embed_tokens(input_ids)
-        for layer_index, layer in enumerate(self.layers):
-            if local.is_mllama_cross_attention_layer(
-                layer,
-                layer_index=layer_index,
-                cross_attention_layers=frozenset(
-                    self.model.language_model.cross_attention_layers
-                ),
-            ):
-                continue
-            hidden_states = layer(hidden_states)[0]
-        return SimpleNamespace(logits=hidden_states)
-
-    def save_pretrained(self, output_dir, safe_serialization=True):
-        Path(output_dir, "model.safetensors").write_text("weights")
-
-
-class TinyIdentityPosition(torch.nn.Module):
-    def forward(self, hidden_state, aspect_ratio_ids):
-        return hidden_state
-
-
-class TinyVisionAttention(torch.nn.Module):
-    def __init__(self, hidden_size: int):
-        super().__init__()
-        self.q_proj = torch.nn.Linear(hidden_size, hidden_size, bias=False)
-        self.k_proj = torch.nn.Linear(hidden_size, hidden_size, bias=False)
-        self.v_proj = torch.nn.Linear(hidden_size, hidden_size, bias=False)
-        self.o_proj = torch.nn.Linear(hidden_size, hidden_size, bias=False)
-
-    def forward(self, hidden_state, attention_mask=None):
-        hidden_state = (
-            self.q_proj(hidden_state)
-            + self.k_proj(hidden_state)
-            + self.v_proj(hidden_state)
-        )
-        return self.o_proj(hidden_state), None
-
-
-class TinyVisionMlp(torch.nn.Module):
-    def __init__(self, hidden_size: int):
-        super().__init__()
-        self.fc1 = torch.nn.Linear(hidden_size, hidden_size * 2)
-        self.fc2 = torch.nn.Linear(hidden_size * 2, hidden_size)
-
-    def forward(self, hidden_state):
-        return self.fc2(torch.relu(self.fc1(hidden_state)))
-
-
-class TinyVisionLayer(torch.nn.Module):
-    def __init__(self, hidden_size: int):
-        super().__init__()
-        self.self_attn = TinyVisionAttention(hidden_size)
-        self.mlp = TinyVisionMlp(hidden_size)
-
-    def forward(self, hidden_state, attention_mask=None):
-        hidden_state = hidden_state + self.self_attn(hidden_state, attention_mask)[0]
-        return hidden_state + self.mlp(hidden_state)
-
-
-class TinyVisionEncoder(torch.nn.Module):
-    def __init__(self, hidden_size: int):
-        super().__init__()
-        self.layers = torch.nn.ModuleList([TinyVisionLayer(hidden_size)])
-
-
-class TinyVisionModel(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.patch_embedding = torch.nn.Conv2d(1, 4, kernel_size=1, bias=False)
-        self.pre_tile_positional_embedding = TinyIdentityPosition()
-        self.gated_positional_embedding = TinyIdentityPosition()
-        self.post_tile_positional_embedding = TinyIdentityPosition()
-        self.layernorm_pre = torch.nn.LayerNorm(4)
-        self.layernorm_post = torch.nn.LayerNorm(4)
-        self.transformer = TinyVisionEncoder(4)
-        self.global_transformer = TinyVisionEncoder(4)
-        self.intermediate_layers_indices = [0]
-        self.num_patches = 5
-
-    def apply_class_embedding(self, hidden_state):
-        batch, _, hidden = hidden_state.shape
-        cls = torch.zeros(batch, 1, hidden, device=hidden_state.device)
-        return torch.cat([cls, hidden_state], dim=1)
-
-
-class TinyCrossAttention(torch.nn.Module):
-    def __init__(self, hidden_size: int):
-        super().__init__()
-        self.q_proj = torch.nn.Linear(hidden_size, hidden_size, bias=False)
-        self.k_proj = torch.nn.Linear(hidden_size, hidden_size, bias=False)
-        self.v_proj = torch.nn.Linear(hidden_size, hidden_size, bias=False)
-        self.o_proj = torch.nn.Linear(hidden_size, hidden_size, bias=False)
-
-    def forward(self, hidden_states, cross_attention_states=None, **kwargs):
-        key = self.k_proj(cross_attention_states).mean(dim=1, keepdim=True)
-        value = self.v_proj(cross_attention_states).mean(dim=1, keepdim=True)
-        hidden_states = self.q_proj(hidden_states) + key + value
-        return self.o_proj(hidden_states), None
-
-
-class TinyCrossAttentionDecoderLayer(torch.nn.Module):
-    def __init__(self, hidden_size: int):
-        super().__init__()
-        self.called = False
-        self.cross_attn = TinyCrossAttention(hidden_size)
-        self.mlp = TinyMlp(hidden_size)
-
-    def forward(self, hidden_states, cross_attention_states=None, **kwargs):
-        self.called = True
-        hidden_states = hidden_states + self.cross_attn(
-            hidden_states,
-            cross_attention_states=cross_attention_states,
-        )[0]
-        return hidden_states + self.mlp(hidden_states)
-
-
-class TinyFullLanguageModel(TinyLanguageModel):
-    def __init__(self):
-        torch.nn.Module.__init__(self)
-        self.config = SimpleNamespace(
-            use_cache=True,
-            _attn_implementation="sdpa",
-        )
-        self.embed_tokens = torch.nn.Embedding(32, 8)
-        self.rotary_emb = TinyRotaryEmbedding()
-        self.norm = torch.nn.LayerNorm(8)
-        self.cross_attention_layers = [1]
-        self.layers = torch.nn.ModuleList(
-            [
-                TinyDecoderLayer(8),
-                TinyCrossAttentionDecoderLayer(8),
-            ]
-        )
-
-
-class TinyFullMllamaModel(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.vision_model = TinyVisionModel()
-        self.multi_modal_projector = torch.nn.Linear(8, 8)
-        self.language_model = TinyFullLanguageModel()
-
-
-class TinyFullMllama(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.model = TinyFullMllamaModel()
-        self.lm_head = torch.nn.Linear(8, 32, bias=False)
-
-    def save_pretrained(self, output_dir, safe_serialization=True):
-        Path(output_dir, "model.safetensors").write_text("weights")
+    text = MllamaTextConfig(
+        vocab_size=32,
+        hidden_size=8,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        intermediate_size=16,
+        max_position_embeddings=16,
+        cross_attention_layers=[1],
+        bos_token_id=1,
+        eos_token_id=2,
+        pad_token_id=0,
+    )
+    config = MllamaConfig(
+        vision_config=vision,
+        text_config=text,
+        image_token_index=31,
+    )
+    return MllamaForConditionalGeneration(config)
 
 
 class DummyProcessor:
     tokenizer = object()
 
-    def save_pretrained(self, output_dir):
+    def save_pretrained(self, output_dir: Path) -> None:
         Path(output_dir, "processor_config.json").write_text("{}")
 
 
-def test_collect_first_layer_inputs_uses_mllama_direct_text_path() -> None:
-    model = TinyMllama()
-    stack = local.mllama_text_layers(model)
-    input_ids = torch.tensor([[1, 2, 3]])
-    attention_mask = torch.ones_like(input_ids)
-
-    captured = local.collect_first_layer_inputs(
-        stack,
-        [{"input_ids": input_ids, "attention_mask": attention_mask}],
-        device="cpu",
-    )
-
-    assert model.forward_called is False
-    assert len(captured) == 1
-    torch.testing.assert_close(
-        captured.args[0][0],
-        model.model.language_model.embed_tokens(input_ids).detach(),
-    )
-    assert captured.kwargs[0]["attention_mask"] is None
-    torch.testing.assert_close(
-        captured.kwargs[0]["position_ids"],
-        torch.tensor([[0, 1, 2]]),
-    )
-    assert captured.kwargs[0]["use_cache"] is False
-    assert "position_embeddings" in captured.kwargs[0]
-
-
-def test_cross_attention_scope_is_structural() -> None:
-    class RenamedCrossAttentionLayer(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.cross_attn = torch.nn.Linear(8, 8, bias=False)
-            self.called = False
-
-        def forward(self, hidden_states, **kwargs):
-            self.called = True
-            raise AssertionError("cross attention should not run")
-
-    layer = RenamedCrossAttentionLayer()
-    inputs = local.LayerInputs(
-        args=[[torch.randn(1, 3, 8)]],
-        kwargs=[{"position_ids": torch.tensor([[0, 1, 2]])}],
-    )
-
-    next_inputs, logs = local.quantize_layer(
-        layer,
-        inputs,
-        local.GPTQConfig(bits=4),
-        device="cpu",
-        verbose=False,
-    )
-
-    assert logs == []
-    assert layer.called is False
-    torch.testing.assert_close(next_inputs.args[0][0], inputs.args[0][0])
-
-
-def test_self_attention_scope_requires_all_expected_targets() -> None:
-    layer = TinyDecoderLayer(8)
-    del layer.self_attn.o_proj
-    inputs = local.LayerInputs(
-        args=[[torch.randn(1, 3, 8)]],
-        kwargs=[{"position_ids": torch.tensor([[0, 1, 2]])}],
-    )
-
-    with pytest.raises(ValueError, match="missing linear modules"):
-        local.quantize_layer(
-            layer,
-            inputs,
-            local.GPTQConfig(bits=4),
-            device="cpu",
-            verbose=False,
-        )
-
-
-def test_quantize_writes_dense_artifact(monkeypatch, tmp_path) -> None:
-    torch.manual_seed(625464)
-    model = TinyMllama()
-    monkeypatch.setattr(local, "load_model", lambda *_, **__: model)
-    monkeypatch.setattr(
-        local.transformers.AutoProcessor,
-        "from_pretrained",
-        mock.Mock(return_value=DummyProcessor()),
-    )
-    monkeypatch.setattr(local, "load_c4_calibration", lambda **_: ["a", "b"])
-    monkeypatch.setattr(
-        local,
-        "tokenise_calibration",
-        lambda *_, **__: [
-            {"input_ids": torch.tensor([1, 2, 3, 4])},
-            {"input_ids": torch.tensor([4, 3, 2, 1])},
-        ],
-    )
-
-    metadata = local.quantize(
-        model_name="model",
-        output_dir=tmp_path,
-        bits=4,
-        group_size=128,
-        batch_size=2,
-        calibration_samples=2,
-        calibration_data_min_length=0,
-        device="cpu",
-        torch_dtype="float32",
-        verbose=False,
-    )
-
-    assert metadata["artifact_type"] == "dense_dequantized_local_gptq"
-    assert metadata["n_quantized_modules"] == 14
-    assert metadata["quantization_batch_size"] == 2
-    assert metadata["calibration_prepared_examples"] == 2
-    assert metadata["calibration_batches"] == 1
-    assert metadata["target_scope"] == "mllama_text_self_attention_decoder_layers"
-    assert metadata["skipped_cross_attention_layers"] == [
-        {
-            "layer": 1,
-            "full_name": "model.language_model.layers.1",
-            "class": "MllamaCrossAttentionDecoderLayer",
-            "reason": "mllama_text_only_cross_attention",
-        }
-    ]
-    assert model.model.language_model.config.use_cache is True
-    assert not model.model.language_model.cross_layer.called
-    assert all(
-        log["full_name"].startswith(
-            (
-                "model.language_model.layers.0.",
-                "model.language_model.layers.2.",
-            )
-        )
-        for log in metadata["quantization_log"]
-    )
-    storage = metadata["estimated_packed_storage"]
-    assert storage["quantized_tensor_count"] == 14
-    assert storage["unmatched_quantized_tensor_names"] == []
-    assert storage["estimated_packed_without_g_idx_bytes"] < storage[
-        "dense_state_dict_bytes"
-    ]
-    assert storage["estimated_packed_with_g_idx_bytes"] >= storage[
-        "estimated_packed_without_g_idx_bytes"
-    ]
-    assert (tmp_path / "model.safetensors").exists()
-    assert (tmp_path / "processor_config.json").exists()
-    assert (tmp_path / local.METADATA_FILENAME).exists()
-
-
-def test_quantize_int_codebook_writes_scale_only_metadata(
-    monkeypatch, tmp_path
-) -> None:
-    torch.manual_seed(625464)
-    model = TinyMllama()
-    monkeypatch.setattr(local, "load_model", lambda *_, **__: model)
-    monkeypatch.setattr(
-        local.transformers.AutoProcessor,
-        "from_pretrained",
-        mock.Mock(return_value=DummyProcessor()),
-    )
-    monkeypatch.setattr(local, "load_c4_calibration", lambda **_: ["a", "b"])
-    monkeypatch.setattr(
-        local,
-        "tokenise_calibration",
-        lambda *_, **__: [
-            {"input_ids": torch.tensor([1, 2, 3, 4])},
-            {"input_ids": torch.tensor([4, 3, 2, 1])},
-        ],
-    )
-
-    metadata = local.quantize(
-        model_name="model",
-        output_dir=tmp_path,
-        bits=4,
-        quantization_format="int-codebook",
-        codepoints=6,
-        group_size=4,
-        batch_size=2,
-        calibration_samples=2,
-        calibration_data_min_length=0,
-        device="cpu",
-        torch_dtype="float32",
-        verbose=False,
-    )
-
-    assert metadata["artifact_type"] == "dense_dequantized_local_gptq_int_codebook"
-    assert metadata["format"] == "int-codebook"
-    assert metadata["bits"] is None
-    assert metadata["codepoints"] == 6
-    assert metadata["effective_weight_bits"] == pytest.approx(math.log2(6))
-    assert metadata["quantizer_mode"] == "scale_only_absmax_int_codebook"
-    assert metadata["scale_dtype"] == "bfloat16"
-    assert metadata["n_quantized_modules"] == 14
-
-    first_log = metadata["quantization_log"][0]
-    assert first_log["quantization_format"] == "int-codebook"
-    assert first_log["codepoints"] == 6
-    assert first_log["quantizer_mode"] == "scale_only_absmax_int_codebook"
-    assert "zero_shape" not in first_log
-    assert first_log["g_idx_shape"] == [8]
-
-    storage = metadata["estimated_packed_storage"]
-    assert storage["assumptions"]["quantized_weight_bits"] == pytest.approx(
-        math.log2(6)
-    )
-    expected_scale_values = sum(
-        math.prod(log["scale_shape"]) for log in metadata["quantization_log"]
-    )
-    assert storage["scale_zero_bytes"] == expected_scale_values * 2
-    assert storage["g_idx_bytes"] > 0
-    assert storage["centroid_bytes"] == 0
-    assert (tmp_path / "model.safetensors").exists()
-    assert (tmp_path / "processor_config.json").exists()
-    assert (tmp_path / local.METADATA_FILENAME).exists()
-
-
-def test_quantize_affine_codebook_omits_implicit_zero_from_storage(
-    monkeypatch, tmp_path
-) -> None:
-    torch.manual_seed(625464)
-    model = TinyMllama()
-    monkeypatch.setattr(local, "load_model", lambda *_, **__: model)
-    monkeypatch.setattr(
-        local.transformers.AutoProcessor,
-        "from_pretrained",
-        mock.Mock(return_value=DummyProcessor()),
-    )
-    monkeypatch.setattr(local, "load_c4_calibration", lambda **_: ["a", "b"])
-    monkeypatch.setattr(
-        local,
-        "tokenise_calibration",
-        lambda *_, **__: [
-            {"input_ids": torch.tensor([1, 2, 3, 4])},
-            {"input_ids": torch.tensor([4, 3, 2, 1])},
-        ],
-    )
-
-    metadata = local.quantize(
-        model_name="model",
-        output_dir=tmp_path,
-        bits=None,
-        quantization_format="int-codebook-affine",
-        codepoints=6,
-        group_size=4,
-        batch_size=2,
-        calibration_samples=2,
-        calibration_data_min_length=0,
-        device="cpu",
-        torch_dtype="float32",
-        storage_scale_zero_dtype="float16",
-        verbose=False,
-    )
-
-    assert (
-        metadata["artifact_type"]
-        == "dense_dequantized_local_gptq_int_codebook_affine"
-    )
-    assert metadata["format"] == "int-codebook-affine"
-    assert metadata["bits"] is None
-    assert metadata["codepoints"] == 6
-    assert metadata["effective_weight_bits"] == pytest.approx(math.log2(6))
-    assert metadata["quantizer_mode"] == "uniform_affine_absmax_int_codebook"
-    assert metadata["scale_dtype"] == "float16"
-    assert metadata["gptq"]["bits"] is None
-    assert metadata["gptq"]["sym"] is True
-    assert metadata["gptq"]["scale_zero_dtype"] == "float16"
-
-    first_log = metadata["quantization_log"][0]
-    assert first_log["quantization_format"] == "int-codebook-affine"
-    assert first_log["codepoints"] == 6
-    assert first_log["zero_shape"] == first_log["scale_shape"]
-    assert first_log["g_idx_shape"] == [8]
-
-    storage = metadata["estimated_packed_storage"]
-    assert storage["radix_chunk_bytes"] == 1
-    assert storage["radix_symbols_per_chunk"] == 3
-    assert storage["radix_bits_per_weight"] == pytest.approx(8 / 3)
-    expected_scale_values = sum(
-        math.prod(log["scale_shape"]) for log in metadata["quantization_log"]
-    )
-    assert storage["scale_zero_bytes"] == expected_scale_values * 2
-    assert (
-        storage["assumptions"]["zero_point_storage"]
-        == "implicit floor(K / 2); no independent storage"
-    )
-    assert storage["estimated_realizable_packed_with_g_idx_bytes"] >= storage[
-        "estimated_packed_with_g_idx_bytes"
-    ]
-
-
-def test_radix_packing_selects_three_k6_symbols_per_byte() -> None:
-    packing = local.radix_packing_parameters(6)
-
-    assert packing == {
-        "chunk_bytes": 1,
-        "symbols_per_chunk": 3,
-        "bits_per_weight": pytest.approx(8 / 3),
+def multimodal_batch() -> dict[str, torch.Tensor]:
+    return {
+        "input_ids": torch.tensor([[1, 31, 3, 4]]),
+        "attention_mask": torch.ones(1, 4, dtype=torch.long),
+        "pixel_values": torch.randn(1, 1, 1, 1, 2, 2),
+        "aspect_ratio_ids": torch.ones(1, 1, dtype=torch.long),
+        "aspect_ratio_mask": torch.ones(1, 1, 1),
+        "cross_attention_mask": torch.ones(1, 4, 1, 1),
     }
 
 
-def test_radix_storage_accounts_for_each_tensor_tail() -> None:
-    class TwoWeights(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.first = torch.nn.Linear(4, 1, bias=False)
-            self.second = torch.nn.Linear(4, 1, bias=False)
-
-    logs = [
-        {
-            "full_name": name,
-            "shape": [1, 4],
-            "scale_shape": [1, 1],
-            "zero_shape": [1, 1],
-            "g_idx_shape": [4],
-        }
-        for name in ("first", "second")
-    ]
-
-    storage = local.estimate_packed_storage(
-        TwoWeights(),
-        layer_logs=logs,
-        bits=math.log2(6),
-        scale_zero_dtype="bfloat16",
-        quantization_format="int-codebook-affine",
-        codepoints=6,
-        sym=False,
-    )
-
-    # Each four-symbol tensor needs two one-byte chunks; combining tensor tails
-    # would incorrectly report three bytes.
-    assert storage["radix_packed_weight_bytes"] == 4
-    assert storage["ideal_packed_weight_bytes"] == 4
-    assert storage["scale_zero_bytes"] == 8
-    assert storage["g_idx_bytes"] == 32
-    assert storage["full_model_effective_bits_with_g_idx"] == 44.0
-
-
-def test_affine_codebook_cli_validation_and_bits_none(monkeypatch) -> None:
-    with pytest.raises(SystemExit):
-        local.main(
-            [
-                "quantize",
-                "--format",
-                "int-codebook-affine",
-                "--codepoints",
-                "6",
-                "--bits",
-                "3",
-            ]
-        )
-    with pytest.raises(SystemExit):
-        local.main(["quantize", "--format", "int-codebook-affine"])
-
+def test_module_cli_appendix_defaults(monkeypatch) -> None:
     captured = {}
 
     def fake_quantize(**kwargs):
@@ -693,140 +91,82 @@ def test_affine_codebook_cli_validation_and_bits_none(monkeypatch) -> None:
         }
 
     monkeypatch.setattr(local, "quantize", fake_quantize)
-    local.main(
+    monkeypatch.setattr(
+        sys,
+        "argv",
         [
+            "gptq",
             "quantize",
             "--format",
-            "int-codebook-affine",
-            "--codepoints",
-            "6",
+            "s3d8",
+            "--target-scope",
+            "full-multimodal",
+            "--calibration-source",
+            "synthetic",
+            "--calibration-data-path",
+            "samples",
+            "--calibration-samples",
+            "512",
+            "--calibration-max-tokens",
+            "1024",
+            "--batch-size",
+            "1",
+            "--group-size",
+            "128",
+            "--blocksize",
+            "128",
+            "--damp-percent",
+            "0.05",
+            "--damp-auto-increment",
+            "0.01",
+            "--torch-dtype",
+            "bfloat16",
             "--quiet",
-        ]
+        ],
     )
 
-    assert captured["bits"] is None
-    assert captured["quantization_format"] == "int-codebook-affine"
-    assert captured["storage_scale_zero_dtype"] == "bfloat16"
+    runpy.run_module("gptq", run_name="__main__")
+
     assert captured["output_dir"] == Path(
-        "out/gptq/llama-3.2-vision-local-gptq-int-affine-k6-g128-c4"
+        "out/gptq/llama-3.2-vision-local-gptq-s3d8-synthetic-full"
     )
+    assert {
+        key: captured[key]
+        for key in (
+            "target_scope",
+            "calibration_source",
+            "calibration_samples",
+            "calibration_max_tokens",
+            "batch_size",
+            "group_size",
+            "blocksize",
+            "damp_percent",
+            "damp_auto_increment",
+            "desc_act",
+            "act_group_aware",
+            "sym",
+            "mse",
+            "torch_dtype",
+        )
+    } == {
+        "target_scope": "full-multimodal",
+        "calibration_source": "synthetic",
+        "calibration_samples": 512,
+        "calibration_max_tokens": 1024,
+        "batch_size": 1,
+        "group_size": 128,
+        "blocksize": 128,
+        "damp_percent": 0.05,
+        "damp_auto_increment": 0.01,
+        "desc_act": False,
+        "act_group_aware": True,
+        "sym": True,
+        "mse": 0.0,
+        "torch_dtype": "bfloat16",
+    }
 
 
-def test_tokenise_calibration_returns_plain_dicts() -> None:
-    class DummyTokenizer:
-        def __call__(self, text, **kwargs):
-            assert text == "sample"
-            assert kwargs["return_tensors"] == "pt"
-            return common.transformers.BatchEncoding(
-                {
-                    "input_ids": torch.tensor([[1, 2, 3]]),
-                    "attention_mask": torch.tensor([[1, 1, 1]]),
-                }
-            )
-
-    result = common.tokenise_calibration(
-        ["sample"],
-        tokenizer=DummyTokenizer(),
-        max_tokens=16,
-    )
-
-    assert type(result[0]) is dict
-    torch.testing.assert_close(result[0]["input_ids"], torch.tensor([[1, 2, 3]]))
-
-
-def test_vqav2_calibration_uses_processor_images_and_prompts(monkeypatch) -> None:
-    fake_vqa = fake_vqa_module()
-    fake_vqa.VQA.data = mock.Mock(
-        return_value=[
-            {
-                "question_id": 1,
-                "image": "image-a",
-                "question": "what is shown?",
-                "answers": [],
-            }
-        ]
-    )
-    monkeypatch.setattr(local, "vqa", fake_vqa)
-
-    class RecordingProcessor:
-        def __init__(self):
-            self.calls = []
-
-        def __call__(self, images, prompts, **kwargs):
-            self.calls.append((images, prompts, kwargs))
-            return {
-                "input_ids": torch.tensor([[1, 2, 3]]),
-                "attention_mask": torch.ones(1, 3, dtype=torch.long),
-                "pixel_values": torch.randn(1, 1, 1, 1, 2, 2),
-                "aspect_ratio_ids": torch.ones(1, 1, dtype=torch.long),
-                "aspect_ratio_mask": torch.ones(1, 1, 1),
-                "cross_attention_mask": torch.ones(1, 3, 1, 1),
-            }
-
-    processor = RecordingProcessor()
-
-    batches = local.load_vqav2_calibration_batches(
-        processor,
-        n_samples=1,
-        batch_size=1,
-        split="validation",
-        max_tokens=16,
-        load_from_s3=False,
-    )
-
-    fake_vqa.VQA.data.assert_called_once_with(
-        split="validation",
-        limit=1,
-        load_from_s3=False,
-    )
-    images, prompts, kwargs = processor.calls[0]
-    assert images == [["image-a"]]
-    assert prompts == ["<s>Question: what is shown?</s>"]
-    assert kwargs["padding"] is True
-    assert kwargs["truncation"] is True
-    assert kwargs["max_length"] == 16
-    assert batches[0]["input_ids"].shape == (1, 3)
-
-
-def test_vqav2_train_calibration_uses_small_train_dataset(monkeypatch) -> None:
-    data = local.datasets.Dataset.from_dict(
-        {
-            "question_id": [1, 2],
-            "image": ["image-a", "image-b"],
-            "question": ["question-a", "question-b"],
-            "answers": [["a"], ["b"]],
-        }
-    )
-    load_dataset = mock.Mock(return_value=data)
-    monkeypatch.setattr(local.datasets, "load_dataset", load_dataset)
-
-    class RecordingProcessor:
-        def __init__(self):
-            self.prompts = []
-
-        def __call__(self, images, prompts, **kwargs):
-            self.prompts.extend(prompts)
-            return {"input_ids": torch.ones(len(prompts), 2, dtype=torch.long)}
-
-    processor = RecordingProcessor()
-    batches = local.load_vqav2_calibration_batches(
-        processor,
-        n_samples=2,
-        batch_size=1,
-        split="train",
-        max_tokens=16,
-        load_from_s3=False,
-    )
-
-    load_dataset.assert_called_once_with(
-        local.VQAV2_TRAIN_CALIBRATION_DATASET,
-        split="train",
-    )
-    assert len(batches) == 2
-    assert all("Question: question-" in prompt for prompt in processor.prompts)
-
-
-def test_load_synthetic_calibration_uses_local_dataset(monkeypatch) -> None:
+def test_synthetic_pairs_images_and_text(monkeypatch) -> None:
     import train_data
 
     datums = [
@@ -835,543 +175,199 @@ def test_load_synthetic_calibration_uses_local_dataset(monkeypatch) -> None:
     ]
     dataset = mock.Mock()
     dataset.get_datums.return_value = iter(datums)
-    dataset_class = mock.Mock(return_value=dataset)
-    monkeypatch.setattr(train_data, "Dataset", dataset_class)
-    processor = mock.Mock(
-        side_effect=lambda images, prompts, **_: {
-            "input_ids": torch.ones(len(prompts), 2, dtype=torch.long)
-        }
-    )
+    monkeypatch.setattr(train_data, "Dataset", mock.Mock(return_value=dataset))
+    processor = mock.Mock(return_value={"input_ids": torch.ones(2, 2)})
 
     batches = local.load_synthetic_calibration_batches(
         processor,
-        calibration_data_paths=[Path("generation/local-rollout")],
+        calibration_data_paths=[Path("samples")],
         n_samples=2,
-        batch_size=1,
+        batch_size=2,
         max_tokens=16,
     )
 
-    dataset_class.assert_called_once_with(
-        ["generation/local-rollout"], n_examples=[None]
+    assert len(batches) == 1
+    assert processor.call_args.args == (
+        [["image-a"], ["image-b"]],
+        ["prompt-a", "prompt-b"],
     )
-    assert len(batches) == 2
-    assert [call.args for call in processor.call_args_list] == [
-        ([["image-a"]], ["prompt-a"]),
-        ([["image-b"]], ["prompt-b"]),
-    ]
 
 
-def _tiny_multimodal_batch() -> dict[str, torch.Tensor]:
-    return {
-        "input_ids": torch.tensor([[1, 2, 3, 4]]),
-        "attention_mask": torch.ones(1, 4, dtype=torch.long),
-        "pixel_values": torch.randn(1, 1, 1, 1, 2, 2),
-        "aspect_ratio_ids": torch.ones(1, 1, dtype=torch.long),
-        "aspect_ratio_mask": torch.ones(1, 1, 1),
-        "cross_attention_mask": torch.ones(1, 4, 1, 1),
+def test_full_mllama_checkpoint_roundtrip(monkeypatch, tmp_path) -> None:
+    torch.manual_seed(625464)
+    model = tiny_mllama()
+    eligible = {
+        name
+        for name, module in model.named_modules()
+        if isinstance(module, torch.nn.Linear)
+    }
+    monkeypatch.setattr(local, "load_model", lambda *_, **__: model)
+    monkeypatch.setattr(
+        local.transformers.AutoProcessor,
+        "from_pretrained",
+        mock.Mock(return_value=DummyProcessor()),
+    )
+    monkeypatch.setattr(
+        local,
+        "load_synthetic_calibration_batches",
+        mock.Mock(return_value=[multimodal_batch()]),
+    )
+
+    metadata = local.quantize(
+        model_name="unused",
+        output_dir=tmp_path,
+        bits=None,
+        quantization_format="s3d8",
+        target_scope="full-multimodal",
+        calibration_source="synthetic",
+        calibration_data_paths=["samples"],
+        calibration_samples=1,
+        calibration_max_tokens=1024,
+        batch_size=1,
+        group_size=128,
+        blocksize=128,
+        device="cpu",
+        torch_dtype="float32",
+        verbose=False,
+    )
+
+    assert {log["full_name"] for log in metadata["quantization_log"]} == eligible
+    assert metadata["n_quantized_modules"] == len(eligible)
+    assert metadata["target_scope_option"] == "full-multimodal"
+    assert metadata["calibration_source"] == "synthetic"
+    assert metadata["quantization_batch_size"] == 1
+    assert metadata["calibration_max_tokens"] == 1024
+    assert metadata["calibration_prepared_examples"] == 1
+    assert metadata["scale_dtype"] == "bfloat16"
+    assert {
+        key: metadata["gptq"][key]
+        for key in (
+            "group_size",
+            "blocksize",
+            "damp_percent",
+            "damp_auto_increment",
+            "desc_act",
+            "act_group_aware",
+            "sym",
+            "mse",
+        )
+    } == {
+        "group_size": 128,
+        "blocksize": 128,
+        "damp_percent": 0.05,
+        "damp_auto_increment": 0.01,
+        "desc_act": False,
+        "act_group_aware": True,
+        "sym": True,
+        "mse": 0.0,
     }
 
+    dense_model = MllamaForConditionalGeneration.from_pretrained(tmp_path)
+    for name in eligible:
+        dense_weight = dense_model.get_submodule(name).weight
+        saved_weight = model.get_submodule(name).weight
+        assert isinstance(saved_weight, QT.Sign3D8Weight)
+        torch.testing.assert_close(dense_weight, saved_weight.master)
 
-def test_deferred_vision_mask_is_exact_and_reuses_bounded_cache() -> None:
-    local.clear_vision_attention_mask_cache()
-    aspect_ratio_mask = torch.tensor([[1, 0]])
-    deferred = local.DeferredVisionAttentionMask(
-        aspect_ratio_mask=aspect_ratio_mask,
-        num_patches=3,
-        target_length=4,
-        dtype=torch.float32,
+    format_state = safetensors.torch.load_file(
+        tmp_path / local.S3D8_CHECKPOINT_FILENAME
+    )
+    restored = tiny_mllama()
+    QT.load_convert(restored, format_state)
+    for name in eligible:
+        saved_weight = model.get_submodule(name).weight
+        restored_weight = restored.get_submodule(name).weight
+        assert isinstance(saved_weight, QT.Sign3D8Weight)
+        assert isinstance(restored_weight, QT.Sign3D8Weight)
+        torch.testing.assert_close(restored_weight.scale, saved_weight.scale)
+        torch.testing.assert_close(restored_weight.centroids, saved_weight.centroids)
+
+
+def test_packed_storage_keeps_tensor_tails() -> None:
+    model = torch.nn.ModuleDict(
+        {
+            "first": torch.nn.Linear(4, 1, bias=False),
+            "second": torch.nn.Linear(4, 1, bias=False),
+        }
+    )
+    logs = [
+        {
+            "full_name": name,
+            "shape": [1, 4],
+            "scale_shape": [1, 1],
+            "zero_shape": [1, 1],
+            "g_idx_shape": [4],
+        }
+        for name in ("first", "second")
+    ]
+
+    storage = local.estimate_packed_storage(
+        model,
+        layer_logs=logs,
+        bits=math.log2(6),
+        scale_zero_dtype="bfloat16",
+        quantization_format="int-codebook-affine",
+        codepoints=6,
+        sym=True,
     )
 
-    expected = local._prepare_aspect_ratio_attention_mask(
-        aspect_ratio_mask,
-        num_patches=3,
-        target_length=4,
-        dtype=torch.float32,
+    assert storage["radix_packed_weight_bytes"] == 4
+
+
+def test_evaluation_resume_uses_ids(monkeypatch, tmp_path) -> None:
+    data = datasets.Dataset.from_dict(
+        {
+            "question_id": [1, 2, 3],
+            "question": ["done", "remaining", "done"],
+        }
     )
-    first = deferred.to("cpu")
-    second = deferred.to("cpu")
-
-    torch.testing.assert_close(first, expected)
-    assert first.data_ptr() == second.data_ptr()
-    assert len(local._VISION_ATTENTION_MASK_CACHE) == 1
-
-
-def test_projector_input_stream_matches_materialized_and_can_release_sources() -> None:
-    context = local.VisionBatchContext(
-        batch_size=1,
-        num_concurrent_media=1,
-        num_tiles=1,
-        num_patches=2,
-        num_padding_patches=0,
-        dim=2,
-        aspect_ratio_ids=torch.ones(1, 1, dtype=torch.long),
-        attention_mask=local.DeferredVisionAttentionMask(
-            aspect_ratio_mask=torch.ones(1, 1),
-            num_patches=2,
-            target_length=2,
-            dtype=torch.float32,
-        ),
+    task = SimpleNamespace(
+        METRICS=("accuracy",),
+        RELAXED_METRICS=(),
+        data=mock.Mock(return_value=data),
     )
-    global_outputs = local.LayerInputs(
-        args=[[torch.tensor([[[1.0, 2.0], [3.0, 4.0]]])]],
-        kwargs=[{}],
-    )
-    local_capture = local.LayerInputs(
-        args=[[torch.tensor([[[5.0, 6.0], [7.0, 8.0]]])]],
-        kwargs=[{}],
-    )
-    captures = {0: local_capture}
-    materialized = local.build_projector_inputs(
-        global_outputs,
-        captures,
-        [context],
-        [0],
-        device="cpu",
-    )
-
-    streamed = list(
-        local.iter_projector_inputs(
-            global_outputs,
-            captures,
-            [context],
-            [0],
-            device="cpu",
-            consume=True,
-        )
-    )
-
-    torch.testing.assert_close(streamed[0][0][0], materialized.args[0][0])
-    assert global_outputs.args[0] == []
-    assert local_capture.args[0] == []
-
-
-def test_quantize_full_multimodal_targets_vision_cross_projector_and_lm_head(
-    monkeypatch,
-    tmp_path,
-) -> None:
-    torch.manual_seed(625464)
-    model = TinyFullMllama()
-    monkeypatch.setattr(local, "load_model", lambda *_, **__: model)
-    monkeypatch.setattr(
-        local.transformers.AutoProcessor,
-        "from_pretrained",
-        mock.Mock(return_value=DummyProcessor()),
+    evaluate = mock.Mock(
+        return_value=[{"id": 2, "output": "no", "accuracy": 0.0}]
     )
     monkeypatch.setattr(
         local,
-        "load_vqav2_calibration_batches",
-        mock.Mock(return_value=[_tiny_multimodal_batch()]),
-    )
-
-    metadata = local.quantize(
-        model_name="model",
-        output_dir=tmp_path,
-        bits=4,
-        target_scope="full-multimodal",
-        calibration_samples=1,
-        calibration_max_tokens=16,
-        device="cpu",
-        torch_dtype="float32",
-        verbose=False,
-    )
-
-    full_names = {log["full_name"] for log in metadata["quantization_log"]}
-    assert metadata["target_scope_option"] == "full-multimodal"
-    assert metadata["target_scope"] == "mllama_full_multimodal_heavy_linears"
-    assert metadata["calibration_source"] == "vqav2"
-    assert metadata["calibration"]["split"] == "train"
-    assert (
-        metadata["calibration"]["dataset"]
-        == local.VQAV2_TRAIN_CALIBRATION_DATASET
-    )
-    assert "prototype_warning" not in metadata["calibration"]
-    assert metadata["skipped_cross_attention_layers"] == []
-    assert model.model.language_model.layers[1].called
-    assert "model.vision_model.transformer.layers.0.self_attn.q_proj" in full_names
-    assert "model.vision_model.global_transformer.layers.0.mlp.fc2" in full_names
-    assert "model.language_model.layers.1.cross_attn.k_proj" in full_names
-    assert "model.multi_modal_projector" in full_names
-    assert "lm_head" in full_names
-    assert metadata["estimated_packed_storage"]["unmatched_quantized_tensor_names"] == []
-
-
-def test_s3d8_lm_head_offload_moves_only_completed_modules(monkeypatch) -> None:
-    model = TinyFullMllama()
-    vision_stack = local.mllama_vision_layers(model)
-    text_stack = local.mllama_text_layers(model)
-    projector = model.model.multi_modal_projector
-    lm_head = model.lm_head
-
-    language_to = mock.Mock(return_value=text_stack.language_model)
-    vision_to = mock.Mock(return_value=vision_stack.vision_model)
-    projector_to = mock.Mock(return_value=projector)
-    lm_head_to = mock.Mock(return_value=lm_head)
-    monkeypatch.setattr(text_stack.language_model, "to", language_to)
-    monkeypatch.setattr(vision_stack.vision_model, "to", vision_to)
-    monkeypatch.setattr(projector, "to", projector_to)
-    monkeypatch.setattr(lm_head, "to", lm_head_to)
-    empty_cache = mock.Mock()
-    monkeypatch.setattr(local.torch.cuda, "empty_cache", empty_cache)
-
-    local.offload_completed_modules_for_lm_head(
-        vision_stack,
-        text_stack,
-        projector,
-        lm_head,
-        "cuda:0",
-    )
-
-    language_to.assert_called_once_with("cpu")
-    vision_to.assert_called_once_with("cpu")
-    projector_to.assert_called_once_with("cpu")
-    lm_head_to.assert_called_once_with("cuda:0")
-    empty_cache.assert_called_once_with()
-
-
-def test_quantize_full_multimodal_s3d8_checkpoint_includes_full_targets(
-    monkeypatch,
-    tmp_path,
-) -> None:
-    torch.manual_seed(625464)
-    model = TinyFullMllama()
-    monkeypatch.setattr(local, "load_model", lambda *_, **__: model)
-    monkeypatch.setattr(
-        local.transformers.AutoProcessor,
-        "from_pretrained",
-        mock.Mock(return_value=DummyProcessor()),
-    )
-    monkeypatch.setattr(
-        local,
-        "load_vqav2_calibration_batches",
-        mock.Mock(return_value=[_tiny_multimodal_batch()]),
-    )
-
-    metadata = local.quantize(
-        model_name="model",
-        output_dir=tmp_path,
-        bits=4,
-        quantization_format="s3d8",
-        target_scope="full-multimodal",
-        calibration_samples=1,
-        calibration_max_tokens=16,
-        device="cpu",
-        torch_dtype="float32",
-        verbose=False,
-    )
-
-    checkpoint_path = tmp_path / local.S3D8_CHECKPOINT_FILENAME
-    assert metadata["quantized_checkpoint_path"] == str(checkpoint_path)
-    assert checkpoint_path.exists()
-    state = safetensors.torch.load_file(checkpoint_path)
-    loaded = TinyFullMllama()
-    QT.load_convert(loaded, state)
-    assert isinstance(
-        loaded.model.vision_model.transformer.layers[0].self_attn.q_proj.weight,
-        QT.Sign3D8Weight,
-    )
-    assert isinstance(
-        loaded.model.language_model.layers[1].cross_attn.k_proj.weight,
-        QT.Sign3D8Weight,
-    )
-    assert isinstance(loaded.model.multi_modal_projector.weight, QT.Sign3D8Weight)
-    assert isinstance(loaded.lm_head.weight, QT.Sign3D8Weight)
-
-
-def test_quantize_s3d8_writes_dense_and_quantized_artifacts(
-    monkeypatch, tmp_path
-) -> None:
-    torch.manual_seed(625464)
-    model = TinyMllama()
-    monkeypatch.setattr(local, "load_model", lambda *_, **__: model)
-    monkeypatch.setattr(
-        local.transformers.AutoProcessor,
-        "from_pretrained",
-        mock.Mock(return_value=DummyProcessor()),
-    )
-    monkeypatch.setattr(local, "load_c4_calibration", lambda **_: ["a", "b"])
-    monkeypatch.setattr(
-        local,
-        "tokenise_calibration",
-        lambda *_, **__: [
-            {"input_ids": torch.tensor([1, 2, 3, 4])},
-            {"input_ids": torch.tensor([4, 3, 2, 1])},
-        ],
-    )
-
-    metadata = local.quantize(
-        model_name="model",
-        output_dir=tmp_path,
-        bits=4,
-        quantization_format="s3d8",
-        group_size=128,
-        batch_size=2,
-        calibration_samples=2,
-        calibration_data_min_length=0,
-        device="cpu",
-        torch_dtype="float32",
-        verbose=False,
-    )
-
-    checkpoint_path = tmp_path / local.S3D8_CHECKPOINT_FILENAME
-    assert metadata["artifact_type"] == "dense_dequantized_local_gptq_s3d8"
-    assert metadata["format"] == "s3d8"
-    assert metadata["bits"] is None
-    assert metadata["effective_weight_bits"] == 8 / 3
-    assert metadata["quantized_checkpoint_path"] == str(checkpoint_path)
-    assert metadata["n_quantized_modules"] == 14
-    assert checkpoint_path.exists()
-    assert (tmp_path / "model.safetensors").exists()
-    assert (tmp_path / "processor_config.json").exists()
-
-    first_log = metadata["quantization_log"][0]
-    assert first_log["quantization_format"] == "s3d8"
-    assert first_log["centroid_shape"] == [32, 3]
-    assert "zero_shape" not in first_log
-    assert "g_idx_shape" not in first_log
-    storage = metadata["estimated_packed_storage"]
-    assert storage["quantized_tensor_count"] == 14
-    assert storage["g_idx_bytes"] == 0
-    assert storage["centroid_bytes"] > 0
-
-    state = safetensors.torch.load_file(checkpoint_path)
-    assert "_quantisation_meta" in state
-    loaded = TinyMllama()
-    QT.load_convert(loaded, state)
-    target = loaded.model.language_model.layers[0].self_attn.q_proj.weight
-    skipped = loaded.model.language_model.layers[1].cross_attn.weight
-    assert isinstance(target, QT.Sign3D8Weight)
-    assert isinstance(skipped, QT.UnquantisedWeight)
-
-
-def test_evaluate_writes_outputs(monkeypatch, tmp_path) -> None:
-    fake_vqa = fake_vqa_module(
-        evaluate=mock.Mock(return_value=[{"id": 1, "output": "yes", "accuracy": 1.0}])
-    )
-    model = mock.Mock()
-    model.eval = mock.Mock()
-    monkeypatch.setattr(
-        local.transformers.MllamaForConditionalGeneration,
-        "from_pretrained",
-        mock.Mock(return_value=model),
-    )
-    monkeypatch.setattr(local.transformers.AutoProcessor, "from_pretrained", mock.Mock())
-    monkeypatch.setattr(local, "vqa", fake_vqa)
-    (tmp_path / "model.safetensors").write_text("weights")
-
-    summary = local.evaluate(
-        model_dir=tmp_path,
-        output_dir=tmp_path / "eval",
-        tasks=["vqa"],
-        n_examples=1,
-        device="cpu",
-        torch_dtype="float32",
-    )
-
-    fake_vqa.TASKS["vqa"].data.assert_called_once_with(
-        limit=1,
-        load_from_s3=False,
-    )
-    assert summary["tasks"]["vqa"]["accuracy"] == 1.0
-    assert summary["load_vqa_from_s3"] is False
-    assert (tmp_path / "eval" / "summary.json").exists()
-    assert (tmp_path / "eval" / "summary.partial.json").exists()
-    assert (tmp_path / "eval" / "vqa.jsonl").exists()
-
-
-def test_evaluate_streams_jsonl_before_task_completes(monkeypatch, tmp_path) -> None:
-    def evaluate_then_fail(**kwargs):
-        yield {"id": 1, "output": "yes", "accuracy": 1.0}
-        raise RuntimeError("evaluation stopped")
-
-    fake_vqa = fake_vqa_module(evaluate=evaluate_then_fail)
-    model = mock.Mock()
-    model.eval = mock.Mock()
-    monkeypatch.setattr(
-        local.transformers.MllamaForConditionalGeneration,
-        "from_pretrained",
-        mock.Mock(return_value=model),
-    )
-    monkeypatch.setattr(local.transformers.AutoProcessor, "from_pretrained", mock.Mock())
-    monkeypatch.setattr(local, "vqa", fake_vqa)
-    (tmp_path / "model.safetensors").write_text("weights")
-
-    with pytest.raises(RuntimeError, match="evaluation stopped"):
-        local.evaluate(
-            model_dir=tmp_path,
-            output_dir=tmp_path / "eval",
-            tasks=["vqa"],
-            n_examples=1,
-            device="cpu",
-            torch_dtype="float32",
-        )
-
-    assert (tmp_path / "eval" / "vqa.jsonl").read_text().splitlines() == [
-        '{"id": 1, "output": "yes", "accuracy": 1.0}'
-    ]
-
-
-def test_evaluate_resume_appends_missing_examples(monkeypatch, tmp_path) -> None:
-    fake_vqa = fake_vqa_module(
-        evaluate=mock.Mock(return_value=[{"id": 2, "output": "no", "accuracy": 0.0}])
-    )
-    fake_vqa.TASKS["vqa"].data.return_value = ["done", "remaining"]
-    model = mock.Mock()
-    model.eval = mock.Mock()
-    monkeypatch.setattr(
-        local.transformers.MllamaForConditionalGeneration,
-        "from_pretrained",
-        mock.Mock(return_value=model),
-    )
-    monkeypatch.setattr(local.transformers.AutoProcessor, "from_pretrained", mock.Mock())
-    monkeypatch.setattr(local, "vqa", fake_vqa)
-    (tmp_path / "model.safetensors").write_text("weights")
-    output_dir = tmp_path / "eval"
-    output_dir.mkdir()
-    (output_dir / "vqa.jsonl").write_text(
-        '{"id": 1, "output": "yes", "accuracy": 1.0}\n'
-    )
-
-    summary = local.evaluate(
-        model_dir=tmp_path,
-        output_dir=output_dir,
-        tasks=["vqa"],
-        n_examples=2,
-        device="cpu",
-        torch_dtype="float32",
-        resume=True,
-    )
-
-    assert fake_vqa.evaluate.call_args.kwargs["data"] == ["remaining"]
-    assert summary["tasks"]["vqa"]["n_examples"] == 2
-    assert (output_dir / "vqa.jsonl").read_text().splitlines() == [
-        '{"id": 1, "output": "yes", "accuracy": 1.0}',
-        '{"id": 2, "output": "no", "accuracy": 0.0}',
-    ]
-
-
-def test_evaluate_resume_uses_missing_dataset_ids(monkeypatch, tmp_path) -> None:
-    fake_vqa = fake_vqa_module(
-        evaluate=mock.Mock(return_value=[{"id": 2, "output": "no", "accuracy": 0.0}])
-    )
-
-    class DatasetWithIds:
-        column_names = ["question_id", "question"]
-
-        def __init__(self, rows):
-            self.rows = rows
-
-        def __len__(self):
-            return len(self.rows)
-
-        def __getitem__(self, key):
-            if isinstance(key, str):
-                return [row[key] for row in self.rows]
-            return self.rows[key]
-
-        def select(self, indices):
-            return DatasetWithIds([self.rows[index] for index in indices])
-
-    data = DatasetWithIds(
-        [
-            {"question_id": 1, "question": "done"},
-            {"question_id": 2, "question": "remaining"},
-            {"question_id": 3, "question": "done"},
-        ]
-    )
-    fake_vqa.TASKS["vqa"].data.return_value = data
-    model = mock.Mock()
-    model.eval = mock.Mock()
-    monkeypatch.setattr(
-        local.transformers.MllamaForConditionalGeneration,
-        "from_pretrained",
-        mock.Mock(return_value=model),
-    )
-    monkeypatch.setattr(local.transformers.AutoProcessor, "from_pretrained", mock.Mock())
-    monkeypatch.setattr(local, "vqa", fake_vqa)
-    (tmp_path / "model.safetensors").write_text("weights")
-    output_dir = tmp_path / "eval"
-    output_dir.mkdir()
-    (output_dir / "vqa.jsonl").write_text(
-        "\n".join(
-            [
-                '{"id": 3, "output": "maybe", "accuracy": 1.0}',
-                '{"id": 1, "output": "yes", "accuracy": 1.0}',
-            ]
-        )
-        + "\n"
-    )
-
-    summary = local.evaluate(
-        model_dir=tmp_path,
-        output_dir=output_dir,
-        tasks=["vqa"],
-        n_examples=3,
-        device="cpu",
-        torch_dtype="float32",
-        resume=True,
-    )
-
-    evaluated_data = fake_vqa.evaluate.call_args.kwargs["data"]
-    assert evaluated_data["question_id"] == [2]
-    assert summary["tasks"]["vqa"]["n_examples"] == 3
-    assert summary["tasks"]["vqa"]["accuracy"] == pytest.approx(2 / 3)
-    assert (output_dir / "vqa.jsonl").read_text().splitlines() == [
-        '{"id": 3, "output": "maybe", "accuracy": 1.0}',
-        '{"id": 1, "output": "yes", "accuracy": 1.0}',
-        '{"id": 2, "output": "no", "accuracy": 0.0}',
-    ]
-
-
-def test_select_remaining_eval_data_all_examples_completed() -> None:
-    data = common.datasets.Dataset.from_dict({"value": [1, 2]})
-
-    remaining = common.select_remaining_eval_data(data, completed_count=2)
-
-    assert len(remaining) == 0
-
-
-def test_evaluate_refuses_existing_output_without_resume_or_overwrite(
-    monkeypatch, tmp_path
-) -> None:
-    fake_vqa = fake_vqa_module()
-    model = mock.Mock()
-    model.eval = mock.Mock()
-    monkeypatch.setattr(
-        local.transformers.MllamaForConditionalGeneration,
-        "from_pretrained",
-        mock.Mock(return_value=model),
-    )
-    monkeypatch.setattr(local.transformers.AutoProcessor, "from_pretrained", mock.Mock())
-    monkeypatch.setattr(local, "vqa", fake_vqa)
-    (tmp_path / "model.safetensors").write_text("weights")
-    output_dir = tmp_path / "eval"
-    output_dir.mkdir()
-    (output_dir / "vqa.jsonl").write_text(
-        '{"id": 1, "output": "yes", "accuracy": 1.0}\n'
-    )
-
-    with pytest.raises(FileExistsError, match="already exists"):
-        local.evaluate(
-            model_dir=tmp_path,
-            output_dir=output_dir,
-            tasks=["vqa"],
-            n_examples=1,
-            device="cpu",
-            torch_dtype="float32",
-        )
-
-
-def test_load_eval_data_passes_vqa_s3_flag_to_existing_loader() -> None:
-    fake_vqa = fake_vqa_module()
-    result = common.load_eval_data(
-        fake_vqa.TASKS,
         "vqa",
-        n_examples=3,
-        load_vqa_from_s3=True,
+        SimpleNamespace(TASKS={"vqa": task}, evaluate=evaluate),
+    )
+    monkeypatch.setattr(
+        local.transformers.MllamaForConditionalGeneration,
+        "from_pretrained",
+        mock.Mock(return_value=torch.nn.Module()),
+    )
+    monkeypatch.setattr(
+        local.transformers.AutoProcessor,
+        "from_pretrained",
+        mock.Mock(return_value=object()),
+    )
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "model.safetensors").touch()
+    output_dir = tmp_path / "evaluation"
+    output_dir.mkdir()
+    (output_dir / "vqa.jsonl").write_text(
+        '{"id": 3, "output": "maybe", "accuracy": 1.0}\n'
+        '{"id": 1, "output": "yes", "accuracy": 1.0}\n'
     )
 
-    fake_vqa.TASKS["vqa"].data.assert_called_once_with(
-        limit=3,
-        load_from_s3=True,
+    summary = local.evaluate(
+        model_dir=model_dir,
+        output_dir=output_dir,
+        tasks=["vqa"],
+        n_examples=3,
+        device="cpu",
+        torch_dtype="float32",
+        resume=True,
     )
-    assert result == ["a"]
+
+    assert evaluate.call_args.kwargs["data"]["question_id"] == [2]
+    assert summary["tasks"]["vqa"] == {
+        "n_examples": 3,
+        "accuracy": pytest.approx(2 / 3),
+    }
+    written_summary = json.loads((output_dir / "summary.json").read_text())
+    assert written_summary["avg_primary"] == pytest.approx(2 / 3)
