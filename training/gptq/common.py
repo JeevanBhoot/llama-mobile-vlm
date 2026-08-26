@@ -4,7 +4,6 @@
 
 import json
 import random
-import subprocess
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -187,24 +186,7 @@ def load_eval_data(
     task_name: str,
     n_examples: int,
     load_vqa_from_s3: bool = False,
-    vqa_s3_path: str | None = None,
-    vqa_s3_local_path: Path | None = None,
 ) -> datasets.Dataset:
-    if task_name == "vqa" and vqa_s3_path is not None:
-        local_path = vqa_s3_local_path
-        if local_path is None:
-            local_path = Path("data/datasets") / Path(vqa_s3_path.rstrip("/")).name
-        subprocess.run(
-            ["aws", "s3", "sync", "--no-sign-request", vqa_s3_path, str(local_path)],
-            check=True,
-        )
-        ds = datasets.load_from_disk(str(local_path))
-        ds = ds.select_columns(
-            ["question_id", "image_id", "question", "image", "answers"]
-        )
-        ds = ds.shuffle(625464)
-        return ds.select(range(n_examples))
-
     kwargs: dict[str, Any] = {"limit": n_examples}
     if task_name == "vqa":
         kwargs["load_from_s3"] = load_vqa_from_s3

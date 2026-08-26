@@ -4,7 +4,6 @@
 
 import argparse
 import dataclasses
-import hashlib
 import itertools
 import json
 import math
@@ -12,8 +11,7 @@ import time
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable
-from urllib.parse import urlparse
+from typing import Any, Iterable
 
 import datasets
 import safetensors.torch
@@ -64,8 +62,6 @@ METADATA_FILENAME = "metadata.json"
 DEFAULT_STORAGE_SCALE_ZERO_DTYPE = "bfloat16"
 S3D8_CHECKPOINT_FILENAME = "gptq-s3d8.safetensors"
 VISION_ATTENTION_MASK_CACHE_SIZE = 8
-DEFAULT_SYNTHETIC_IMAGE_SHARDS = 8
-PUBLIC_SYNTHETIC_MANIFEST = "gptq-public-synthetic.json"
 VQAV2_PROTOTYPE_WARNING = (
     "VQAv2 calibration overlaps an evaluation task and is intended only for "
     "full-multimodal GPTQ prototyping; use synthetic calibration for reportable "
@@ -588,38 +584,11 @@ def load_synthetic_calibration_batches(
     n_samples: int,
     batch_size: int,
     max_tokens: int,
-    synthetic_image_shards: int = DEFAULT_SYNTHETIC_IMAGE_SHARDS,
 ) -> list[dict[str, Any]]:
     paths = [str(path) for path in calibration_data_paths]
     if not paths:
         raise ValueError(
             "--calibration-data-path is required with --calibration-source synthetic"
-        )
-
-    paths = [
-        _stage_public_synthetic_data(
-            path,
-            synthetic_image_shards=synthetic_image_shards,
-        )
-        for path in paths
-    ]
-
-    from utility import LOCAL_DATA_PATH
-
-    local_paths = [Path(LOCAL_DATA_PATH) / path for path in paths]
-    public_manifests = [path / PUBLIC_SYNTHETIC_MANIFEST for path in local_paths]
-    if any(path.is_file() for path in public_manifests):
-        if not all(path.is_file() for path in public_manifests):
-            raise ValueError(
-                "Cannot mix public subset caches and full synthetic datasets in "
-                "one calibration run"
-            )
-        return _load_public_synthetic_calibration_batches(
-            processor,
-            local_paths=local_paths,
-            n_samples=n_samples,
-            batch_size=batch_size,
-            max_tokens=max_tokens,
         )
 
     from train_data import Dataset
@@ -638,218 +607,6 @@ def load_synthetic_calibration_batches(
         )
         batches.append(_processor_batch_to_plain_dict(encoded))
     return batches
-
-
-def _load_public_synthetic_calibration_batches(
-    processor: Any,
-    *,
-    local_paths: list[Path],
-    n_samples: int,
-    batch_size: int,
-    max_tokens: int,
-) -> list[dict[str, Any]]:
-    calibration_datasets = []
-    for source_id, local_path in enumerate(local_paths):
-        manifest = json.loads((local_path / PUBLIC_SYNTHETIC_MANIFEST).read_text())
-        image_datasets = [
-            datasets.Dataset.from_file(filename)
-            for filename in manifest["image_files"]
-        ]
-        image_data = datasets.concatenate_datasets(image_datasets)
-        image_data = image_data.add_column(
-            "_synthetic_source_id",
-            [source_id] * len(image_data),
-        )
-        calibration_datasets.append(image_data)
-
-    data = datasets.concatenate_datasets(calibration_datasets).shuffle(563673)
-    if len(data) < n_samples:
-        raise ValueError(
-            "The staged synthetic image subset is smaller than the requested "
-            f"calibration set: available={len(data)}, requested={n_samples}. "
-            "Increase --synthetic-image-shards."
-        )
-    data = data.select(range(n_samples))
-
-    required_indices: list[set[int]] = [set() for _ in local_paths]
-    for source_id, index in zip(data["_synthetic_source_id"], data["index"]):
-        required_indices[int(source_id)].add(int(index))
-
-    outputs: list[dict[int, str]] = []
-    for local_path, required in zip(local_paths, required_indices):
-        selected_outputs: dict[int, str] = {}
-        for filename in sorted((local_path / "out").glob("out*.jsonl")):
-            with filename.open() as file:
-                for line in file:
-                    index, text = json.loads(line)
-                    if index in required:
-                        selected_outputs[index] = text
-                        if len(selected_outputs) == len(required):
-                            break
-            if len(selected_outputs) == len(required):
-                break
-        missing = required - selected_outputs.keys()
-        if missing:
-            raise ValueError(
-                f"Synthetic rollout outputs are missing {len(missing)} selected "
-                f"image indices under {local_path}"
-            )
-        outputs.append(selected_outputs)
-
-    batches = []
-    for start in range(0, len(data), batch_size):
-        rows = data[start : start + batch_size]
-        texts = [
-            outputs[int(source_id)][int(index)].replace("<|begin_of_text|>", "")
-            for source_id, index in zip(
-                rows["_synthetic_source_id"],
-                rows["index"],
-            )
-        ]
-        encoded = processor(
-            [[image] for image in rows["image"]],
-            texts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=max_tokens,
-        )
-        batches.append(_processor_batch_to_plain_dict(encoded))
-    return batches
-
-
-def _parse_public_synthetic_s3_path(path: str) -> tuple[str, str, str]:
-    parsed = urlparse(path)
-    if parsed.scheme != "s3" or not parsed.netloc:
-        raise ValueError(f"Expected an s3:// URI, got {path!r}")
-
-    key_parts = parsed.path.strip("/").split("/")
-    data_indices = [index for index, part in enumerate(key_parts) if part == "data"]
-    if not data_indices:
-        raise ValueError(
-            "Synthetic S3 paths must be below a data/ prefix, for example "
-            "s3://bucket/project/data/generation/model/dataset/run"
-        )
-    data_index = data_indices[-1]
-    data_prefix = "/".join(key_parts[: data_index + 1])
-    relative_path = "/".join(key_parts[data_index + 1 :])
-    if not relative_path.startswith("generation/"):
-        raise ValueError(
-            "Synthetic calibration requires a generated rollout path below "
-            "data/generation/, not a raw data/datasets/ path"
-        )
-    return parsed.netloc, data_prefix, relative_path
-
-
-def _download_public_s3_prefix(
-    bucket: str,
-    prefix: str,
-    destination: Path,
-    *,
-    include: Callable[[str], bool] | None = None,
-) -> None:
-    import boto3
-    from botocore import UNSIGNED
-    from botocore.config import Config
-
-    client = boto3.client("s3", config=Config(signature_version=UNSIGNED))
-    prefix = prefix.rstrip("/") + "/"
-    paginator = client.get_paginator("list_objects_v2")
-    objects = []
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for item in page.get("Contents", ()):
-            relative = item["Key"][len(prefix) :]
-            if relative and (include is None or include(relative)):
-                objects.append((item["Key"], relative, int(item["Size"])))
-    if not objects:
-        raise FileNotFoundError(f"No public S3 objects found at s3://{bucket}/{prefix}")
-
-    destination.mkdir(parents=True, exist_ok=True)
-    for key, relative, size in objects:
-        output_path = destination / relative
-        if output_path.is_file() and output_path.stat().st_size == size:
-            continue
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        print(
-            f"Downloading s3://{bucket}/{key} "
-            f"({size / 1024**3:.2f} GiB) to {output_path}",
-            flush=True,
-        )
-        client.download_file(bucket, key, str(output_path))
-
-
-def _stage_public_synthetic_data(
-    path: str,
-    *,
-    synthetic_image_shards: int = DEFAULT_SYNTHETIC_IMAGE_SHARDS,
-) -> str:
-    if not path.startswith("s3://"):
-        return path
-    if synthetic_image_shards < 1:
-        raise ValueError(
-            f"synthetic_image_shards must be >= 1, got {synthetic_image_shards}"
-        )
-
-    from train_data import load_config
-    from utility import LOCAL_DATA_PATH
-
-    bucket, data_prefix, relative_path = _parse_public_synthetic_s3_path(path)
-    local_path = Path(LOCAL_DATA_PATH) / relative_path
-    _download_public_s3_prefix(
-        bucket,
-        f"{data_prefix}/{relative_path}",
-        local_path,
-        include=lambda name: name == "config.json" or name.startswith("out/"),
-    )
-
-    config = load_config(local_path)
-    image_relative_path = f"datasets/{config.dataset_name}-{config.split}"
-    cache_key = hashlib.sha256(
-        f"{bucket}/{data_prefix}/{image_relative_path}".encode()
-    ).hexdigest()[:12]
-    image_local_path = (
-        Path(LOCAL_DATA_PATH)
-        / "gptq-public-cache"
-        / cache_key
-        / f"{config.dataset_name}-{config.split}"
-    )
-    image_prefix = f"{data_prefix}/{image_relative_path}"
-    _download_public_s3_prefix(
-        bucket,
-        image_prefix,
-        image_local_path,
-        include=lambda name: name in {"dataset_info.json", "state.json"},
-    )
-    state = json.loads((image_local_path / "state.json").read_text())
-    image_filenames = [item["filename"] for item in state["_data_files"]]
-    shard_count = min(synthetic_image_shards, len(image_filenames))
-    shard_indices = [
-        min(
-            len(image_filenames) - 1,
-            ((2 * index + 1) * len(image_filenames)) // (2 * shard_count),
-        )
-        for index in range(shard_count)
-    ]
-    selected_filenames = {image_filenames[index] for index in shard_indices}
-    _download_public_s3_prefix(
-        bucket,
-        image_prefix,
-        image_local_path,
-        include=selected_filenames.__contains__,
-    )
-    manifest = {
-        "source": path,
-        "image_shards": shard_count,
-        "image_files": [
-            str(image_local_path / image_filenames[index])
-            for index in shard_indices
-        ],
-    }
-    local_path.mkdir(parents=True, exist_ok=True)
-    (local_path / PUBLIC_SYNTHETIC_MANIFEST).write_text(
-        json.dumps(manifest, indent=2) + "\n"
-    )
-    return relative_path
 
 
 def _run_layer(
@@ -2299,7 +2056,6 @@ def quantize(
     calibration_gpu_cache: bool = False,
     calibration_split: str | None = None,
     calibration_data_paths: Iterable[str | Path] = (),
-    synthetic_image_shards: int = DEFAULT_SYNTHETIC_IMAGE_SHARDS,
     calibration_task: str = "vqa",
     load_vqa_from_s3: bool = False,
     c4_data_files: str = DEFAULT_C4_DATA_FILES,
@@ -2385,25 +2141,8 @@ def quantize(
             f"Unsupported calibration_sort={calibration_sort!r}, expected one of "
             f"{SUPPORTED_CALIBRATION_SORTS}"
         )
-    if synthetic_image_shards < 1:
-        raise ValueError(
-            f"synthetic_image_shards must be >= 1, got {synthetic_image_shards}"
-        )
 
     calibration_data_paths = tuple(str(path) for path in calibration_data_paths)
-    staged_calibration_data_paths = calibration_data_paths
-    if resolved_calibration_source == "synthetic":
-        if verbose and any(
-            path.startswith("s3://") for path in calibration_data_paths
-        ):
-            print("Staging public synthetic calibration data", flush=True)
-        staged_calibration_data_paths = tuple(
-            _stage_public_synthetic_data(
-                path,
-                synthetic_image_shards=synthetic_image_shards,
-            )
-            for path in calibration_data_paths
-        )
 
     dtype = DTYPES[torch_dtype]
     quantize_start = time.perf_counter()
@@ -2539,11 +2278,10 @@ def quantize(
             )
         calibration_batches = load_synthetic_calibration_batches(
             processor,
-            calibration_data_paths=staged_calibration_data_paths,
+            calibration_data_paths=calibration_data_paths,
             n_samples=calibration_samples,
             batch_size=batch_size,
             max_tokens=calibration_max_tokens,
-            synthetic_image_shards=synthetic_image_shards,
         )
         calibration_prepared_examples = _count_calibration_examples(
             calibration_batches
@@ -2553,7 +2291,6 @@ def quantize(
             "paths": [str(path) for path in calibration_data_paths],
             "n_samples": calibration_samples,
             "source": resolved_calibration_source,
-            "image_shards": synthetic_image_shards,
         }
     else:
         raise ValueError(
@@ -2816,8 +2553,6 @@ def evaluate(
     batch_size: int = 1,
     include_relaxed_metrics: bool = False,
     load_vqa_from_s3: bool = False,
-    vqa_s3_path: str | None = None,
-    vqa_s3_local_path: Path | None = None,
     device: str = DEFAULT_EVAL_DEVICE,
     torch_dtype: str = DEFAULT_TORCH_DTYPE,
     resume: bool = False,
@@ -2854,8 +2589,6 @@ def evaluate(
             task_name,
             n_examples=n_examples,
             load_vqa_from_s3=load_vqa_from_s3,
-            vqa_s3_path=vqa_s3_path,
-            vqa_s3_local_path=vqa_s3_local_path,
         )
         data_to_evaluate = select_eval_data_to_run(data, existing_results)
         results = write_jsonl_stream(
@@ -2885,10 +2618,6 @@ def evaluate(
                 "evaluation_batch_size": batch_size,
                 "include_relaxed_metrics": include_relaxed_metrics,
                 "load_vqa_from_s3": load_vqa_from_s3,
-                "vqa_s3_path": vqa_s3_path,
-                "vqa_s3_local_path": str(vqa_s3_local_path)
-                if vqa_s3_local_path
-                else None,
                 "device": device,
                 "torch_dtype": torch_dtype,
                 "artifact_size_bytes": artifact_size_bytes,
@@ -2910,10 +2639,6 @@ def evaluate(
             "evaluation_batch_size": batch_size,
             "include_relaxed_metrics": include_relaxed_metrics,
             "load_vqa_from_s3": load_vqa_from_s3,
-            "vqa_s3_path": vqa_s3_path,
-            "vqa_s3_local_path": str(vqa_s3_local_path)
-            if vqa_s3_local_path
-            else None,
             "torch_dtype": torch_dtype,
             "device": device,
             "artifact_size_bytes": artifact_size_bytes,
@@ -3010,19 +2735,8 @@ def _add_quantize_args(parser: argparse.ArgumentParser) -> None:
         dest="calibration_data_paths",
         action="append",
         default=[],
-        help=(
-            "Synthetic calibration shard path or public s3:// rollout URI; "
-            "repeat for multiple shards"
-        ),
-    )
-    parser.add_argument(
-        "--synthetic-image-shards",
-        type=int,
-        default=DEFAULT_SYNTHETIC_IMAGE_SHARDS,
-        help=(
-            "Number of evenly distributed public ImageNet Arrow shards to "
-            "download for synthetic calibration"
-        ),
+        type=Path,
+        help="Synthetic calibration shard path; repeat for multiple shards",
     )
     parser.add_argument(
         "--calibration-task",
@@ -3062,17 +2776,6 @@ def _add_evaluate_args(parser: argparse.ArgumentParser) -> None:
         "--load-vqa-from-s3",
         action="store_true",
         help="Load VQAv2 from the legacy S3 cache instead of Hugging Face",
-    )
-    parser.add_argument(
-        "--vqa-s3-path",
-        default=None,
-        help="Temporary VQAv2 S3 dataset path to sync with --no-sign-request",
-    )
-    parser.add_argument(
-        "--vqa-s3-local-path",
-        type=Path,
-        default=None,
-        help="Optional local destination for --vqa-s3-path",
     )
     parser.add_argument(
         "--device",
@@ -3145,7 +2848,6 @@ def main(argv: list[str] | None = None) -> None:
             calibration_gpu_cache=args.calibration_gpu_cache,
             calibration_split=args.calibration_split,
             calibration_data_paths=args.calibration_data_paths,
-            synthetic_image_shards=args.synthetic_image_shards,
             calibration_task=args.calibration_task,
             load_vqa_from_s3=args.load_vqa_from_s3,
             c4_data_files=args.c4_data_files,
@@ -3185,8 +2887,6 @@ def main(argv: list[str] | None = None) -> None:
             batch_size=args.batch_size,
             include_relaxed_metrics=args.include_relaxed_metrics,
             load_vqa_from_s3=args.load_vqa_from_s3,
-            vqa_s3_path=args.vqa_s3_path,
-            vqa_s3_local_path=args.vqa_s3_local_path,
             device=args.device,
             torch_dtype=args.torch_dtype,
             resume=args.resume,

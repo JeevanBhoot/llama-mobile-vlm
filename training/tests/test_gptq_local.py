@@ -823,123 +823,39 @@ def test_vqav2_train_calibration_uses_small_train_dataset(monkeypatch) -> None:
     assert all("Question: question-" in prompt for prompt in processor.prompts)
 
 
-def test_public_synthetic_s3_path_resolves_data_root() -> None:
-    path = (
-        "s3://graphcore-research-public/2026-llama-mobile/data/generation/"
-        "llama-3.2-11b-vision-instruct/imagenet-train/new-prompts-1280k/"
-    )
-
-    assert local._parse_public_synthetic_s3_path(path) == (
-        "graphcore-research-public",
-        "2026-llama-mobile/data",
-        "generation/llama-3.2-11b-vision-instruct/imagenet-train/"
-        "new-prompts-1280k",
-    )
-
-
-def test_public_synthetic_s3_path_rejects_raw_dataset() -> None:
-    with pytest.raises(ValueError, match="generated rollout"):
-        local._parse_public_synthetic_s3_path(
-            "s3://bucket/project/data/datasets/imagenet-train/"
-        )
-
-
-def test_stage_public_synthetic_data_downloads_rollout_and_images(
-    monkeypatch,
-    tmp_path,
-) -> None:
+def test_load_synthetic_calibration_uses_local_dataset(monkeypatch) -> None:
     import train_data
-    import utility
 
-    monkeypatch.setattr(utility, "LOCAL_DATA_PATH", str(tmp_path))
-    monkeypatch.setattr(
-        train_data,
-        "load_config",
-        lambda _: SimpleNamespace(dataset_name="imagenet", split="train"),
-    )
-    downloads = []
-
-    def record_download(bucket, prefix, destination, **kwargs):
-        downloads.append((bucket, prefix, destination, kwargs))
-        if prefix.endswith("datasets/imagenet-train") and not (
-            destination / "state.json"
-        ).exists():
-            destination.mkdir(parents=True, exist_ok=True)
-            (destination / "state.json").write_text(
-                json.dumps(
-                    {
-                        "_data_files": [
-                            {"filename": f"data-{index:05d}-of-00010.arrow"}
-                            for index in range(10)
-                        ]
-                    }
-                )
-            )
-
-    monkeypatch.setattr(
-        local,
-        "_download_public_s3_prefix",
-        record_download,
-    )
-
-    relative = local._stage_public_synthetic_data(
-        "s3://public/project/data/generation/model/imagenet-train/run"
-    )
-
-    assert relative == "generation/model/imagenet-train/run"
-    assert [download[1] for download in downloads] == [
-        "project/data/generation/model/imagenet-train/run",
-        "project/data/datasets/imagenet-train",
-        "project/data/datasets/imagenet-train",
+    datums = [
+        SimpleNamespace(image="image-a", out="<|begin_of_text|>prompt-a"),
+        SimpleNamespace(image="image-b", out="<|begin_of_text|>prompt-b"),
     ]
-    manifest = json.loads(
-        (tmp_path / relative / local.PUBLIC_SYNTHETIC_MANIFEST).read_text()
-    )
-    assert manifest["image_shards"] == 8
-    assert len(manifest["image_files"]) == 8
-
-
-def test_load_public_synthetic_calibration_uses_staged_subset(tmp_path) -> None:
-    image_path = tmp_path / "images"
-    local.datasets.Dataset.from_dict(
-        {"index": [10, 20], "image": ["image-10", "image-20"]}
-    ).save_to_disk(image_path)
-    image_files = [str(path) for path in image_path.glob("*.arrow")]
-
-    rollout_path = tmp_path / "rollout"
-    (rollout_path / "out").mkdir(parents=True)
-    (rollout_path / local.PUBLIC_SYNTHETIC_MANIFEST).write_text(
-        json.dumps({"image_files": image_files})
-    )
-    (rollout_path / "out" / "out.jsonl").write_text(
-        "\n".join(
-            [
-                json.dumps([10, "<|begin_of_text|>output-10"]),
-                json.dumps([20, "<|begin_of_text|>output-20"]),
-            ]
-        )
-        + "\n"
+    dataset = mock.Mock()
+    dataset.get_datums.return_value = iter(datums)
+    dataset_class = mock.Mock(return_value=dataset)
+    monkeypatch.setattr(train_data, "Dataset", dataset_class)
+    processor = mock.Mock(
+        side_effect=lambda images, prompts, **_: {
+            "input_ids": torch.ones(len(prompts), 2, dtype=torch.long)
+        }
     )
 
-    class RecordingProcessor:
-        def __init__(self):
-            self.texts = []
-
-        def __call__(self, images, texts, **kwargs):
-            self.texts.extend(texts)
-            return {"input_ids": torch.ones(len(texts), 2, dtype=torch.long)}
-
-    processor = RecordingProcessor()
-    batches = local._load_public_synthetic_calibration_batches(
+    batches = local.load_synthetic_calibration_batches(
         processor,
-        local_paths=[rollout_path],
+        calibration_data_paths=[Path("generation/local-rollout")],
         n_samples=2,
         batch_size=1,
         max_tokens=16,
     )
 
+    dataset_class.assert_called_once_with(
+        ["generation/local-rollout"], n_examples=[None]
+    )
     assert len(batches) == 2
-    assert set(processor.texts) == {"output-10", "output-20"}
+    assert [call.args for call in processor.call_args_list] == [
+        ([["image-a"]], ["prompt-a"]),
+        ([["image-b"]], ["prompt-b"]),
+    ]
 
 
 def _tiny_multimodal_batch() -> dict[str, torch.Tensor]:
@@ -1254,8 +1170,6 @@ def test_evaluate_writes_outputs(monkeypatch, tmp_path) -> None:
     )
     assert summary["tasks"]["vqa"]["accuracy"] == 1.0
     assert summary["load_vqa_from_s3"] is False
-    assert summary["vqa_s3_path"] is None
-    assert summary["vqa_s3_local_path"] is None
     assert (tmp_path / "eval" / "summary.json").exists()
     assert (tmp_path / "eval" / "summary.partial.json").exists()
     assert (tmp_path / "eval" / "vqa.jsonl").exists()
@@ -1444,43 +1358,17 @@ def test_evaluate_refuses_existing_output_without_resume_or_overwrite(
         )
 
 
-def test_load_eval_data_syncs_explicit_vqa_s3_path(monkeypatch, tmp_path) -> None:
-    selected_columns = mock.Mock()
-    shuffled = mock.Mock()
-    dataset = mock.Mock()
-    dataset.select_columns.return_value = selected_columns
-    selected_columns.shuffle.return_value = shuffled
-    shuffled.select.return_value = ["row"]
-
-    run = mock.Mock()
-    load_from_disk = mock.Mock(return_value=dataset)
-    monkeypatch.setattr(common.subprocess, "run", run)
-    monkeypatch.setattr(common.datasets, "load_from_disk", load_from_disk)
-
-    local_path = tmp_path / "vqav2-validation"
+def test_load_eval_data_passes_vqa_s3_flag_to_existing_loader() -> None:
+    fake_vqa = fake_vqa_module()
     result = common.load_eval_data(
-        fake_vqa_module().TASKS,
+        fake_vqa.TASKS,
         "vqa",
         n_examples=3,
-        vqa_s3_path="s3://bucket/path/vqav2-validation",
-        vqa_s3_local_path=local_path,
+        load_vqa_from_s3=True,
     )
 
-    run.assert_called_once_with(
-        [
-            "aws",
-            "s3",
-            "sync",
-            "--no-sign-request",
-            "s3://bucket/path/vqav2-validation",
-            str(local_path),
-        ],
-        check=True,
+    fake_vqa.TASKS["vqa"].data.assert_called_once_with(
+        limit=3,
+        load_from_s3=True,
     )
-    load_from_disk.assert_called_once_with(str(local_path))
-    dataset.select_columns.assert_called_once_with(
-        ["question_id", "image_id", "question", "image", "answers"]
-    )
-    selected_columns.shuffle.assert_called_once_with(625464)
-    shuffled.select.assert_called_once_with(range(3))
-    assert result == ["row"]
+    assert result == ["a"]
