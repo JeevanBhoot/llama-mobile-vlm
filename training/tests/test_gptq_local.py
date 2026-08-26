@@ -384,7 +384,7 @@ def test_cross_attention_scope_is_structural() -> None:
     torch.testing.assert_close(next_inputs.args[0][0], inputs.args[0][0])
 
 
-def test_self_attention_scope_requires_all_gptqmodel_targets() -> None:
+def test_self_attention_scope_requires_all_expected_targets() -> None:
     layer = TinyDecoderLayer(8)
     del layer.self_attn.o_proj
     inputs = local.LayerInputs(

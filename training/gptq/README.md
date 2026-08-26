@@ -1,18 +1,9 @@
 # GPTQ Baselines
 
-This directory provides two GPTQ workflows for
-`meta-llama/Llama-3.2-11B-Vision-Instruct`.
-
-## Choose a workflow
-
-| Workflow | Command | Quantization scope | Output |
-| --- | --- | --- | --- |
-| GPTQModel | `gptq.standard` | Language model with C4 calibration | Packed GPTQModel checkpoint |
-| Local PyTorch | `gptq.local` | Text layers or full Mllama Linear coverage | Dense dequantized Hugging Face checkpoint |
-
-Use `gptq.standard` to create and evaluate a GPTQModel checkpoint. Use
-`gptq.local` to experiment with ordinary INT, codebook INT, and S3D8 inside the
-GPTQ algorithm. Both workflows use the `eval.vqa` evaluation harness.
+This directory provides a local PyTorch GPTQ implementation for
+`meta-llama/Llama-3.2-11B-Vision-Instruct`. It supports ordinary INT, codebook
+INT, and S3D8 across text layers or the full Mllama Linear scope and uses the
+`eval.vqa` evaluation harness.
 
 ## Set up the environment
 
@@ -23,52 +14,8 @@ source .venv/bin/activate
 uv pip install -r requirements.txt --torch-backend cu130
 ```
 
-Install GPTQModel to use `gptq.standard` and run GPTQModel parity tests:
-
-```sh
-uv pip install setuptools wheel
-uv pip install --no-build-isolation-package gptqmodel -r gptq/requirements.txt
-```
-
 Configure a Hugging Face token with access to
 `meta-llama/Llama-3.2-11B-Vision-Instruct`.
-
-## Quantize with GPTQModel
-
-Create an INT4 GPTQModel checkpoint:
-
-```sh
-python -m gptq.standard quantize \
-  --bits 4 \
-  --output-dir out/gptq/llama-3.2-vision-gptq-int4-c4
-```
-
-`--bits` accepts `2`, `3`, `4`, `5`, `6`, or `8`. To quantize another model,
-set `--model-name` to a Hugging Face model name or local checkpoint path.
-
-The default calibration settings are:
-
-- Dataset: `allenai/c4`, file `en/c4-train.00001-of-01024.json.gz`
-- Samples: `512`
-- Maximum tokens per sample: `1024`
-- Sample order: descending length
-- Minimum sample length: `10` tokens
-- Calibration batch size: `1`
-- Group size: `128`
-- Checkpoint format: `gptq`
-- Model load dtype: `bfloat16`
-
-Common options:
-
-- `--calibration-samples`, `--calibration-max-tokens`: set calibration size.
-- `--calibration-concat-size`: concatenate tokens into fixed-size chunks.
-- `--group-size`, `--sym`, `--desc-act`, `--static-groups`, `--mse`: configure
-  quantization.
-- `--format`, `--pack-dtype`: configure the saved GPTQModel checkpoint.
-- `--offload-to-disk-path`, `--gc-mode`, `--wait-for-submodule-finalizers`:
-  control memory use during quantization.
-
-The output directory contains the GPTQModel checkpoint and `metadata.json`.
 
 ## Quantize with the local implementation
 
@@ -206,9 +153,8 @@ Storage estimates use it for scales and, with `--no-sym`, stored zero points.
 
 ## Inspect outputs and storage
 
-| Workflow | Primary artifact | Metadata |
+| Format | Primary artifact | Metadata |
 | --- | --- | --- |
-| GPTQModel | Packed checkpoint in `--output-dir` | `metadata.json` |
 | Local INT/codebook | Dense dequantized Hugging Face checkpoint | `metadata.json` |
 | Local S3D8 | Dense checkpoint and `gptq-s3d8.safetensors` | `metadata.json` |
 
@@ -231,14 +177,6 @@ The saved local Hugging Face checkpoint contains dense dequantized weights. Use
 dense checkpoint size.
 
 ## Evaluate a checkpoint
-
-Evaluate a GPTQModel checkpoint with `gptq.standard`:
-
-```sh
-python -m gptq.standard evaluate \
-  out/gptq/llama-3.2-vision-gptq-int4-c4 \
-  --output-dir out/gptq/llama-3.2-vision-gptq-int4-c4/evaluation
-```
 
 Evaluate a local dense checkpoint with `gptq.local`:
 
@@ -263,26 +201,19 @@ Evaluation writes:
 - One streamed JSONL file per task, such as `vqa.jsonl`
 
 Use `--tasks`, `--n-examples`, `--batch-size`, `--resume`, and `--overwrite` to
-control a run. The GPTQModel evaluator accepts `--backend` and `--dtype`; the
-local evaluator accepts `--torch-dtype`.
+control a run. Use `--torch-dtype` to select the evaluation dtype.
 
 ## Command reference
 
 ```sh
-python -m gptq.standard quantize --help
-python -m gptq.standard evaluate --help
 python -m gptq.local quantize --help
 python -m gptq.local evaluate --help
 ```
 
 ## Run tests
 
-GPTQModel parity tests require the optional GPTQModel installation:
-
 ```sh
 pytest \
   tests/test_gptq_algorithm.py \
-  tests/test_gptq_algorithm_parity.py \
-  tests/test_gptq_local.py \
-  tests/test_gptq_standard.py
+  tests/test_gptq_local.py
 ```
