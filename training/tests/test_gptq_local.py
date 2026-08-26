@@ -289,7 +289,10 @@ class TinyCrossAttentionDecoderLayer(torch.nn.Module):
 class TinyFullLanguageModel(TinyLanguageModel):
     def __init__(self):
         torch.nn.Module.__init__(self)
-        self.config = SimpleNamespace(use_cache=True)
+        self.config = SimpleNamespace(
+            use_cache=True,
+            _attn_implementation="sdpa",
+        )
         self.embed_tokens = torch.nn.Embedding(32, 8)
         self.rotary_emb = TinyRotaryEmbedding()
         self.norm = torch.nn.LayerNorm(8)

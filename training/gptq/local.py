@@ -18,6 +18,7 @@ import safetensors.torch
 import torch
 import torch.nn.functional as F
 import transformers
+from transformers.masking_utils import create_causal_mask
 import weight_formats.quantisation as Q
 import weight_formats.quantisation_training as QT
 
@@ -389,7 +390,7 @@ def _mllama_first_layer_kwargs(
 ) -> tuple[list[Any], dict[str, Any]]:
     input_ids = batch.get("input_ids")
     if input_ids is None:
-        raise ValueError("Mllama local GPTQ calibration requires input_ids")
+        raise ValueError("Mllama GPTQ calibration requires input_ids")
 
     attention_mask = batch.get("attention_mask")
     position_ids = batch.get("position_ids")
@@ -1002,24 +1003,13 @@ def _prepare_causal_mask(
     past_key_values: Any,
     position_ids: torch.Tensor,
 ) -> Any:
-    try:
-        from transformers.masking_utils import create_causal_mask
-    except ImportError:
-        return _prepare_first_layer_attention_mask(attention_mask)
-
-    config = getattr(language_model, "config", None)
-    if config is None:
-        return _prepare_first_layer_attention_mask(attention_mask)
-    try:
-        return create_causal_mask(
-            config=config,
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            past_key_values=past_key_values,
-            position_ids=position_ids,
-        )
-    except Exception:
-        return _prepare_first_layer_attention_mask(attention_mask)
+    return create_causal_mask(
+        config=language_model.config,
+        inputs_embeds=inputs_embeds,
+        attention_mask=attention_mask,
+        past_key_values=past_key_values,
+        position_ids=position_ids,
+    )
 
 
 def collect_vision_transformer_inputs(
@@ -2653,7 +2643,7 @@ def _add_gptq_args(parser: argparse.ArgumentParser) -> None:
         "--format",
         choices=SUPPORTED_FORMATS,
         default="int",
-        help="Weight format used inside local GPTQ",
+        help="Weight format used inside GPTQ",
     )
     parser.add_argument("--bits", type=int, choices=SUPPORTED_BITS, default=None)
     parser.add_argument(
@@ -2793,7 +2783,7 @@ def _add_evaluate_args(parser: argparse.ArgumentParser) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run local dense GPTQ INT/codebook/S3D8 baselines"
+        description="Run dense GPTQ INT/codebook/S3D8 baselines"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -2873,7 +2863,7 @@ def main(argv: list[str] | None = None) -> None:
             "bits/value overall"
         )
         print(
-            "Dense local artifact size: "
+            "Output directory size: "
             f"{metadata['artifact_size_bytes'] / gib:.3f} GiB"
         )
     elif args.command == "evaluate":

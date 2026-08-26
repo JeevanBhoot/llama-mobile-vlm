@@ -1,6 +1,6 @@
 # GPTQ Baselines
 
-This directory provides a local PyTorch GPTQ implementation for
+This directory provides a PyTorch GPTQ implementation for
 `meta-llama/Llama-3.2-11B-Vision-Instruct`. It supports ordinary INT, codebook
 INT, and S3D8 across text layers or the full Mllama Linear scope and uses the
 `eval.vqa` evaluation harness.
@@ -17,12 +17,12 @@ uv pip install -r requirements.txt --torch-backend cu130
 Configure a Hugging Face token with access to
 `meta-llama/Llama-3.2-11B-Vision-Instruct`.
 
-## Quantize with the local implementation
+## Quantize a model
 
-`gptq.local` applies quantization during the GPTQ column updates, then saves the
-dequantized weights as a Hugging Face checkpoint. These checkpoints are used for
-accuracy evaluation. `metadata.json` records the quantization settings and
-estimated packed storage.
+`python -m gptq` applies quantization during the GPTQ column updates, then
+saves the dequantized weights as a Hugging Face checkpoint. These checkpoints
+are used for accuracy evaluation. `metadata.json` records the quantization
+settings and estimated packed storage.
 
 ### Choose a weight format
 
@@ -59,7 +59,7 @@ quantizes language-model self-attention and MLP projections.
 Ordinary INT4:
 
 ```sh
-python -m gptq.local quantize \
+python -m gptq quantize \
   --bits 4 \
   --output-dir out/gptq/llama-3.2-vision-local-gptq-int4-c4
 ```
@@ -67,7 +67,7 @@ python -m gptq.local quantize \
 Affine codebook with seven codepoints:
 
 ```sh
-python -m gptq.local quantize \
+python -m gptq quantize \
   --format int-codebook-affine \
   --codepoints 7 \
   --group-size 128 \
@@ -77,7 +77,7 @@ python -m gptq.local quantize \
 Signed-centroid codebook with seven codepoints:
 
 ```sh
-python -m gptq.local quantize \
+python -m gptq quantize \
   --format int-codebook \
   --codepoints 7 \
   --group-size 128 \
@@ -87,7 +87,7 @@ python -m gptq.local quantize \
 S3D8:
 
 ```sh
-python -m gptq.local quantize \
+python -m gptq quantize \
   --format s3d8 \
   --output-dir out/gptq/llama-3.2-vision-local-gptq-s3d8-c4
 ```
@@ -101,7 +101,7 @@ Use `--target-scope full-multimodal` with `vqav2`, `synthetic`, or `eval-task`
 calibration:
 
 ```sh
-python -m gptq.local quantize \
+python -m gptq quantize \
   --target-scope full-multimodal \
   --calibration-source vqav2 \
   --bits 4 \
@@ -127,9 +127,9 @@ For multimodal runs:
 - Use `--calibration-max-tokens` to control text length.
 - Repeat `--calibration-data-path` to provide synthetic calibration shards.
 
-### Configure local GPTQ
+### Configure GPTQ
 
-The local defaults are:
+The defaults are:
 
 - Calibration samples: `512`
 - Maximum tokens per sample: `1024`
@@ -155,10 +155,10 @@ Storage estimates use it for scales and, with `--no-sym`, stored zero points.
 
 | Format | Primary artifact | Metadata |
 | --- | --- | --- |
-| Local INT/codebook | Dense dequantized Hugging Face checkpoint | `metadata.json` |
-| Local S3D8 | Dense checkpoint and `gptq-s3d8.safetensors` | `metadata.json` |
+| INT/codebook | Dense dequantized Hugging Face checkpoint | `metadata.json` |
+| S3D8 | Dense checkpoint and `gptq-s3d8.safetensors` | `metadata.json` |
 
-Inspect a local storage estimate with:
+Inspect a storage estimate with:
 
 ```sh
 jq .estimated_packed_storage \
@@ -172,16 +172,16 @@ realizable weight bits. Full-model estimates include scales, stored zero points
 for asymmetric affine formats, group indices, per-tensor tail chunks, and
 unquantized tensors.
 
-The saved local Hugging Face checkpoint contains dense dequantized weights. Use
+The saved Hugging Face checkpoint contains dense dequantized weights. Use
 `estimated_packed_storage` to compare quantization formats independently of the
 dense checkpoint size.
 
 ## Evaluate a checkpoint
 
-Evaluate a local dense checkpoint with `gptq.local`:
+Evaluate a dense checkpoint with `python -m gptq`:
 
 ```sh
-python -m gptq.local evaluate \
+python -m gptq evaluate \
   out/gptq/llama-3.2-vision-local-gptq-int4-c4 \
   --output-dir out/gptq/llama-3.2-vision-local-gptq-int4-c4/evaluation
 ```
@@ -206,8 +206,8 @@ control a run. Use `--torch-dtype` to select the evaluation dtype.
 ## Command reference
 
 ```sh
-python -m gptq.local quantize --help
-python -m gptq.local evaluate --help
+python -m gptq quantize --help
+python -m gptq evaluate --help
 ```
 
 ## Run tests
