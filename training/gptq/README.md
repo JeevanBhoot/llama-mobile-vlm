@@ -1,219 +1,153 @@
-# GPTQ Baselines
+# GPTQ
 
 This directory provides a PyTorch GPTQ implementation for
-`meta-llama/Llama-3.2-11B-Vision-Instruct`. It supports ordinary INT, codebook
-INT, and S3D8 across text layers or the full Mllama Linear scope and uses the
-`eval.vqa` evaluation harness.
+`meta-llama/Llama-3.2-11B-Vision-Instruct`. It can target every
+`Linear` weight matrix in the model, including vision encoders,
+multimodal projector, cross-attention, and `lm_head`. The implementation
+supports ordinary INT, codebook INT, and S3D8.
 
-## Set up the environment
+Saved Hugging Face checkpoints contain dense BF16 values that
+preserve quantization error, and evaluation uses BF16 activations.
 
-Run from `training/`:
+## Setup
+
+Run from `training/``:
 
 ```sh
 source .venv/bin/activate
 uv pip install -r requirements.txt --torch-backend cu130
 ```
 
-Configure a Hugging Face token with access to
-`meta-llama/Llama-3.2-11B-Vision-Instruct`.
-
 ## Quantize a model
 
-`python -m gptq` applies quantization during the GPTQ column updates, then
-saves the dequantized weights as a Hugging Face checkpoint. These checkpoints
-are used for accuracy evaluation. `metadata.json` records the quantization
-settings and estimated packed storage.
+`python -m gptq quantize` runs GPTQ and saves the resulting dense BF16
+values as a Hugging Face checkpoint.
+`metadata.json` records the settings and estimated packed storage.
 
-### Choose a weight format
+### Weight formats
 
-| Format | Arguments | Quantization parameters |
+| Format | Arguments | Parameters |
 | --- | --- | --- |
-| Ordinary affine INT | `--format int --bits {2,3,4}` | Scale; asymmetric runs also store a zero point |
-| Affine codebook INT | `--format int-codebook-affine --codepoints K` | Scale; asymmetric runs also store a zero point |
-| Signed-centroid codebook INT | `--format int-codebook --codepoints K` | Scale |
-| S3D8 | `--format s3d8` | Per-row scale and fitted centroids |
+| Ordinary affine INT | `--format int --bits {2,3,4}` | Scale and, for asymmetric runs, zero point |
+| Affine codebook INT | `--format int-codebook-affine --codepoints K` | Scale and, for asymmetric runs, zero point |
+| Signed codebook INT | `--format int-codebook --codepoints K` | Absmax scale |
+| S3D8 | `--format s3d8` | Per-output-channel scale and fitted `32 x 3` centroids |
 
-The two codebook modes work as follows:
+The default is symmetric INT4 (`--format int --bits 4`).
 
-- `int-codebook-affine` uses unsigned indices from `0` to `K - 1`. Symmetric
-  quantization uses `scale = 2 * absmax / (K - 1)` and zero point
-  `floor(K / 2)`. Asymmetric quantization derives scale and zero point from the
-  row minimum and maximum. Under identical GPTQ settings and parameter dtype,
-  `K=4`, `K=8`, and `K=16` match ordinary INT2, INT3, and INT4.
-- `int-codebook` uses signed integer centroids that include zero and sets the
-  per-row scale from `absmax / positive_endpoint`. For example, `K=6` uses
-  `[-3, -2, -1, 0, 1, 2]`, so the scale denominator is `2`. `K=16` uses
-  `[-8, ..., 7]`, so the scale denominator is `7`. No zero point is stored.
+Ordinary INT selects a power-of-two number of levels with `--bits`. The
+codebook formats set the number of levels directly with `--codepoints K`, so
+they also support non-power-of-two sizes.
 
-Use `--codepoints` for either codebook mode; do not combine it with `--bits`.
-The intended affine-codebook sweep is `K=4..16`.
-Packed-storage estimates treat the symmetric zero point as implicit because it
-is determined by `K`. Runs using `--no-sym` include one stored zero point per
-group.
+`int-codebook` uses signed integer values with absmax scaling.
+`int-codebook-affine` stores unsigned indices and reconstructs them around a
+fixed zero point. For even `K`, affine scaling gives finer spacing near zero,
+while absmax scaling represents both `-absmax` and `+absmax` exactly.
 
-### Quantize text layers
+### Text decoder quantization
 
-The default target is `--target-scope text-self` with C4 calibration. It
-quantizes language-model self-attention and MLP projections.
+The default scope is `text-self`, which only quantizes the text decoder
+(self-attention and MLP projections) using C4 calibration.
 
-Ordinary INT4:
+Run ordinary INT4:
 
 ```sh
 python -m gptq quantize \
+  --format int \
   --bits 4 \
-  --output-dir out/gptq/llama-3.2-vision-local-gptq-int4-c4
+  --output-dir out/gptq/llama-3.2-vision-gptq-int4-c4
 ```
 
-Affine codebook with seven codepoints:
+Quantize to an eight-level affine codebook with:
 
 ```sh
 python -m gptq quantize \
   --format int-codebook-affine \
-  --codepoints 7 \
+  --codepoints 8 \
   --group-size 128 \
-  --output-dir out/gptq/llama-3.2-vision-local-gptq-int-affine-k7-g128-c4
+  --output-dir out/gptq/llama-3.2-vision-gptq-affine-k8-c4
 ```
 
-Signed-centroid codebook with seven codepoints:
+### Full-multimodal quantization
 
-```sh
-python -m gptq quantize \
-  --format int-codebook \
-  --codepoints 7 \
-  --group-size 128 \
-  --output-dir out/gptq/llama-3.2-vision-local-gptq-int-k7-g128-c4
-```
+Set `--target-scope full-multimodal` to quantize all supported `Linear`
+matrices in the local and global vision encoders, multimodal projector, text
+self-attention, cross-attention, MLPs, and `lm_head`. This scope supports
+`vqav2`, `synthetic`, and `eval-task` calibration.
 
-S3D8:
+Run S3D8 with VQAv2 training data from Hugging Face:
 
 ```sh
 python -m gptq quantize \
   --format s3d8 \
-  --output-dir out/gptq/llama-3.2-vision-local-gptq-s3d8-c4
-```
-
-S3D8 also writes `gptq-s3d8.safetensors`. Pass this file to
-`squashedtensors.py --checkpoint` for the S3D8 deployment path.
-
-### Quantize the full multimodal model
-
-Use `--target-scope full-multimodal` with `vqav2`, `synthetic`, or `eval-task`
-calibration:
-
-```sh
-python -m gptq quantize \
   --target-scope full-multimodal \
   --calibration-source vqav2 \
-  --bits 4 \
-  --output-dir out/gptq/llama-3.2-vision-local-gptq-int4-vqav2-full
+  --calibration-split train \
+  --output-dir out/gptq/llama-3.2-vision-gptq-s3d8-vqav2
 ```
 
-This target includes:
+VQAv2 is also an evaluation task, so this example is best used to try the
+workflow. Use a separate image-text calibration set for independent
+experiments.
 
-- Vision encoder and global-encoder Linear layers
-- Text self-attention, cross-attention, and MLP Linear layers
-- `model.multi_modal_projector`
-- `lm_head`
+The original experiments used synthetic image-text data generated through the
+QAT data pipeline. It is not distributed with the repository, and the
+original data links in the [training README](../README.md) require project
+access. The generation logic is in [`train_data.py`](../train_data.py)
+(`GenerationConfig` and `generate_data`) and
+[`prompt_sampling.py`](../prompt_sampling.py). If you prepare compatible
+data, use `--calibration-source synthetic` and `--calibration-data-path`.
 
-VQAv2 calibration defaults to the `train` split from
-`Multimodal-Fatima/VQAv2_sample_train`. Set `--calibration-split validation` to
-use the validation split.
+### Common options
 
-For multimodal runs:
+| Option | Default | Purpose |
+| --- | ---: | --- |
+| `--calibration-samples` | `512` | Number of calibration examples |
+| `--calibration-max-tokens` | `1024` | Maximum tokens per example |
+| `--batch-size` | `1` | Calibration batch size |
+| `--group-size` | `128` | Weights per quantization group |
+| `--blocksize` | `128` | GPTQ input-column block size |
+| `--damp-percent` | `0.05` | Initial Hessian damping |
+| `--damp-auto-increment` | `0.01` | Damping increment after factorization failure |
+| `--act-group-aware` | enabled | Reorder groups using activation statistics |
+| `--desc-act` | disabled | Process columns in descending activation order |
+| `--sym` | enabled | Use symmetric quantization |
+| `--mse` | `0.0` | MSE shrink search; `0.0` disables it |
+| `--torch-dtype` | `bfloat16` | Model and saved-weight dtype |
 
-- Keep `--batch-size 1` when image and text padding would exceed GPU memory.
-- Enable `--calibration-gpu-cache` when the captured activations fit on the
-  quantization GPU.
-- Use `--calibration-max-tokens` to control text length.
-- Repeat `--calibration-data-path` to provide synthetic calibration shards.
-
-### Configure GPTQ
-
-The defaults are:
-
-- Calibration samples: `512`
-- Maximum tokens per sample: `1024`
-- C4 sample order: descending length
-- C4 minimum sample length: `10` tokens
-- Calibration batch size: `1`
-- Group size: `128`
-- GPTQ block size: `128`
-- Activation order: disabled
-- Act-group-aware ordering: enabled
-- Symmetric quantization: enabled
-- MSE shrink search: disabled
-- Damp percent: `0.05`
-- Damp auto increment: `0.01`
-- Model dtype: `bfloat16`
-- Scale and computed zero-point dtype: `bfloat16`
-
-Set `--storage-scale-zero-dtype` to `bfloat16`, `float16`, or `float32`. This
-dtype is applied to scales and computed zero points before GPTQ quantization.
-Storage estimates use it for scales and, with `--no-sym`, stored zero points.
-
-## Inspect outputs and storage
-
-| Format | Primary artifact | Metadata |
-| --- | --- | --- |
-| INT/codebook | Dense dequantized Hugging Face checkpoint | `metadata.json` |
-| S3D8 | Dense checkpoint and `gptq-s3d8.safetensors` | `metadata.json` |
-
-Inspect a storage estimate with:
-
-```sh
-jq .estimated_packed_storage \
-  out/gptq/llama-3.2-vision-local-gptq-int4-c4/metadata.json
-```
-
-For codebook formats, `effective_weight_bits` is the ideal information rate
-`log2(K)`. The storage metadata also reports a realizable byte-aligned radix
-packing. For example, `K=6` packs three indices per byte and reports `8/3`
-realizable weight bits. Full-model estimates include scales, stored zero points
-for asymmetric affine formats, group indices, per-tensor tail chunks, and
-unquantized tensors.
-
-The saved Hugging Face checkpoint contains dense dequantized weights. Use
-`estimated_packed_storage` to compare quantization formats independently of the
-dense checkpoint size.
+Use `--calibration-gpu-cache` when the captured activations fit on the
+quantization GPU. Otherwise, the flow streams activation caches through CPU
+memory.
 
 ## Evaluate a checkpoint
 
-Evaluate a dense checkpoint with `python -m gptq`:
+Evaluate a saved Hugging Face checkpoint:
 
 ```sh
 python -m gptq evaluate \
-  out/gptq/llama-3.2-vision-local-gptq-int4-c4 \
-  --output-dir out/gptq/llama-3.2-vision-local-gptq-int4-c4/evaluation
+  out/gptq/llama-3.2-vision-gptq-int4-c4 \
+  --output-dir out/gptq/llama-3.2-vision-gptq-int4-c4/evaluation
 ```
 
-Evaluation defaults:
+Evaluation defaults to:
 
-- Tasks: `vqa chartqa docvqa ai2d`
-- Examples per task: `1024`
-- Batch size: `1`
-- Device: `cuda`
-- VQAv2 source: Hugging Face
+- tasks: `vqa chartqa docvqa ai2d`;
+- 1024 examples per task;
+- batch size 1;
+- CUDA with BF16 activations;
+- the Hugging Face VQAv2 validation split.
 
-Evaluation writes:
+Evaluation writes `summary.json`, `summary.partial.json` while a run is in
+progress, and one JSONL file per task. Use `--tasks`, `--n-examples`,
+`--batch-size`, `--resume`, and `--overwrite` to control the run.
 
-- `summary.json`
-- `summary.partial.json` while a run is in progress
-- One streamed JSONL file per task, such as `vqa.jsonl`
+## Artifacts and storage
 
-Use `--tasks`, `--n-examples`, `--batch-size`, `--resume`, and `--overwrite` to
-control a run. Use `--torch-dtype` to select the evaluation dtype.
+| Artifact | Purpose |
+| --- | --- |
+| Hugging Face checkpoint | Dense BF16 values preserving quantization error; input to `python -m gptq evaluate` |
+| `metadata.json` | Quantization settings, module log, and packed-storage estimates |
+| `gptq-s3d8.safetensors` | S3D8 master and format tensors, including fitted scales and centroids |
+| `.sqt` | Packed deployment artifact produced separately by `squashedtensors.py` |
 
-## Command reference
-
-```sh
-python -m gptq quantize --help
-python -m gptq evaluate --help
-```
-
-## Run tests
-
-```sh
-pytest \
-  tests/test_gptq_algorithm.py \
-  tests/test_gptq_local.py
-```
+For codebook formats, `effective_weight_bits` is the ideal rate `log2(K)`.
