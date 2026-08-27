@@ -310,13 +310,13 @@ std::vector<uint> buildPromptTokens(const TextModel& model,
                                     bool hasImage) {
     std::vector<uint> tokens = {model.beginOfTextID};
     appendHeader(tokens, model, "user");
-    appendEncoded(tokens, model, prefix);
     if (hasImage) {
         if (!model.imageID) {
             throw std::runtime_error("Model supports vision but tokenizer has no image token ID");
         }
         tokens.push_back(*model.imageID);
     }
+    appendEncoded(tokens, model, prefix);
     tokens.push_back(model.eotID);
     appendHeader(tokens, model, "assistant");
     return tokens;

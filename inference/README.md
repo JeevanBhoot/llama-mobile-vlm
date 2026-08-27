@@ -58,6 +58,11 @@ echo "Describe this image." | ./dev run cli -- models/vision-11B-s3d8.sqt -g 64 
 See also `./dev run cli -- --help`. The CLI reads one prompt per input line. Use `--benchmark` to save per-step timings to `cli.benchmark.jsonl`.
 
 
+### One-tile limitation (VLM only)
+
+The C++ runtime resizes each image into a single vision tile and processes its 1,601 tokens directly. In contrast, the Hugging Face implementation (`transformers==4.50.3`) of the Llama VLM always processes 4 tiles, each padded to 1,608 tokens. Since these tiles aren't fully masked out from attention (active tiles can attend to patches in inactive tiles), the C++ output differs from the Hugging Face output. We cannot reconcile these differences without performing roughly 4× image prefill work, which is prohibitive on mobile devices.
+
+
 ## Benchmarks
 
 Build and run a model-shaped benchmark:
