@@ -2,16 +2,16 @@
 
 This directory provides a PyTorch GPTQ implementation for
 `meta-llama/Llama-3.2-11B-Vision-Instruct`. It can target every
-`Linear` weight matrix in the model, including vision encoders,
-multimodal projector, cross-attention, and `lm_head`. The implementation
-supports ordinary INT, codebook INT, and S3D8.
+`Linear` weight matrix in the model, including those in the vision encoders,
+multimodal projector, cross-attention layers, and `lm_head`. It supports
+ordinary INT, codebook INT, and S3D8.
 
-Saved Hugging Face checkpoints contain dense BF16 values that
-preserve quantization error, and evaluation uses BF16 activations.
+Saved Hugging Face checkpoints store dense BF16 weights that preserve the
+quantization error. Evaluation also uses BF16 activations.
 
 ## Setup
 
-Run from `training/``:
+Run from `training/`:
 
 ```sh
 source .venv/bin/activate
@@ -20,9 +20,9 @@ uv pip install -r requirements.txt --torch-backend cu130
 
 ## Quantize a model
 
-`python -m gptq quantize` runs GPTQ and saves the resulting dense BF16
-values as a Hugging Face checkpoint.
-`metadata.json` records the settings and estimated packed storage.
+`python -m gptq quantize` runs GPTQ and saves a Hugging Face checkpoint with
+the resulting dense BF16 weights. `metadata.json` records the settings and
+estimated packed storage.
 
 ### Weight formats
 
@@ -35,18 +35,19 @@ values as a Hugging Face checkpoint.
 
 The default is symmetric INT4 (`--format int --bits 4`).
 
-Ordinary INT selects a power-of-two number of levels with `--bits`. The
-codebook formats set the number of levels directly with `--codepoints K`, so
-they also support non-power-of-two sizes.
+Ordinary INT uses `--bits`, so its number of levels is a power of two. The
+codebook formats set the number of levels directly with `--codepoints K` and
+also support non-power-of-two sizes.
 
-`int-codebook` uses signed integer values with absmax scaling.
-`int-codebook-affine` stores unsigned indices and reconstructs them around a
-fixed zero point. For even `K`, affine scaling gives finer spacing near zero,
-while absmax scaling represents both `-absmax` and `+absmax` exactly.
+With `int-codebook`, codes represent signed integer values and use absmax
+scaling. `int-codebook-affine` stores unsigned codes and reconstructs them
+around a fixed zero point. For even `K`, affine scaling gives finer spacing
+near zero, while absmax scaling represents both `-absmax` and `+absmax`
+exactly.
 
 ### Text decoder quantization
 
-The default scope is `text-self`, which only quantizes the text decoder
+The default scope, `text-self`, quantizes only the text decoder
 (self-attention and MLP projections) using C4 calibration.
 
 Run ordinary INT4:
@@ -58,7 +59,7 @@ python -m gptq quantize \
   --output-dir out/gptq/llama-3.2-vision-gptq-int4-c4
 ```
 
-Quantize to an eight-level affine codebook with:
+To quantize to an eight-level affine codebook:
 
 ```sh
 python -m gptq quantize \
@@ -70,7 +71,7 @@ python -m gptq quantize \
 
 ### Full-multimodal quantization
 
-Set `--target-scope full-multimodal` to quantize all supported `Linear`
+With `--target-scope full-multimodal`, GPTQ quantizes all supported `Linear`
 matrices in the local and global vision encoders, multimodal projector, text
 self-attention, cross-attention, MLPs, and `lm_head`. This scope supports
 `vqav2`, `synthetic`, and `eval-task` calibration.
@@ -86,17 +87,17 @@ python -m gptq quantize \
   --output-dir out/gptq/llama-3.2-vision-gptq-s3d8-vqav2
 ```
 
-VQAv2 is also an evaluation task, so this example is best used to try the
-workflow. Use a separate image-text calibration set for independent
+VQAv2 is also an evaluation task, so this command is mainly useful for testing
+the workflow. Use a separate image-text calibration set for independent
 experiments.
 
-The original experiments used synthetic image-text data generated through the
-QAT data pipeline. It is not distributed with the repository, and the
-original data links in the [training README](../README.md) require project
-access. The generation logic is in [`train_data.py`](../train_data.py)
+The original experiments used synthetic image-text data from the QAT data
+pipeline. This dataset is not distributed with the repository, and the data
+links in the [training README](../README.md) require project access. The
+generation code is in [`train_data.py`](../train_data.py)
 (`GenerationConfig` and `generate_data`) and
-[`prompt_sampling.py`](../prompt_sampling.py). If you prepare compatible
-data, use `--calibration-source synthetic` and `--calibration-data-path`.
+[`prompt_sampling.py`](../prompt_sampling.py). To use compatible data, pass
+`--calibration-source synthetic` and `--calibration-data-path`.
 
 ### Common options
 
@@ -116,7 +117,7 @@ data, use `--calibration-source synthetic` and `--calibration-data-path`.
 | `--torch-dtype` | `bfloat16` | Model and saved-weight dtype |
 
 Use `--calibration-gpu-cache` when the captured activations fit on the
-quantization GPU. Otherwise, the flow streams activation caches through CPU
+quantization GPU. Otherwise, activation caches are streamed through CPU
 memory.
 
 ## Evaluate a checkpoint
@@ -129,7 +130,7 @@ python -m gptq evaluate \
   --output-dir out/gptq/llama-3.2-vision-gptq-int4-c4/evaluation
 ```
 
-Evaluation defaults to:
+By default, evaluation uses:
 
 - tasks: `vqa chartqa docvqa ai2d`;
 - 1024 examples per task;
@@ -138,8 +139,8 @@ Evaluation defaults to:
 - the Hugging Face VQAv2 validation split.
 
 Evaluation writes `summary.json`, `summary.partial.json` while a run is in
-progress, and one JSONL file per task. Use `--tasks`, `--n-examples`,
-`--batch-size`, `--resume`, and `--overwrite` to control the run.
+progress, and one JSONL file per task. Control the run with `--tasks`,
+`--n-examples`, `--batch-size`, `--resume`, and `--overwrite`.
 
 ## Artifacts and storage
 
