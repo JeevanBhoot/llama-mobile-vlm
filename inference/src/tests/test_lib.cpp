@@ -65,4 +65,11 @@ TEST_CASE("smallVLM", "[lib]") {
     auto image = Dummy::createImage(config.vision->dImage, 0x10203040);
 
     REQUIRE(generate(model, "_10_20_30", std::move(image), 5).starts_with("_10_20_30"));
+
+    Generator generator(model);
+    generator.prefill("_10_20_30", Dummy::createImage(config.vision->dImage, 0x10203040),
+                      Generator::Options::greedy(1));
+    const auto userHeaderTokens = 1u + model.textModel.tokenizer.encode("user").size() + 1u +
+                                  model.textModel.tokenizer.encode("\n\n").size();
+    REQUIRE(generator.crossAttentionStart == 1u + userHeaderTokens);
 }

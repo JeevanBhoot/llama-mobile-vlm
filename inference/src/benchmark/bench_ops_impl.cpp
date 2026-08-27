@@ -79,10 +79,18 @@ REGISTER_BENCHMARK(_memory_bandwidth)(const benchmarking::Report& report) {
 ///////////////////////////////////////////////////////////////////////////////
 // Dot product
 
+#if defined(__clang__) && (defined(__x86_64__) || defined(__i386__))
+#define SQUASH_BENCH_HAS_FLOAT_CONTROL 1
+#else
+#define SQUASH_BENCH_HAS_FLOAT_CONTROL 0
+#endif
+
 template <uint M, uint K, uint N, bool TransposeB, bool FastMath>
 __attribute__((noinline)) void dotProductImpl(const float* __restrict__ a,
                                               const float* __restrict__ b,
                                               float* __restrict__ out) {
+    static_assert(!FastMath || SQUASH_BENCH_HAS_FLOAT_CONTROL,
+                  "FastMath requires a supported float_control pragma");
     for (auto iM = 0u; iM < M; ++iM) {
         // #pragma unroll
         for (auto iN = 0u; iN < N; ++iN) {
@@ -91,7 +99,9 @@ __attribute__((noinline)) void dotProductImpl(const float* __restrict__ a,
                 auto aIdx = iM * K + iK;
                 auto bIdx = TransposeB ? (iN * K + iK) : (iK * N + iN);
                 if (FastMath) {
+#if SQUASH_BENCH_HAS_FLOAT_CONTROL
 #pragma float_control(precise, off)
+#endif
                     sum += a[aIdx] * b[bIdx];
                 } else {
                     sum += a[aIdx] * b[bIdx];
@@ -139,10 +149,16 @@ void runDotProduct(const benchmarking::Report& report) {
 
 REGISTER_BENCHMARK(_dot_product_small)(const benchmarking::Report& report) {
     runDotProduct<16, 16, 16, false, false>(report);
+#if SQUASH_BENCH_HAS_FLOAT_CONTROL
     runDotProduct<16, 16, 16, false, true>(report);
+#endif
     runDotProduct<16, 16, 16, true, false>(report);
+#if SQUASH_BENCH_HAS_FLOAT_CONTROL
     runDotProduct<16, 16, 16, true, true>(report);
+#endif
 }
+
+#undef SQUASH_BENCH_HAS_FLOAT_CONTROL
 
 ///////////////////////////////////////////////////////////////////////////////
 // Dot product instructions
@@ -199,6 +215,7 @@ REGISTER_BENCHMARK(_dot_inst_throughput)(const benchmarking::Report& report) {
                          }
                      }});
 
+#if defined(__ARM_FEATURE_BF16_VECTOR_ARITHMETIC)
     tests.push_back({"bfdot",
                      16 * 8,  // #instructions * 16 MACs per bfdot (4*1x2x1)
                      [innerReps]() {
@@ -260,7 +277,9 @@ REGISTER_BENCHMARK(_dot_inst_throughput)(const benchmarking::Report& report) {
                                    "v10", "v11", "v12", "v13", "v14", "v15", "v30", "v31");
                          }
                      }});
+#endif
 
+#if defined(__ARM_FEATURE_DOTPROD)
     tests.push_back({"sdot",
                      16 * 16,  // #instructions * 16 MACs per sdot (4*1x4x1)
                      [innerReps]() {
@@ -291,7 +310,9 @@ REGISTER_BENCHMARK(_dot_inst_throughput)(const benchmarking::Report& report) {
                                    "v10", "v11", "v12", "v13", "v14", "v15", "v30", "v31");
                          }
                      }});
+#endif
 
+#if defined(__ARM_FEATURE_MATMUL_INT8)
     tests.push_back({"smmla",
                      16 * 32,  // #instructions * 32 MACs per smmla (1*2x8x2)
                      [innerReps]() {
@@ -322,6 +343,7 @@ REGISTER_BENCHMARK(_dot_inst_throughput)(const benchmarking::Report& report) {
                                    "v10", "v11", "v12", "v13", "v14", "v15", "v30", "v31");
                          }
                      }});
+#endif
 
     for (auto& test : tests) {
         for (auto threads : nthreadsRange) {
