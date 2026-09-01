@@ -1,4 +1,19 @@
-# Copyright (c) 2026 Graphcore Ltd. All rights reserved.
+# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-FileCopyrightText: Copyright 2026 Arm Limited and/or its affiliates <open-source-office@arm.com>
+# SPDX-License-Identifier: Apache-2.0
+#
+# Derived from GPTQModel 7.2.0
+# https://github.com/ModelCloud/GPTQModel
+#
+# GPTQModel's GPTQ implementation is based on the original GPTQ code:
+# https://github.com/IST-DASLab/gptq
+#
+# Group-Aware Reordering follows the method by T. Gafni, A. Karnieli, and
+# Y. Hanani, "Dual Precision Quantization for Efficient and Accurate Deep
+# Neural Networks Inference," CVPRW 2025, arXiv:2505.14638.
+#
+# Modified by Arm Limited in 2026.
 
 """Local GPTQ implementation for readable PTQ experiments."""
 
