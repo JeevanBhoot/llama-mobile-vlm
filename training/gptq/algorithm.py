@@ -9,11 +9,7 @@
 # GPTQModel's GPTQ implementation is based on the original GPTQ code:
 # https://github.com/IST-DASLab/gptq
 #
-# Group-Aware Reordering follows the method by T. Gafni, A. Karnieli, and
-# Y. Hanani, "Dual Precision Quantization for Efficient and Accurate Deep
-# Neural Networks Inference," CVPRW 2025, arXiv:2505.14638.
-#
-# Modified by Arm Limited in 2026.
+# Modified by Arm in 2026.
 
 """Local GPTQ implementation for readable PTQ experiments."""
 

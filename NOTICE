@@ -16,7 +16,3 @@ training/gptq/algorithm.py was modified by Arm Limited in 2026.
 GPTQModel's GPTQ implementation is based on the original GPTQ implementation:
 https://github.com/IST-DASLab/gptq
 The original GPTQ implementation is licensed under the Apache License 2.0.
-
-The Group-Aware Reordering code follows GPTQModel's Apache-2.0 implementation
-of the method by T. Gafni, A. Karnieli, and Y. Hanani:
-https://arxiv.org/abs/2505.14638
