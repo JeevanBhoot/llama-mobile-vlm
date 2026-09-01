@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Graphcore Ltd. All rights reserved.
+# SPDX-FileCopyrightText: Copyright 2026 Arm Limited and/or its affiliates <open-source-office@arm.com>
+# SPDX-License-Identifier: MIT
 
 """Shared quantisation formats and checkpoint helpers."""
 
