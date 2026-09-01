@@ -11,7 +11,7 @@
 #
 # Modified by Arm in 2026.
 
-"""Local GPTQ implementation for readable PTQ experiments."""
+"""Local GPTQ implementation."""
 
 import math
 import time
