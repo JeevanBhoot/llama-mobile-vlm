@@ -11,7 +11,7 @@ Copyright 2024-2025 qubitium@modelcloud.ai
 
 GPTQModel and the derived portions of training/gptq/algorithm.py are licensed
 under the Apache License 2.0. See LICENSES/Apache-2.0.txt.
-training/gptq/algorithm.py was modified by Arm Limited in 2026.
+training/gptq/algorithm.py was modified by Arm in 2026.
 
 GPTQModel's GPTQ implementation is based on the original GPTQ implementation:
 https://github.com/IST-DASLab/gptq
