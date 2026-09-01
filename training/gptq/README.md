@@ -20,9 +20,8 @@ uv pip install -r requirements.txt --torch-backend cu130
 
 ## Quantize a model
 
-`python -m gptq quantize` runs GPTQ and saves a Hugging Face checkpoint with
-the resulting dense BF16 weights. `metadata.json` records the settings and
-estimated packed storage.
+`python -m gptq quantize` runs GPTQ and saves a Hugging Face checkpoint.
+`metadata.json` records the settings and estimated packed storage.
 
 ### Weight formats
 
@@ -122,7 +121,7 @@ memory.
 
 ## Evaluate a checkpoint
 
-Evaluate a saved Hugging Face checkpoint:
+Evaluate a GPTQ checkpoint:
 
 ```sh
 python -m gptq evaluate \
