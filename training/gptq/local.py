@@ -19,7 +19,6 @@ import safetensors.torch
 import torch
 import torch.nn.functional as F
 import transformers
-from transformers.masking_utils import create_causal_mask
 import weight_formats.quantisation as Q
 import weight_formats.quantisation_training as QT
 
@@ -423,7 +422,7 @@ def _mllama_first_layer_kwargs(
     kwargs = {
         "attention_mask": _prepare_first_layer_attention_mask(attention_mask),
         "position_ids": position_ids,
-        "past_key_values": past_key_values,
+        "past_key_value": past_key_values,
         "use_cache": use_cache,
         "position_embeddings": position_embeddings,
     }
@@ -1002,14 +1001,20 @@ def _prepare_causal_mask(
     inputs_embeds: torch.Tensor,
     attention_mask: torch.Tensor | None,
     past_key_values: Any,
-    position_ids: torch.Tensor,
 ) -> Any:
-    return create_causal_mask(
-        config=language_model.config,
-        inputs_embeds=inputs_embeds,
-        attention_mask=attention_mask,
-        past_key_values=past_key_values,
-        position_ids=position_ids,
+    past_seen_tokens = (
+        past_key_values.get_seq_length() if past_key_values is not None else 0
+    )
+    cache_position = torch.arange(
+        past_seen_tokens,
+        past_seen_tokens + inputs_embeds.shape[1],
+        device=inputs_embeds.device,
+    )
+    return language_model._update_causal_mask(
+        attention_mask,
+        inputs_embeds,
+        cache_position,
+        past_key_values,
     )
 
 
@@ -1389,7 +1394,6 @@ def collect_multimodal_text_first_layer_inputs(
                 inputs_embeds,
                 attention_mask,
                 past_key_values,
-                position_ids,
             )
             position_embeddings = language_model.rotary_emb(
                 inputs_embeds,
@@ -1440,7 +1444,7 @@ def collect_multimodal_text_first_layer_inputs(
                         storage_device,
                     ),
                     "position_ids": _detach_to_device(position_ids, storage_device),
-                    "past_key_values": past_key_values,
+                    "past_key_value": past_key_values,
                     "use_cache": use_cache,
                     "position_embeddings": _detach_to_device(
                         position_embeddings,

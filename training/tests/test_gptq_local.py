@@ -17,6 +17,8 @@ import weight_formats.quantisation_training as QT
 from transformers import (
     MllamaConfig,
     MllamaForConditionalGeneration,
+)
+from transformers.models.mllama.configuration_mllama import (
     MllamaTextConfig,
     MllamaVisionConfig,
 )
@@ -47,6 +49,7 @@ def tiny_mllama() -> MllamaForConditionalGeneration:
         num_key_value_heads=2,
         intermediate_size=16,
         max_position_embeddings=16,
+        rope_scaling={"rope_type": "default"},
         cross_attention_layers=[1],
         bos_token_id=1,
         eos_token_id=2,
@@ -64,7 +67,7 @@ class DummyProcessor:
     tokenizer = object()
 
     def save_pretrained(self, output_dir: Path) -> None:
-        Path(output_dir, "processor_config.json").write_text("{}")
+        Path(output_dir, "preprocessor_config.json").write_text("{}")
 
 
 def multimodal_batch() -> dict[str, torch.Tensor]:

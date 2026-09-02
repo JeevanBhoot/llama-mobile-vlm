@@ -35,7 +35,7 @@ echo "export PYTHONPATH=\${PYTHONPATH}:\$(dirname \${VIRTUAL_ENV})" >> .venv/bin
 echo "export TOKENIZERS_PARALLELISM=true" >> .venv/bin/activate
 
 source .venv/bin/activate
-uv pip install -r requirements.txt --torch-backend cu130
+uv pip install -r requirements.txt --torch-backend cu128
 
 uv run pytest tests/
 ```
