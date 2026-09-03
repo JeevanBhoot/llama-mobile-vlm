@@ -21,7 +21,6 @@ uv pip install -r requirements.txt --torch-backend cu128
 ## Quantize a model
 
 `python -m gptq quantize` runs GPTQ and saves a Hugging Face checkpoint.
-`metadata.json` records the settings and estimated packed storage.
 
 ### Weight formats
 
@@ -75,7 +74,7 @@ matrices in the local and global vision encoders, multimodal projector, text
 self-attention, cross-attention, MLPs, and `lm_head`. This scope supports
 `vqav2`, `synthetic`, and `eval-task` calibration.
 
-Run S3D8 with VQAv2 training data from Hugging Face:
+Run GPTQ-S3D8 with VQAv2 training data for calibration:
 
 ```sh
 python -m gptq quantize \
@@ -86,7 +85,7 @@ python -m gptq quantize \
   --output-dir out/gptq/llama-3.2-vision-gptq-s3d8-vqav2
 ```
 
-VQAv2 is also an evaluation task, so this command is mainly useful for testing
+VQAv2 (val subset) is also an evaluation task, so this command is mainly useful for testing
 the workflow. Use a separate image-text calibration set for independent
 experiments.
 
@@ -135,7 +134,6 @@ By default, evaluation uses:
 - 1024 examples per task;
 - batch size 1;
 - CUDA with BF16 activations;
-- the Hugging Face VQAv2 validation split.
 
 Evaluation writes `summary.json`, `summary.partial.json` while a run is in
 progress, and one JSONL file per task. Control the run with `--tasks`,
