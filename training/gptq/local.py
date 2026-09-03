@@ -372,17 +372,6 @@ def mllama_lm_head(model: torch.nn.Module) -> tuple[str, torch.nn.Linear]:
     raise AttributeError("Unable to resolve Mllama lm_head Linear")
 
 
-def _prepare_first_layer_attention_mask(attention_mask: Any) -> Any:
-    if attention_mask is None or not torch.is_tensor(attention_mask):
-        return attention_mask
-    if (
-        attention_mask.ndim <= 2
-        and bool(attention_mask.to(dtype=torch.bool).all().item())
-    ):
-        return None
-    return attention_mask
-
-
 def _mllama_first_layer_kwargs(
     language_model: torch.nn.Module,
     batch: dict[str, Any],
@@ -420,7 +409,12 @@ def _mllama_first_layer_kwargs(
     )
 
     kwargs = {
-        "attention_mask": _prepare_first_layer_attention_mask(attention_mask),
+        "attention_mask": _prepare_causal_mask(
+            language_model,
+            inputs_embeds,
+            attention_mask,
+            past_key_values,
+        ),
         "position_ids": position_ids,
         "past_key_value": past_key_values,
         "use_cache": use_cache,

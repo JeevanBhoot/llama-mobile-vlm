@@ -81,6 +81,29 @@ def multimodal_batch() -> dict[str, torch.Tensor]:
     }
 
 
+def test_text_calibration_prepares_padded_causal_mask() -> None:
+    model = tiny_mllama()
+    text_stack = local.mllama_text_layers(model)
+    batch = {
+        "input_ids": torch.tensor([[1, 2, 0], [1, 2, 3]]),
+        "attention_mask": torch.tensor([[1, 1, 0], [1, 1, 1]]),
+    }
+
+    inputs = local.collect_first_layer_inputs(text_stack, [batch], device="cpu")
+
+    attention_mask = inputs.kwargs[0]["attention_mask"]
+    assert attention_mask.shape == (2, 1, 3, 3)
+    assert attention_mask[1, 0, 0, 1] == torch.finfo(attention_mask.dtype).min
+    with torch.inference_mode():
+        output = local._run_layer(
+            text_stack.layers[0],
+            inputs.args[0],
+            inputs.kwargs[0],
+            device="cpu",
+        )
+    assert output[0].shape == (2, 3, 8)
+
+
 def test_module_cli_appendix_defaults(monkeypatch) -> None:
     captured = {}
 
